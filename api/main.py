@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -28,7 +29,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://competeiq-frontend-production.up.railway.app",
+        "https://competeiq-frontend.onrender.com",
         "http://localhost:3000",
     ],
     allow_credentials=True,

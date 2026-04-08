@@ -192,7 +192,7 @@ async def scrape_and_notify(competitor_id: str, handle: str, from_: str) -> None
             if new_ad_ids:
                 await process_ads_batch(db, new_ad_ids)
 
-            frontend_url = "https://compete-iq-production.up.railway.app"
+            frontend_url = "https://competeiq-frontend.onrender.com"
             twilio_client.send_message(
                 from_,
                 f"Found {len(ads)} ads ({len(new_ad_ids)} new). Done!\n"
