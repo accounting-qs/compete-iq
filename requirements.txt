@@ -1,0 +1,35 @@
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+
+# Database
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+
+# Config
+pydantic-settings==2.6.1
+
+# HTTP client
+httpx==0.28.1
+
+# Anthropic (Claude)
+anthropic==0.40.0
+
+# Deepgram
+deepgram-sdk==3.7.7
+
+# Twilio
+twilio==9.3.8
+
+# Cloudflare R2 (S3-compatible)
+boto3==1.35.74
+
+# Video frame extraction
+imageio-ffmpeg==0.5.1
+
+# Scheduling
+apscheduler==3.10.4
+
+# Utilities
+python-multipart==0.0.20
