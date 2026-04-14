@@ -485,7 +485,10 @@ export function PlanningPage() {
 
     const volume = Math.min(assignVolume, bucket.remaining_contacts);
     const sendPerAcct = assignSendPerAcct > 0 ? assignSendPerAcct : sender.sendPerAccount;
-    const accts = assignAccounts > 0 ? assignAccounts : Math.ceil(volume / (sendPerAcct * assignDays));
+    const calculatedAccts = sendPerAcct > 0 && assignDays > 0
+      ? Math.ceil(volume / (sendPerAcct * assignDays))
+      : 0;
+    const accts = assignAccounts > 0 ? assignAccounts : calculatedAccts;
 
     const countries = assignCountries || (bucket.countries || []).join(", ");
     const empRange = assignEmpRange || bucket.emp_range || "";
@@ -710,19 +713,19 @@ export function PlanningPage() {
           </button>
         </div>
         {!editingSenders ? (
-          <div className="flex items-center gap-4 mt-1">
+          <div className="flex items-center gap-4 mt-1 overflow-x-auto">
             {senders.map((s) => (
-              <div key={s.id} className="flex items-center gap-1.5">
+              <div key={s.id} className="flex items-center gap-1.5 shrink-0">
                 <SenderBadge name={s.name} color={s.color} />
-                <span className="text-[10px] text-zinc-500 font-mono">{s.accounts} accts · {s.sendPerAccount}/acct · {s.daysPerWeek}d/webinar</span>
-                <span className="text-[10px] text-zinc-600 font-mono">= {(s.accounts * s.sendPerAccount).toLocaleString()}/d</span>
+                <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">{s.accounts} accts · {s.sendPerAccount}/acct · {s.daysPerWeek}d/webinar</span>
+                <span className="text-[10px] text-zinc-600 font-mono whitespace-nowrap">= {(s.accounts * s.sendPerAccount).toLocaleString()}/d</span>
               </div>
             ))}
           </div>
         ) : (
-          <div className="flex items-center gap-5 mt-2">
+          <div className="flex items-center gap-5 mt-2 overflow-x-auto">
             {senders.map((s) => (
-              <div key={s.id} className="flex items-center gap-2 bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800/40 rounded-lg px-3 py-2">
+              <div key={s.id} className="flex items-center gap-2 bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800/40 rounded-lg px-3 py-2 shrink-0">
                 <input
                   type="text"
                   defaultValue={s.name}
@@ -908,11 +911,22 @@ export function PlanningPage() {
                                   setAssignBucket(val);
                                   const b = buckets.find((b) => b.id === val);
                                   if (b) {
-                                    setAssignVolume(b.remaining_contacts);
+                                    let vol = b.remaining_contacts;
                                     setAssignCountries((b.countries || []).join(", "));
                                     setAssignEmpRange(b.emp_range || "");
                                     setAssignAccounts(0);
-                                    setAssignDays(5);
+                                    // If sender already selected, cap volume to what available accounts can handle
+                                    if (assignSender) {
+                                      const s = senders.find((s) => s.id === assignSender);
+                                      if (s) {
+                                        const spa = assignSendPerAcct > 0 ? assignSendPerAcct : s.sendPerAccount;
+                                        const d = assignDays > 0 ? assignDays : s.daysPerWeek;
+                                        const avail = getAvailableAccounts(w.id, assignSender);
+                                        const maxVol = avail * spa * d;
+                                        if (vol > maxVol && maxVol > 0) vol = maxVol;
+                                      }
+                                    }
+                                    setAssignVolume(vol);
                                   }
                                 }}
                                 options={buckets.filter((b) => b.remaining_contacts > 0).map((b) => ({
@@ -928,9 +942,19 @@ export function PlanningPage() {
                                 value={assignSender}
                                 onChange={(val) => {
                                   setAssignSender(val);
-                                  // Auto-set accounts to remaining available
-                                  const avail = getAvailableAccounts(w.id, val);
-                                  setAssignAccounts(0); // reset to use available
+                                  const s = senders.find((s) => s.id === val);
+                                  if (s) {
+                                    // Prefill send/acct and days from sender defaults
+                                    setAssignSendPerAcct(s.sendPerAccount);
+                                    setAssignDays(s.daysPerWeek);
+                                    setAssignAccounts(0);
+                                    // Cap volume if available accounts can't handle the full bucket
+                                    const avail = getAvailableAccounts(w.id, val);
+                                    const maxVol = avail * s.sendPerAccount * s.daysPerWeek;
+                                    if (assignVolume > maxVol && maxVol > 0) {
+                                      setAssignVolume(maxVol);
+                                    }
+                                  }
                                 }}
                                 options={senders.map((s) => {
                                   const used = getAccountsUsedForSender(w.id, s.id);
@@ -942,9 +966,9 @@ export function PlanningPage() {
                                 })}
                               />
                             </div>
-                            <div className="w-28">
-                              <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Volume</label>
-                              <input type="number" value={assignVolume || ""} onChange={(e) => setAssignVolume(parseInt(e.target.value) || 0)} className="w-full bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-md px-3 py-1.5 text-sm text-zinc-800 dark:text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-violet-500" />
+                            <div className="w-32">
+                              <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Contacts</label>
+                              <input type="number" value={assignVolume || ""} onChange={(e) => { setAssignVolume(parseInt(e.target.value) || 0); setAssignAccounts(0); }} className="w-full bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-md px-3 py-1.5 text-sm text-zinc-800 dark:text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-violet-500" />
                             </div>
                             <button onClick={handleAssign} disabled={!assignBucket || !assignSender || assignVolume <= 0}
                               className="px-4 py-1.5 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-200 dark:bg-zinc-700 disabled:text-zinc-500 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap">
@@ -958,15 +982,18 @@ export function PlanningPage() {
                             if (!s) return null;
                             const usedAccts = getAccountsUsedForSender(w.id, s.id);
                             const availAccts = Math.max(0, s.accounts - usedAccts);
-                            const accts = assignAccounts > 0 ? assignAccounts : availAccts;
                             const sendPerAcct = assignSendPerAcct > 0 ? assignSendPerAcct : s.sendPerAccount;
+                            // Accounts needed = ceil(volume / (send_per_acct × days))
+                            const calculatedAccts = sendPerAcct > 0 && assignDays > 0
+                              ? Math.ceil(assignVolume / (sendPerAcct * assignDays))
+                              : 0;
+                            const accts = assignAccounts > 0 ? assignAccounts : calculatedAccts;
                             const dailyCap = accts * sendPerAcct;
-                            const totalPerWebinar = dailyCap * assignDays;
-                            const sendingDays = dailyCap > 0 ? Math.ceil(assignVolume / dailyCap) : 0;
+                            const totalCapacity = dailyCap * assignDays;
                             const overAllocated = accts > availAccts;
                             return (
                               <div className="space-y-2 mb-4">
-                                {/* Account availability indicator */}
+                                {/* Sender info + account availability */}
                                 <div className="flex items-center gap-3">
                                   <div className="flex items-center gap-2">
                                     <SenderBadge name={s.name} color={s.color} />
@@ -994,37 +1021,41 @@ export function PlanningPage() {
                                   </div>
                                 </div>
 
-                                {/* Sending config */}
+                                {/* Sending calculation: volume ÷ send/acct ÷ days = accounts needed */}
                                 <div className="flex items-center gap-3">
                                   <div className="flex items-center gap-2 bg-zinc-100 dark:bg-zinc-800/40 border border-zinc-300 dark:border-zinc-700/30 rounded-lg px-3 py-2">
                                     <div className="flex items-center gap-1.5">
-                                      <div className="flex flex-col items-center">
-                                        <span className="text-[8px] text-zinc-600 uppercase">Accts</span>
-                                        <input type="number" value={accts} onChange={(e) => setAssignAccounts(parseInt(e.target.value) || 0)}
-                                          className={`w-12 bg-zinc-100 dark:bg-zinc-800 border rounded px-1.5 py-0.5 text-[11px] font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500 ${
-                                            overAllocated ? 'border-red-400 text-red-400' : 'border-zinc-300 dark:border-zinc-700/60 text-zinc-800 dark:text-zinc-200'
-                                          }`} />
-                                      </div>
-                                      <span className="text-zinc-600 text-[10px]">×</span>
+                                      <span className="text-[11px] text-violet-400 font-mono font-bold">{assignVolume.toLocaleString()}</span>
+                                      <span className="text-[9px] text-zinc-500 uppercase">contacts</span>
+                                      <span className="text-zinc-600 text-[10px]">÷</span>
                                       <div className="flex flex-col items-center">
                                         <span className="text-[8px] text-zinc-600 uppercase">Send/Acct</span>
-                                        <input type="number" value={sendPerAcct} onChange={(e) => setAssignSendPerAcct(parseInt(e.target.value) || 0)}
-                                          className="w-12 bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-1.5 py-0.5 text-[11px] text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
+                                        <input type="number" value={sendPerAcct} onChange={(e) => { setAssignSendPerAcct(parseInt(e.target.value) || 0); setAssignAccounts(0); }}
+                                          className="w-14 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-1.5 py-0.5 text-[11px] text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
                                       </div>
-                                      <span className="text-zinc-600 text-[10px]">=</span>
-                                      <span className="text-[11px] text-violet-400 font-mono font-bold">{dailyCap.toLocaleString()}/d</span>
-                                      <span className="text-zinc-600 text-[10px]">×</span>
+                                      <span className="text-zinc-600 text-[10px]">÷</span>
                                       <div className="flex flex-col items-center">
                                         <span className="text-[8px] text-zinc-600 uppercase">Days/Web</span>
-                                        <input type="number" value={assignDays} onChange={(e) => setAssignDays(parseInt(e.target.value) || 5)}
-                                          className="w-12 bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-1.5 py-0.5 text-[11px] text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
+                                        <input type="number" value={assignDays} onChange={(e) => { setAssignDays(parseInt(e.target.value) || 5); setAssignAccounts(0); }}
+                                          className="w-14 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-1.5 py-0.5 text-[11px] text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
                                       </div>
                                       <span className="text-zinc-600 text-[10px]">=</span>
-                                      <span className="text-[11px] text-violet-400 font-mono font-bold">{totalPerWebinar.toLocaleString()}/web</span>
+                                      <div className="flex flex-col items-center">
+                                        <span className="text-[8px] text-zinc-600 uppercase">Accts needed</span>
+                                        <input type="number" value={accts} onChange={(e) => setAssignAccounts(parseInt(e.target.value) || 0)}
+                                          className={`w-14 bg-white dark:bg-zinc-800 border rounded px-1.5 py-0.5 text-[11px] font-mono text-center font-bold focus:outline-none focus:ring-1 focus:ring-violet-500 ${
+                                            overAllocated ? 'border-red-400 text-red-400' : 'border-zinc-300 dark:border-zinc-700/60 text-emerald-500 dark:text-emerald-400'
+                                          }`} />
+                                      </div>
                                     </div>
                                   </div>
                                   <div className="flex flex-col gap-0.5">
-                                    <span className="text-[10px] text-zinc-500">≈ {sendingDays} sending day{sendingDays !== 1 ? 's' : ''} to send {assignVolume.toLocaleString()} contacts</span>
+                                    <span className="text-[10px] text-zinc-500">
+                                      {accts} accts × {sendPerAcct}/acct × {assignDays}d = <span className="text-violet-400 font-bold">{totalCapacity.toLocaleString()}</span> capacity
+                                      {totalCapacity > 0 && assignVolume > 0 && totalCapacity !== assignVolume && (
+                                        <span className="text-zinc-600"> · {totalCapacity > assignVolume ? `${(totalCapacity - assignVolume).toLocaleString()} headroom` : `${(assignVolume - totalCapacity).toLocaleString()} over`}</span>
+                                      )}
+                                    </span>
                                     {overAllocated && (
                                       <span className="text-[10px] text-red-400 font-medium">⚠ Exceeds available accounts by {accts - availAccts}</span>
                                     )}
@@ -1048,7 +1079,25 @@ export function PlanningPage() {
                               </thead>
                               <tbody className="divide-y divide-zinc-800/20">
                                 {buckets.filter((b) => b.remaining_contacts > 0).map((b) => (
-                                  <tr key={b.id} onClick={() => { setAssignBucket(b.id); setAssignVolume(b.remaining_contacts); setAssignCountries((b.countries || []).join(", ")); setAssignEmpRange(b.emp_range || ""); setAssignAccounts(0); setAssignDays(5); }}
+                                  <tr key={b.id} onClick={() => {
+                                    setAssignBucket(b.id);
+                                    setAssignCountries((b.countries || []).join(", "));
+                                    setAssignEmpRange(b.emp_range || "");
+                                    setAssignAccounts(0);
+                                    // Cap volume to what available accounts can handle
+                                    let vol = b.remaining_contacts;
+                                    if (assignSender) {
+                                      const s = senders.find((s) => s.id === assignSender);
+                                      if (s) {
+                                        const spa = assignSendPerAcct > 0 ? assignSendPerAcct : s.sendPerAccount;
+                                        const d = assignDays > 0 ? assignDays : s.daysPerWeek;
+                                        const avail = getAvailableAccounts(w.id, assignSender);
+                                        const maxVol = avail * spa * d;
+                                        if (vol > maxVol && maxVol > 0) vol = maxVol;
+                                      }
+                                    }
+                                    setAssignVolume(vol);
+                                  }}
                                     className={`cursor-pointer transition-colors ${assignBucket === b.id ? "bg-violet-500/10" : "hover:bg-zinc-200 dark:hover:bg-zinc-800/30"}`}>
                                     <td className="px-3 py-1.5 text-zinc-800 dark:text-zinc-300 font-medium">{b.name}</td>
                                     <td className="px-3 py-1.5 text-right font-mono text-zinc-600 dark:text-zinc-400">{b.total_contacts.toLocaleString()}</td>

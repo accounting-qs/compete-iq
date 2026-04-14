@@ -773,7 +773,7 @@ export function UploadPage() {
               {/* Stats grid */}
               {(() => {
                 const s = detailStatus || selectedUpload;
-                const totalRows = s.total_contacts || (detailStatus?.total_rows ?? 0);
+                const totalRows = ("total_contacts" in s ? s.total_contacts : 0) || (detailStatus?.total_rows ?? 0);
                 const stats = [
                   { label: "Total Rows", value: formatNumber(totalRows), color: "var(--foreground)", icon: "📊" },
                   { label: "Processed", value: formatNumber(s.processed_rows), color: "#3b82f6", icon: "⚙️" },
