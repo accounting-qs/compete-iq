@@ -1,7 +1,7 @@
 """Upload and contact models: UploadHistory, ContactCustomField, Contact."""
 
 from db.models._common import (
-    Base, Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index,
+    Base, Boolean, CheckConstraint, Date, DateTime, Float, ForeignKey, Index,
     Integer, JSONB, Mapped, Optional, String, Text, UUID, UniqueConstraint,
     datetime, func, gen_uuid, mapped_column, relationship,
 )
@@ -64,6 +64,8 @@ class Contact(Base):
     upload_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("upload_history.id", ondelete="SET NULL"))
     bucket_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("outreach_buckets.id", ondelete="SET NULL"))
     assignment_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("webinar_list_assignments.id", ondelete="SET NULL"))
+    outreach_status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="available")
+    assigned_date: Mapped[Optional[datetime]] = mapped_column(Date)
 
     # Core identity
     contact_id: Mapped[Optional[str]] = mapped_column(Text)
@@ -103,10 +105,12 @@ class Contact(Base):
 
     __table_args__ = (
         UniqueConstraint("user_id", "email", name="uq_contacts_user_email"),
+        CheckConstraint("outreach_status IN ('available', 'assigned', 'used')", name="ck_contacts_outreach_status"),
         Index("ix_contacts_user_id", "user_id"),
         Index("ix_contacts_bucket_id", "bucket_id"),
         Index("ix_contacts_upload_id", "upload_id"),
         Index("ix_contacts_email", "user_id", "email"),
         Index("ix_contacts_assignment_id", "assignment_id"),
         Index("ix_contacts_bucket_unassigned", "bucket_id", "assignment_id"),
+        Index("ix_contacts_outreach_status", "bucket_id", "outreach_status"),
     )

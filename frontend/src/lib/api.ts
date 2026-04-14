@@ -375,7 +375,7 @@ export async function assignBucketToWebinar(
 
 export async function updateAssignment(
   assignmentId: string,
-  data: Partial<{ title_copy_id: string; desc_copy_id: string; accounts_used: number; volume: number; remaining: number }>
+  data: Partial<{ title_copy_id: string; desc_copy_id: string; accounts_used: number; volume: number; remaining: number; list_url: string; gcal_invited: number }>
 ): Promise<ApiAssignment> {
   const res = await fetch(`${API_URL}/outreach/assignments/${assignmentId}`, {
     method: "PUT",

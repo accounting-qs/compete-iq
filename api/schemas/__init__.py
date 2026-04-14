@@ -90,6 +90,8 @@ class AssignmentUpdate(BaseModel):
     accounts_used: int | None = None
     volume: int | None = None
     remaining: int | None = None
+    list_url: str | None = None
+    gcal_invited: int | None = None
 
 
 # ── Uploads ────────────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ import {
   assignBucketToWebinar, createWebinar as apiCreateWebinar,
   updateSender as apiUpdateSender, fetchBucketCopies, generateCopies,
   createSender as apiCreateSender, deleteAssignment as apiDeleteAssignment,
+  updateAssignment as apiUpdateAssignment, updateWebinar as apiUpdateWebinar,
   type ApiBucket, type ApiSender, type ApiWebinar, type ApiAssignment, type ApiCopy,
 } from "@/lib/api";
 
@@ -21,11 +22,9 @@ interface PlannedList {
   description: string;
   listUrl: string;
   sender: string;
-  dateSend: string;
   listSize: number;
   listRemain: number;
   gcalInvited: number;
-  descVariant: string;
   title: string;
   accountsNeeded: number;
   industry: string;
@@ -135,11 +134,9 @@ function apiAssignmentToList(a: ApiAssignment): PlannedList {
     listUrl: a.list_url || "",
     sender: a.sender?.name || "",
     senderColor: a.sender?.color || undefined,
-    dateSend: "",
     listSize: a.volume,
     listRemain: a.remaining,
     gcalInvited: a.gcal_invited,
-    descVariant: "",
     title: a.title_copy?.text || "",
     accountsNeeded: a.accounts_used,
     industry: a.bucket?.industry || "",
@@ -469,6 +466,22 @@ export function PlanningPage() {
     }
   };
 
+  const handleUpdateWebinar = async (webinarId: string, field: "main_title" | "broadcast_id" | "status", value: string) => {
+    // Optimistic update
+    setWebinars((prev) => prev.map((w) => {
+      if (w.id !== webinarId) return w;
+      if (field === "main_title") return { ...w, mainTitle: value };
+      if (field === "broadcast_id") return { ...w, broadcastId: value || "—" };
+      if (field === "status") return { ...w, status: value.charAt(0).toUpperCase() + value.slice(1) };
+      return w;
+    }));
+    try {
+      await apiUpdateWebinar(webinarId, { [field]: value });
+    } catch (err) {
+      console.error("Failed to update webinar:", err);
+    }
+  };
+
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -490,8 +503,9 @@ export function PlanningPage() {
     });
   };
 
-  const handleAssign = useCallback(async () => {
-    if (!assignBucket || !assignSender || assignVolume <= 0 || !assigningWebinarId) return;
+  const handleAssign = useCallback(async (webinarIdOverride?: string) => {
+    const targetId = webinarIdOverride || assigningWebinarId;
+    if (!assignBucket || !assignSender || assignVolume <= 0 || !targetId) return;
     const bucket = buckets.find((b) => b.id === assignBucket);
     const sender = senders.find((s) => s.id === assignSender);
     if (!bucket || !sender) return;
@@ -506,9 +520,8 @@ export function PlanningPage() {
     const countries = assignCountries || (bucket.countries || []).join(", ");
     const empRange = assignEmpRange || bucket.emp_range || "";
 
-    const targetWebinarId = assigningWebinarId;
     try {
-      const assignment = await assignBucketToWebinar(targetWebinarId, {
+      const assignment = await assignBucketToWebinar(targetId, {
         bucket_id: assignBucket,
         sender_id: assignSender,
         volume,
@@ -522,7 +535,7 @@ export function PlanningPage() {
       // Add to webinar in local state
       const newList = apiAssignmentToList(assignment);
       setWebinars((prev) => prev.map((w) =>
-        w.id === targetWebinarId ? { ...w, lists: [...w.lists, newList] } : w
+        w.id === targetId ? { ...w, lists: [...w.lists, newList] } : w
       ));
 
       // Decrease bucket remaining
@@ -618,6 +631,22 @@ export function PlanningPage() {
         lists: w.lists.map((l) => (copyModalLists.some((ml) => ml.id === l.id) ? updateList(l) : l)),
       })));
       setCopyModalLists((prev) => prev.map(updateList));
+
+      // Persist primary copy IDs to each affected assignment
+      await Promise.all(copyModalLists.map(async (l) => {
+        if (!l.bucketId || !bucketCopiesMap[l.bucketId]) return;
+        const copies = bucketCopiesMap[l.bucketId];
+        const primaryTitle = copies.titles.find((c) => c.is_primary);
+        const primaryDesc = copies.descriptions.find((c) => c.is_primary);
+        const payload: Record<string, string> = {};
+        if (primaryTitle) payload.title_copy_id = primaryTitle.id;
+        if (primaryDesc) payload.desc_copy_id = primaryDesc.id;
+        if (Object.keys(payload).length > 0) {
+          await apiUpdateAssignment(l.id, payload).catch((err) =>
+            console.error(`Failed to save copies for assignment ${l.id}:`, err)
+          );
+        }
+      }));
     } catch (err) {
       console.error("Failed to generate copies:", err);
       alert(err instanceof Error ? err.message : "Failed to generate copies");
@@ -627,6 +656,7 @@ export function PlanningPage() {
   };
 
   const selectVariant = (listId: string, type: "title" | "desc", variantId: string) => {
+    // Optimistic UI update
     setWebinars((prev) => prev.map((w) => ({
       ...w,
       lists: w.lists.map((l) => {
@@ -642,12 +672,10 @@ export function PlanningPage() {
           return {
             ...l,
             descVariants: l.descVariants?.map((v) => ({ ...v, selected: v.id === variantId })),
-            descVariant: l.descVariants?.find((v) => v.id === variantId)?.text.substring(0, 20) + "..." || l.descVariant,
           };
         }
       }),
     })));
-    // Also update modal
     setCopyModalLists((prev) => prev.map((l) => {
       if (l.id !== listId) return l;
       if (type === "title") {
@@ -664,6 +692,12 @@ export function PlanningPage() {
         };
       }
     }));
+
+    // Persist to DB
+    const payload = type === "title" ? { title_copy_id: variantId } : { desc_copy_id: variantId };
+    apiUpdateAssignment(listId, payload).catch((err) =>
+      console.error("Failed to persist variant selection:", err)
+    );
   };
 
   const closeCopyModal = () => {
@@ -876,8 +910,16 @@ export function PlanningPage() {
         )}
       </div>
 
+      {/* ── Loading state ─────────────────────────────────────────── */}
+      {loadingData && (
+        <div className="flex flex-col items-center justify-center py-24 gap-3">
+          <div className="w-6 h-6 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
+          <span className="text-sm text-zinc-500">Loading campaigns...</span>
+        </div>
+      )}
+
       {/* ── Webinar table ──────────────────────────────────────────── */}
-      <div className="overflow-x-auto">
+      {!loadingData && <div className="overflow-x-auto">
         <table className="w-full text-xs min-w-[1600px]">
           <thead>
             <tr className="bg-zinc-50 dark:bg-zinc-900/90 border-b border-zinc-200 dark:border-zinc-800/40">
@@ -927,14 +969,36 @@ export function PlanningPage() {
                       <span className="text-zinc-900 dark:text-zinc-100 font-bold text-sm">{w.number}</span>
                       <span className="text-zinc-500 ml-2">{w.date}</span>
                     </td>
-                    <td className="px-2 py-2.5"><StatusBadge status={w.status} /></td>
-                    <td className="px-2 py-2.5" colSpan={3} onClick={() => toggleWebinar(w.id)}>
-                      <span className="text-zinc-800 dark:text-zinc-300 font-medium text-[11px]">{w.mainTitle || `${wLists.length} lists assigned`}</span>
+                    <td className="px-2 py-2.5" onClick={(e) => e.stopPropagation()}>
+                      <select
+                        value={w.status.toLowerCase()}
+                        onChange={(e) => handleUpdateWebinar(w.id, "status", e.target.value)}
+                        className="bg-transparent text-[10px] font-semibold border-none focus:outline-none focus:ring-1 focus:ring-violet-500 rounded cursor-pointer appearance-none pr-1"
+                        style={{ color: w.status.toLowerCase() === "sent" ? "#34d399" : w.status.toLowerCase() === "planning" ? "#fbbf24" : "#a1a1aa" }}
+                      >
+                        <option value="planning">Planning</option>
+                        <option value="sent">Sent</option>
+                        <option value="archived">Archived</option>
+                      </select>
+                    </td>
+                    <td className="px-2 py-2.5" colSpan={3}>
+                      <input
+                        type="text"
+                        defaultValue={w.mainTitle}
+                        placeholder={`${wLists.length} lists assigned`}
+                        onBlur={(e) => {
+                          const val = e.target.value.trim();
+                          if (val !== w.mainTitle) handleUpdateWebinar(w.id, "main_title", val);
+                        }}
+                        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-full bg-transparent text-zinc-800 dark:text-zinc-300 font-medium text-[11px] border-none focus:outline-none focus:ring-1 focus:ring-violet-500 rounded px-1 -ml-1 placeholder-zinc-500"
+                      />
                     </td>
                     <td className="px-2 py-2.5 text-right font-mono text-zinc-800 dark:text-zinc-200 font-bold">{wTotal > 0 ? wTotal.toLocaleString() : ""}</td>
                     <td className="px-2 py-2.5 text-right font-mono text-violet-400 font-bold">{wRemain > 0 ? wRemain.toLocaleString() : ""}</td>
                     <td className="px-2 py-2.5" colSpan={2}>
-                      {w.expanded && (
+                      {w.expanded && w.lists.length > 0 && (
                         <button
                           onClick={(e) => { e.stopPropagation(); toggleAssignForm(w.id); }}
                           className={`px-2.5 py-1 text-[10px] font-semibold rounded-md transition-colors flex items-center gap-1 ${
@@ -954,7 +1018,7 @@ export function PlanningPage() {
                   </tr>
 
                   {/* ── Assignment section (only for the active webinar) ── */}
-                  {w.expanded && assigningWebinarId === w.id && (
+                  {w.expanded && (assigningWebinarId === w.id || w.lists.length === 0) && (
                     <tr>
                       <td colSpan={14} className="p-0">
                         <div className="relative z-20 bg-zinc-50 dark:bg-zinc-900/40 border-y border-zinc-200 dark:border-zinc-800/30 px-6 py-4">
@@ -1033,7 +1097,7 @@ export function PlanningPage() {
                               <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Contacts</label>
                               <input type="number" value={assignVolume || ""} onChange={(e) => { setAssignVolume(parseInt(e.target.value) || 0); setAssignAccounts(0); }} className="w-full bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-md px-3 py-1.5 text-sm text-zinc-800 dark:text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-violet-500" />
                             </div>
-                            <button onClick={handleAssign} disabled={!assignBucket || !assignSender || assignVolume <= 0}
+                            <button onClick={() => handleAssign(w.id)} disabled={!assignBucket || !assignSender || assignVolume <= 0}
                               className="px-4 py-1.5 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-200 dark:bg-zinc-700 disabled:text-zinc-500 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap">
                               Assign →
                             </button>
@@ -1198,7 +1262,28 @@ export function PlanningPage() {
                       <td className="px-2 py-1.5"></td>
                       <td className="px-2 py-1.5"></td>
                       <td className="px-2 py-1.5">
-                        <span className={l.isNonjoiners || l.isNoListData ? "text-zinc-500" : "text-zinc-800 dark:text-zinc-300"}>{l.description}</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className={l.isNonjoiners || l.isNoListData ? "text-zinc-500" : "text-zinc-800 dark:text-zinc-300"}>{l.description}</span>
+                          {!l.isNonjoiners && !l.isNoListData && (
+                            l.listUrl ? (
+                              <a href={l.listUrl} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} title={l.listUrl}
+                                className="text-violet-400 hover:text-violet-300 shrink-0">
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                              </a>
+                            ) : (
+                              <button onClick={(e) => {
+                                e.stopPropagation();
+                                const url = prompt("Paste list URL:");
+                                if (url) {
+                                  setWebinars((prev) => prev.map((ww) => ({ ...ww, lists: ww.lists.map((ll) => ll.id === l.id ? { ...ll, listUrl: url } : ll) })));
+                                  apiUpdateAssignment(l.id, { list_url: url }).catch(console.error);
+                                }
+                              }} title="Add list URL" className="text-zinc-500 hover:text-violet-400 shrink-0">
+                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
+                              </button>
+                            )
+                          )}
+                        </div>
                       </td>
                       <td className="px-2 py-1.5">
                         {l.bucket !== "—" ? (
@@ -1209,7 +1294,28 @@ export function PlanningPage() {
                       </td>
                       <td className="px-2 py-1.5"><SenderBadge name={l.sender} color={l.senderColor} /></td>
                       <td className="px-2 py-1.5 text-right font-mono text-zinc-800 dark:text-zinc-300">{l.listSize > 0 ? l.listSize.toLocaleString() : ""}</td>
-                      <td className="px-2 py-1.5 text-right font-mono text-violet-400">{l.listRemain > 0 ? l.listRemain.toLocaleString() : l.listSize > 0 ? "0" : ""}</td>
+                      <td className="px-2 py-1.5 text-right">
+                        <span className="font-mono text-violet-400">{l.listRemain > 0 ? l.listRemain.toLocaleString() : l.listSize > 0 ? "0" : ""}</span>
+                        {!l.isNonjoiners && !l.isNoListData && l.listSize > 0 && (
+                          <div className="flex items-center justify-end gap-1 mt-0.5">
+                            <span className="text-[9px] text-zinc-500">gcal:</span>
+                            <input
+                              type="number"
+                              defaultValue={l.gcalInvited}
+                              onBlur={(e) => {
+                                const v = parseInt(e.target.value) || 0;
+                                if (v !== l.gcalInvited) {
+                                  setWebinars((prev) => prev.map((ww) => ({ ...ww, lists: ww.lists.map((ll) => ll.id === l.id ? { ...ll, gcalInvited: v } : ll) })));
+                                  apiUpdateAssignment(l.id, { gcal_invited: v }).catch(console.error);
+                                }
+                              }}
+                              onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                              onClick={(e) => e.stopPropagation()}
+                              className="w-10 bg-transparent border-b border-zinc-300 dark:border-zinc-700/40 text-[9px] font-mono text-zinc-500 text-right focus:outline-none focus:border-violet-500 py-0"
+                            />
+                          </div>
+                        )}
+                      </td>
                       <td className="px-2 py-1.5">
                         {l.title ? (
                           <div className="max-w-[240px]">
@@ -1269,7 +1375,7 @@ export function PlanningPage() {
               );
             })}
         </table>
-      </div>
+      </div>}
 
       {/* ── Bulk action bar ─────────────────────────────────────────── */}
       {selectedCount > 0 && (
