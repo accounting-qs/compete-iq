@@ -13,15 +13,15 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("CompeteIQ starting up")
+    logger.info("Webinar Studio starting up")
     # Tables are managed by Alembic migrations — do not create_all here
     yield
     await engine.dispose()
-    logger.info("CompeteIQ shut down")
+    logger.info("Webinar Studio shut down")
 
 
 app = FastAPI(
-    title="CompeteIQ API",
+    title="Webinar Studio API",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -37,13 +37,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from api.routers import webhook, competitors, ads, generation
+from api.routers import webhook, competitors, ads, generation, outreach
 from api.routers.costs import router as costs_router
 
 app.include_router(webhook.router, prefix="/webhook", tags=["webhook"])
 app.include_router(competitors.router, prefix="/competitors", tags=["competitors"])
 app.include_router(ads.router, prefix="/ads", tags=["ads"])
 app.include_router(generation.router, prefix="/generate", tags=["generation"])
+app.include_router(outreach.router, prefix="/outreach", tags=["outreach"])
 app.include_router(costs_router)
 
 # Phase 1b — uncomment as built:
@@ -55,4 +56,4 @@ app.include_router(costs_router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "competeiq"}
+    return {"status": "ok", "service": "webinar-studio"}

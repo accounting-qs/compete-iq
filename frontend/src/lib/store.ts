@@ -16,7 +16,7 @@ export interface StoredGeneration {
   }>;
 }
 
-const STORAGE_KEY = "competeiq:library";
+const STORAGE_KEY = "webinar-studio:library";
 
 export function loadLibrary(): StoredGeneration[] {
   if (typeof window === "undefined") return [];

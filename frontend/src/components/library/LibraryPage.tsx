@@ -19,7 +19,7 @@ function CopyBtn({ onClick, copied }: { onClick: () => void; copied: boolean }) 
   return (
     <button onClick={onClick}
       className={`flex items-center gap-1 text-[11px] font-medium px-2 py-[3px] rounded transition-all duration-100 ${
-        copied ? "bg-emerald-500/10 text-emerald-400" : "text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700/40"
+        copied ? "bg-emerald-500/10 text-emerald-400" : "text-zinc-600 hover:text-zinc-800 dark:text-zinc-300 hover:bg-zinc-200 dark:bg-zinc-700/40"
       }`}
     >
       {copied
@@ -43,12 +43,12 @@ function GenerationCard({ gen, onUpdate }: { gen: StoredGeneration; onUpdate: ()
   const date = new Date(gen.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden">
+    <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-3 px-5 py-3 border-b border-zinc-800 bg-zinc-950/40">
+      <div className="flex items-center gap-3 px-5 py-3 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950/40">
         <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600 shrink-0">Calendar</span>
-        <span className="w-px h-3 bg-zinc-800 shrink-0" />
-        <span className="text-sm font-medium text-zinc-200 truncate">{gen.audience}</span>
+        <span className="w-px h-3 bg-zinc-100 dark:bg-zinc-800 shrink-0" />
+        <span className="text-sm font-medium text-zinc-800 dark:text-zinc-200 truncate">{gen.audience}</span>
         <span className="text-zinc-700">·</span>
         <span className="text-xs text-zinc-600 shrink-0">{date}</span>
         <div className="flex-1" />
@@ -59,14 +59,14 @@ function GenerationCard({ gen, onUpdate }: { gen: StoredGeneration; onUpdate: ()
       </div>
 
       {/* Variant tabs */}
-      <div className="flex items-center gap-1 px-4 py-2 border-b border-zinc-800 bg-zinc-950/20">
+      <div className="flex items-center gap-1 px-4 py-2 border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950/20">
         {gen.variants.map((v) => {
           const vc = VARIANT_CONFIG[v.variant];
           const isActive = activeVariant === v.variant;
           return (
             <button key={v.variant} onClick={() => setActiveVariant(v.variant)}
               className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium transition-all duration-100 ${
-                isActive ? `${vc.activeBg} ${vc.color} border ${vc.border}` : "text-zinc-600 hover:text-zinc-300"
+                isActive ? `${vc.activeBg} ${vc.color} border ${vc.border}` : "text-zinc-600 hover:text-zinc-800 dark:text-zinc-300"
               }`}
             >
               <span className={`w-[5px] h-[5px] rounded-full ${vc.dot}`} />
@@ -78,7 +78,7 @@ function GenerationCard({ gen, onUpdate }: { gen: StoredGeneration; onUpdate: ()
 
       {variant && (
         <>
-          <div className={`px-5 py-4 border-b border-zinc-800/50 ${cfg.activeBg}`}>
+          <div className={`px-5 py-4 border-b border-zinc-200 dark:border-zinc-800/50 ${cfg.activeBg}`}>
             <div className="flex items-center justify-between mb-2">
               <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600">Title</span>
               <div className="flex items-center gap-2">
@@ -86,24 +86,24 @@ function GenerationCard({ gen, onUpdate }: { gen: StoredGeneration; onUpdate: ()
                 <CopyBtn onClick={() => copy("title", variant.title)} copied={copied === "title"} />
               </div>
             </div>
-            <p className="text-zinc-100 text-[15px] font-semibold leading-snug">{variant.title}</p>
+            <p className="text-zinc-900 dark:text-zinc-100 text-[15px] font-semibold leading-snug">{variant.title}</p>
           </div>
 
-          <div className={`px-5 py-4 border-b border-zinc-800/50 ${cfg.activeBg}`}>
+          <div className={`px-5 py-4 border-b border-zinc-200 dark:border-zinc-800/50 ${cfg.activeBg}`}>
             <div className="flex items-center justify-between mb-2">
               <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600">Description</span>
               <CopyBtn onClick={() => copy("desc", variant.description)} copied={copied === "desc"} />
             </div>
-            <pre className="text-zinc-300 text-sm leading-relaxed whitespace-pre-wrap font-sans">{variant.description}</pre>
+            <pre className="text-zinc-800 dark:text-zinc-300 text-sm leading-relaxed whitespace-pre-wrap font-sans">{variant.description}</pre>
           </div>
         </>
       )}
 
       {/* Actions */}
-      <div className="flex items-center gap-1.5 px-5 py-3 bg-zinc-950/40 border-t border-zinc-800">
+      <div className="flex items-center gap-1.5 px-5 py-3 bg-white dark:bg-zinc-950/40 border-t border-zinc-200 dark:border-zinc-800">
         <button onClick={() => setStatus("saved")}
           className={`flex items-center gap-1 text-xs font-medium px-3 py-1.5 rounded-md border transition-all duration-100 ${
-            gen.status === "saved" ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400" : "border-zinc-700/60 text-zinc-500 hover:border-emerald-500/25 hover:text-emerald-400"
+            gen.status === "saved" ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400" : "border-zinc-300 dark:border-zinc-700/60 text-zinc-500 hover:border-emerald-500/25 hover:text-emerald-400"
           }`}
         >
           <svg width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
@@ -111,7 +111,7 @@ function GenerationCard({ gen, onUpdate }: { gen: StoredGeneration; onUpdate: ()
         </button>
         <button onClick={() => setStatus("needs-work")}
           className={`flex items-center gap-1 text-xs font-medium px-3 py-1.5 rounded-md border transition-all duration-100 ${
-            gen.status === "needs-work" ? "border-amber-500/30 bg-amber-500/10 text-amber-400" : "border-zinc-700/60 text-zinc-500 hover:border-amber-500/25 hover:text-amber-400"
+            gen.status === "needs-work" ? "border-amber-500/30 bg-amber-500/10 text-amber-400" : "border-zinc-300 dark:border-zinc-700/60 text-zinc-500 hover:border-amber-500/25 hover:text-amber-400"
           }`}
         >
           <svg width="11" height="11" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.2"/><path d="M6 4v2M6 7.5h.01" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
@@ -120,7 +120,7 @@ function GenerationCard({ gen, onUpdate }: { gen: StoredGeneration; onUpdate: ()
         <div className="flex-1" />
         {variant && <CopyBtn onClick={() => copy("all", `TITLE: ${variant.title}\n\nDESCRIPTION:\n${variant.description}`)} copied={copied === "all"} />}
         <button onClick={() => { deleteGeneration(gen.id); onUpdate(); }}
-          className="flex items-center gap-1 text-xs font-medium px-3 py-1.5 rounded-md border border-zinc-700/60 text-zinc-600 hover:border-red-500/25 hover:text-red-400 transition-all duration-100"
+          className="flex items-center gap-1 text-xs font-medium px-3 py-1.5 rounded-md border border-zinc-300 dark:border-zinc-700/60 text-zinc-600 hover:border-red-500/25 hover:text-red-400 transition-all duration-100"
         >
           <svg width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M2 3h8M5 3V2h2v1M3 3l.5 7h5L9 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
           Purge
@@ -145,11 +145,11 @@ export function LibraryPage() {
   );
 
   return (
-    <div className="min-h-[calc(100vh-48px)] bg-zinc-950">
+    <div className="min-h-[calc(100vh-48px)] bg-white dark:bg-zinc-950">
       <div className="max-w-3xl mx-auto px-6 py-12 space-y-8">
 
         <div>
-          <h1 className="text-2xl font-bold text-zinc-100 tracking-tight">Library</h1>
+          <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100 tracking-tight">Library</h1>
           <p className="text-sm text-zinc-500 mt-1.5">All generated content, ready to review and copy.</p>
         </div>
 
@@ -161,14 +161,14 @@ export function LibraryPage() {
                 <path d="M10 10l2 2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
               </svg>
               <input type="text" placeholder="Search audience..." value={search} onChange={(e) => setSearch(e.target.value)}
-                className="w-full bg-zinc-900 border border-zinc-800 rounded-lg pl-8 pr-4 py-2 text-sm text-zinc-100 placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-zinc-600 focus:border-zinc-600 transition-colors"
+                className="w-full bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg pl-8 pr-4 py-2 text-sm text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-zinc-600 focus:border-zinc-600 transition-colors"
               />
             </div>
-            <div className="flex items-center gap-px p-[3px] bg-zinc-900 border border-zinc-800 rounded-lg">
+            <div className="flex items-center gap-px p-[3px] bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg">
               {(["all", "new", "saved", "needs-work"] as const).map((s) => (
                 <button key={s} onClick={() => setStatusFilter(s)}
                   className={`text-xs font-medium px-3 py-1.5 rounded-md transition-all duration-100 whitespace-nowrap ${
-                    statusFilter === s ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"
+                    statusFilter === s ? "bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100" : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-300"
                   }`}
                 >{s === "needs-work" ? "Needs work" : s.charAt(0).toUpperCase() + s.slice(1)}</button>
               ))}
@@ -187,15 +187,15 @@ export function LibraryPage() {
           </>
         ) : items.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 gap-3 text-center">
-            <div className="w-10 h-10 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-xl bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 flex items-center justify-center">
               <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
                 <rect x="3" y="2" width="12" height="14" rx="2" stroke="#3f3f46" strokeWidth="1.3"/>
                 <path d="M6 6h6M6 9h6M6 12h4" stroke="#3f3f46" strokeWidth="1.3" strokeLinecap="round"/>
               </svg>
             </div>
             <div>
-              <p className="text-sm text-zinc-400">No content yet.</p>
-              <a href="/" className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors underline underline-offset-2 mt-0.5 block">
+              <p className="text-sm text-zinc-600 dark:text-zinc-400">No content yet.</p>
+              <a href="/" className="text-xs text-zinc-600 hover:text-zinc-600 dark:text-zinc-400 transition-colors underline underline-offset-2 mt-0.5 block">
                 Go to Studio to generate your first batch
               </a>
             </div>
@@ -203,7 +203,7 @@ export function LibraryPage() {
         ) : (
           <div className="flex flex-col items-center justify-center py-16 gap-1.5 text-center">
             <p className="text-sm text-zinc-500">No results.</p>
-            <button onClick={() => { setSearch(""); setStatusFilter("all"); }} className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors">Clear filters</button>
+            <button onClick={() => { setSearch(""); setStatusFilter("all"); }} className="text-xs text-zinc-600 hover:text-zinc-600 dark:text-zinc-400 transition-colors">Clear filters</button>
           </div>
         )}
       </div>

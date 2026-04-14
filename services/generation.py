@@ -2,6 +2,8 @@
 Generation service — loads brain context from Supabase and calls Claude.
 Supports streaming (SSE) for real-time frontend output.
 """
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -309,3 +311,245 @@ async def stream_calendar_blocker(
         yield f"data: {json.dumps({'type': 'done', 'result': result})}\n\n"
     except json.JSONDecodeError as e:
         yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+
+# ── Bucket Copy Generation ────────────────────────────────────────────────
+
+def _build_copy_system_prompt(
+    universal_content: str,
+    format_content: str,
+    principles: list[str],
+    example_outputs: list[dict],
+    copy_type: str,
+    count: int,
+) -> str:
+    """Build a system prompt for generating bucket-level title or description copies."""
+    principles_block = "\n".join(f"- {p}" for p in principles)
+
+    examples_block = ""
+    if example_outputs:
+        examples = []
+        for ex in example_outputs[:3]:
+            if copy_type == "title":
+                examples.append(f"- {ex.get('title', '')}")
+            else:
+                examples.append(f"**{ex.get('label', 'Example')}:**\n{ex.get('description', '')}")
+        examples_block = "\n\n".join(examples)
+
+    type_label = "calendar invite titles" if copy_type == "title" else "calendar invite descriptions"
+    type_instruction = (
+        "Each title must be a single line, punchy, and pass the gut check: "
+        "the target segment reads it and thinks 'oh shit, that's for me'."
+        if copy_type == "title"
+        else "Each description must follow the 9-part structure from the format rules. "
+        "It should be compelling enough to make the prospect click YES or MAYBE."
+    )
+
+    return f"""You are a direct-response copywriter for Quantum Scaling (QS), a B2B growth agency that helps coaches, consultants, and service businesses scale with AI-powered webinar acquisition systems.
+
+You generate {type_label} for LinkedIn calendar invites that get professionals to attend a webinar.
+
+## Business Context
+{universal_content}
+
+## Format Rules
+{format_content}
+
+## Copywriting Principles
+{principles_block}
+
+## Real Examples (study these — match this voice and structure exactly)
+{examples_block}
+
+## Output Format
+Respond with valid JSON only. No markdown, no explanation, no preamble.
+
+{{
+  "copies": [
+    "First {copy_type} variant...",
+    "Second {copy_type} variant...",
+    "Third {copy_type} variant..."
+  ]
+}}
+
+Rules:
+- Generate exactly {count} unique {copy_type} variants
+- Each variant must be meaningfully different in angle/style (curiosity, outcome, mechanism, etc.)
+- All client proof numbers must be verbatim from the provided brief — never fabricate
+- {type_instruction}
+"""
+
+
+def _build_copy_user_prompt(
+    bucket_name: str,
+    industry: str | None,
+    countries: list[str] | None,
+    emp_range: str | None,
+    copy_type: str,
+) -> str:
+    """Build the user prompt for bucket copy generation."""
+    parts = [f"Generate {copy_type}s for outreach bucket: **{bucket_name}**"]
+
+    if industry:
+        parts.append(f"Industry/Segment: {industry}")
+    if countries:
+        parts.append(f"Countries: {', '.join(countries)}")
+    if emp_range:
+        parts.append(f"Company size: {emp_range}")
+
+    parts.append(
+        "\nUse the business context and examples to craft copy that resonates "
+        "with this specific audience segment."
+    )
+
+    return "\n".join(parts)
+
+
+async def generate_bucket_copies(
+    db: AsyncSession,
+    user_id: str,
+    bucket_name: str,
+    industry: str | None,
+    countries: list[str] | None,
+    emp_range: str | None,
+    copy_type: str,
+    count: int = 3,
+) -> list[str]:
+    """
+    Generate title or description copies for a bucket using the AI brain.
+    Returns a list of text strings.
+    """
+    universal, format_rules, principles, examples = await _load_brain_context(
+        db, user_id, "calendar_event"
+    )
+
+    system = _build_copy_system_prompt(
+        universal, format_rules, principles, examples, copy_type, count
+    )
+    user_msg = _build_copy_user_prompt(
+        bucket_name, industry, countries, emp_range, copy_type
+    )
+
+    logger.info(
+        "Generating %d %s copies — bucket=%s industry=%s",
+        count, copy_type, bucket_name, industry,
+    )
+
+    message = await _client.messages.create(
+        model=settings.CLAUDE_MODEL,
+        max_tokens=4096,
+        system=system,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+
+    asyncio.create_task(_log_claude_cost(
+        model=settings.CLAUDE_MODEL,
+        input_tokens=message.usage.input_tokens,
+        output_tokens=message.usage.output_tokens,
+        session_id=f"{user_id}:{bucket_name}",
+        session_label=f"Bucket copy ({copy_type}) — {bucket_name}",
+    ))
+
+    raw = message.content[0].text.strip()
+
+    # Strip markdown code fences if model wraps in ```json
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error("JSON parse failed for bucket copies: %s\nRaw: %s", e, raw[:500])
+        raise ValueError(f"Model returned invalid JSON: {e}") from e
+
+    copies = result.get("copies", [])
+    if not isinstance(copies, list) or len(copies) == 0:
+        raise ValueError("Model did not return any copies")
+
+    return [str(c) for c in copies[:count]]
+
+
+async def regenerate_bucket_copy(
+    db: AsyncSession,
+    user_id: str,
+    original_text: str,
+    copy_type: str,
+    feedback: str,
+    bucket_name: str,
+    industry: str | None,
+) -> str:
+    """
+    Regenerate a single copy variant using AI, incorporating user feedback.
+    Returns the new text string.
+    """
+    universal, format_rules, principles, examples = await _load_brain_context(
+        db, user_id, "calendar_event"
+    )
+
+    principles_block = "\n".join(f"- {p}" for p in principles)
+    type_label = "calendar invite title" if copy_type == "title" else "calendar invite description"
+
+    system = f"""You are a direct-response copywriter for Quantum Scaling (QS).
+
+You are refining a {type_label} based on user feedback.
+
+## Business Context
+{universal}
+
+## Format Rules
+{format_rules}
+
+## Copywriting Principles
+{principles_block}
+
+## Output Format
+Respond with valid JSON only. No markdown, no explanation.
+
+{{
+  "copy": "The refined {copy_type} text..."
+}}
+
+Rules:
+- Apply the feedback precisely
+- Keep the same general format and structure
+- All client proof numbers must be verbatim — never fabricate
+"""
+
+    user_msg = f"""Original {copy_type}:
+\"\"\"{original_text}\"\"\"
+
+Bucket: {bucket_name}
+Industry: {industry or 'General'}
+
+User feedback: {feedback}
+
+Generate an improved version that addresses this feedback."""
+
+    logger.info("Regenerating %s — bucket=%s feedback=%s", copy_type, bucket_name, feedback[:100])
+
+    message = await _client.messages.create(
+        model=settings.CLAUDE_MODEL,
+        max_tokens=2048,
+        system=system,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+
+    asyncio.create_task(_log_claude_cost(
+        model=settings.CLAUDE_MODEL,
+        input_tokens=message.usage.input_tokens,
+        output_tokens=message.usage.output_tokens,
+        session_id=f"{user_id}:{bucket_name}",
+        session_label=f"Regenerate {copy_type} — {bucket_name}",
+    ))
+
+    raw = message.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error("JSON parse failed for regeneration: %s\nRaw: %s", e, raw[:500])
+        raise ValueError(f"Model returned invalid JSON: {e}") from e
+
+    return str(result.get("copy", raw))

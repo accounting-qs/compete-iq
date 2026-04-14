@@ -8,6 +8,7 @@ State machine (per phone number, stored in whatsapp_sessions):
   CANCEL from any state → idle
   20 min inactivity → idle
 """
+from __future__ import annotations
 
 import logging
 import re

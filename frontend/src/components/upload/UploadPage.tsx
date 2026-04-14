@@ -1,6 +1,11 @@
 "use client";
 
-import { useState, useCallback, useRef, type DragEvent, type ChangeEvent } from "react";
+import { useState, useCallback, useRef, useEffect, type DragEvent, type ChangeEvent } from "react";
+import {
+  uploadCsvFile, startImport, fetchUploads, fetchUploadStatus, fetchUploadHeaders,
+  deleteUpload,
+  type ApiUpload, type UploadFileResponse, type UploadStatusResponse,
+} from "@/lib/api";
 
 /* ─── Constants ────────────────────────────────────────────────────────── */
 
@@ -50,42 +55,6 @@ const AUTO_MAP: Record<string, string> = {
   scraper: "scraper",
 };
 
-/* Mock upload history */
-const MOCK_HISTORY = [
-  { id: 1, fileName: "wealth-mgmt-5-50-us.csv", date: "Apr 5, 2026", contacts: 36420, buckets: 12, status: "complete" as const },
-  { id: 2, fileName: "agency-25-50-us.csv", date: "Mar 28, 2026", contacts: 28100, buckets: 8, status: "complete" as const },
-  { id: 3, fileName: "saas-10-25-us-uk.csv", date: "Mar 21, 2026", contacts: 45200, buckets: 15, status: "complete" as const },
-];
-
-/* ─── CSV parsing ──────────────────────────────────────────────────────── */
-
-function parseCSVLine(line: string): string[] {
-  const result: string[] = [];
-  let current = "";
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') {
-      inQuotes = !inQuotes;
-    } else if (ch === "," && !inQuotes) {
-      result.push(current.trim());
-      current = "";
-    } else {
-      current += ch;
-    }
-  }
-  result.push(current.trim());
-  return result;
-}
-
-function parseCSV(text: string) {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim());
-  const headers = parseCSVLine(lines[0]);
-  const rows = lines.slice(1, 6).map(parseCSVLine); // first 5 rows for preview
-  const allRows = lines.slice(1).map(parseCSVLine);
-  return { headers, previewRows: rows, allRows };
-}
-
 function autoMapHeader(header: string): string {
   const h = header.toLowerCase().trim();
   return AUTO_MAP[h] ?? "skip";
@@ -93,15 +62,7 @@ function autoMapHeader(header: string): string {
 
 /* ─── Types ────────────────────────────────────────────────────────────── */
 
-interface BucketSummary {
-  name: string;
-  count: number;
-  countries: string[];
-  empRanges: string[];
-  avgConfidence: number;
-}
-
-type Step = "idle" | "mapping" | "importing" | "summary";
+type Step = "idle" | "uploading" | "mapping" | "importing";
 
 /* ─── Component ────────────────────────────────────────────────────────── */
 
@@ -110,43 +71,86 @@ export function UploadPage() {
   const [dragOver, setDragOver] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // Upload state
+  const [uploadResponse, setUploadResponse] = useState<UploadFileResponse | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+
   // Mapping state
-  const [fileName, setFileName] = useState("");
-  const [headers, setHeaders] = useState<string[]>([]);
-  const [previewRows, setPreviewRows] = useState<string[][]>([]);
-  const [allRows, setAllRows] = useState<string[][]>([]);
   const [mappings, setMappings] = useState<Record<string, string>>({});
   const [customFields, setCustomFields] = useState<string[]>([]);
   const [newFieldName, setNewFieldName] = useState("");
   const [showNewField, setShowNewField] = useState(false);
 
-  // Summary state
-  const [bucketSummary, setBucketSummary] = useState<BucketSummary[]>([]);
-  const [totalContacts, setTotalContacts] = useState(0);
+  // Duplicate handling
+  const [duplicateMode, setDuplicateMode] = useState<"ignore" | "overwrite">("ignore");
 
-  /* ── File handling ────────────────────────────────────────────────── */
+  // Import history
+  const [uploadHistory, setUploadHistory] = useState<ApiUpload[]>([]);
 
-  const handleFile = useCallback((file: File) => {
+  // Detail modal
+  const [selectedUpload, setSelectedUpload] = useState<ApiUpload | null>(null);
+
+  // Delete confirmation
+  const [deleteTarget, setDeleteTarget] = useState<ApiUpload | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [detailStatus, setDetailStatus] = useState<UploadStatusResponse | null>(null);
+
+  /* ── Load upload history ─────────────────────────────────────────── */
+  const loadHistory = useCallback(() => {
+    fetchUploads()
+      .then(({ uploads }) => setUploadHistory(uploads))
+      .catch((err) => console.error("Failed to load uploads:", err));
+  }, []);
+
+  useEffect(() => {
+    loadHistory();
+  }, [loadHistory]);
+
+  // Poll for active imports
+  useEffect(() => {
+    const hasActive = uploadHistory.some(
+      (u) => u.status === "pending" || u.status === "processing" || u.status === "uploading"
+    );
+    if (!hasActive) return;
+
+    const interval = setInterval(loadHistory, 3000);
+    return () => clearInterval(interval);
+  }, [uploadHistory, loadHistory]);
+
+  /* ── File handling ───────────────────────────────────────────────── */
+
+  const handleFile = useCallback(async (file: File) => {
     if (!file.name.endsWith(".csv")) return;
-    setFileName(file.name);
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target?.result as string;
-      const { headers: h, previewRows: pr, allRows: ar } = parseCSV(text);
-      setHeaders(h);
-      setPreviewRows(pr);
-      setAllRows(ar);
+    setStep("uploading");
+    setUploadProgress(0);
+    setUploadError(null);
 
-      // Auto-map
+    try {
+      // Simulate progress for the upload (actual progress requires XHR)
+      const progressInterval = setInterval(() => {
+        setUploadProgress((prev) => Math.min(prev + 2, 90));
+      }, 200);
+
+      const response = await uploadCsvFile(file);
+      clearInterval(progressInterval);
+      setUploadProgress(100);
+      setUploadResponse(response);
+
+      // Auto-map headers
       const autoMappings: Record<string, string> = {};
-      h.forEach((header) => {
+      response.headers.forEach((header) => {
         autoMappings[header] = autoMapHeader(header);
       });
       setMappings(autoMappings);
-      setStep("mapping");
-    };
-    reader.readAsText(file);
+
+      // Brief pause to show 100%, then transition
+      setTimeout(() => setStep("mapping"), 500);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Upload failed");
+      setStep("idle");
+    }
   }, []);
 
   const onDrop = useCallback(
@@ -169,442 +173,776 @@ export function UploadPage() {
 
   /* ── Import ────────────────────────────────────────────────────────── */
 
-  const handleImport = useCallback(() => {
-    setStep("importing");
+  const handleImport = useCallback(async () => {
+    if (!uploadResponse) return;
 
-    // Find bucket column index
-    const bucketHeader = Object.entries(mappings).find(([, val]) => val === "bucket")?.[0];
-    const bucketIdx = bucketHeader ? headers.indexOf(bucketHeader) : -1;
+    try {
+      await startImport(uploadResponse.id, mappings, duplicateMode);
+      setStep("idle");
+      setUploadResponse(null);
+      setMappings({});
+      loadHistory();
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Failed to start import");
+    }
+  }, [uploadResponse, mappings, duplicateMode, loadHistory]);
 
-    // Find country column
-    const countryHeader = Object.entries(mappings).find(([, val]) => val === "country")?.[0];
-    const countryIdx = countryHeader ? headers.indexOf(countryHeader) : -1;
+  /* ── History item click handler ────────────────────────────────────── */
 
-    // Find employee range column
-    const empHeader = Object.entries(mappings).find(([, val]) => val === "employee_range")?.[0];
-    const empIdx = empHeader ? headers.indexOf(empHeader) : -1;
-
-    // Find confidence column
-    const confHeader = Object.entries(mappings).find(([, val]) => val === "confidence")?.[0];
-    const confIdx = confHeader ? headers.indexOf(confHeader) : -1;
-
-    // Group by bucket
-    const bucketMap = new Map<string, { count: number; countries: Set<string>; empRanges: Set<string>; confSum: number }>();
-
-    allRows.forEach((row) => {
-      const bucket = bucketIdx >= 0 ? row[bucketIdx] || "Unknown" : "Unknown";
-      const country = countryIdx >= 0 ? row[countryIdx] || "—" : "—";
-      const emp = empIdx >= 0 ? row[empIdx] || "—" : "—";
-      const conf = confIdx >= 0 ? parseFloat(row[confIdx]) || 0 : 0;
-
-      if (!bucketMap.has(bucket)) {
-        bucketMap.set(bucket, { count: 0, countries: new Set(), empRanges: new Set(), confSum: 0 });
+  const handleHistoryClick = useCallback(async (u: ApiUpload) => {
+    if (u.status === "uploading") {
+      // CSV uploaded but never mapped → go to mapping step
+      try {
+        const headersRes = await fetchUploadHeaders(u.id);
+        setUploadResponse(headersRes);
+        const autoMappings: Record<string, string> = {};
+        headersRes.headers.forEach((header) => {
+          autoMappings[header] = autoMapHeader(header);
+        });
+        setMappings(autoMappings);
+        setStep("mapping");
+      } catch (err) {
+        setUploadError(err instanceof Error ? err.message : "Failed to load headers — CSV may have expired");
       }
-      const b = bucketMap.get(bucket)!;
-      b.count++;
-      b.countries.add(country);
-      b.empRanges.add(emp);
-      b.confSum += conf;
-    });
+    } else {
+      // Processing/complete/failed → show stats modal
+      setSelectedUpload(u);
+    }
+  }, []);
 
-    const summaries: BucketSummary[] = Array.from(bucketMap.entries())
-      .map(([name, data]) => ({
-        name,
-        count: data.count,
-        countries: Array.from(data.countries).slice(0, 3),
-        empRanges: Array.from(data.empRanges),
-        avgConfidence: data.count > 0 ? Math.round((data.confSum / data.count) * 10) / 10 : 0,
-      }))
-      .sort((a, b) => b.count - a.count);
+  /* ── Detail modal polling ─────────────────────────────────────────── */
 
-    // Save to localStorage for planning page
-    const existingContacts = JSON.parse(localStorage.getItem("competeiq:contacts") || "[]");
-    const uploadRecord = {
-      id: Date.now().toString(),
-      fileName,
-      date: new Date().toISOString(),
-      totalContacts: allRows.length,
-      buckets: summaries,
+  useEffect(() => {
+    if (!selectedUpload) {
+      setDetailStatus(null);
+      return;
+    }
+
+    const load = () => {
+      fetchUploadStatus(selectedUpload.id)
+        .then(setDetailStatus)
+        .catch(console.error);
     };
-    const uploads = JSON.parse(localStorage.getItem("competeiq:uploads") || "[]");
-    uploads.unshift(uploadRecord);
-    localStorage.setItem("competeiq:uploads", JSON.stringify(uploads));
+    load();
 
-    // Store bucket totals (merge with existing)
-    const existingBuckets: Record<string, number> = JSON.parse(localStorage.getItem("competeiq:bucketTotals") || "{}");
-    summaries.forEach((b) => {
-      existingBuckets[b.name] = (existingBuckets[b.name] || 0) + b.count;
-    });
-    localStorage.setItem("competeiq:bucketTotals", JSON.stringify(existingBuckets));
+    if (selectedUpload.status === "processing" || selectedUpload.status === "pending") {
+      const interval = setInterval(load, 2000);
+      return () => clearInterval(interval);
+    }
+  }, [selectedUpload]);
 
-    setTimeout(() => {
-      setBucketSummary(summaries);
-      setTotalContacts(allRows.length);
-      setStep("summary");
-    }, 800);
-  }, [mappings, headers, allRows, fileName]);
+  // Update selectedUpload when history refreshes
+  useEffect(() => {
+    if (selectedUpload) {
+      const updated = uploadHistory.find((u) => u.id === selectedUpload.id);
+      if (updated) setSelectedUpload(updated);
+    }
+  }, [uploadHistory]);
 
-  /* ── Mapping change ────────────────────────────────────────────────── */
+  /* ── Delete upload ───────────────────────────────────────────────── */
 
-  const updateMapping = (header: string, value: string) => {
-    setMappings((prev) => ({ ...prev, [header]: value }));
+  const handleDelete = useCallback(async (u: ApiUpload) => {
+    setDeleteLoading(true);
+    try {
+      await deleteUpload(u.id);
+      setDeleteTarget(null);
+      setSelectedUpload(null);
+      loadHistory();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to delete");
+    } finally {
+      setDeleteLoading(false);
+    }
+  }, [loadHistory]);
+
+  /* ── Custom field ────────────────────────────────────────────────── */
+
+  const addCustomField = useCallback(() => {
+    const name = newFieldName.trim();
+    if (!name || customFields.includes(name)) return;
+    setCustomFields((prev) => [...prev, name]);
+    setNewFieldName("");
+    setShowNewField(false);
+  }, [newFieldName, customFields]);
+
+  /* ── Render helpers ──────────────────────────────────────────────── */
+
+  const formatNumber = (n: number) => n.toLocaleString();
+  const formatBytes = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
-  const addCustomField = () => {
-    if (newFieldName.trim() && !customFields.includes(newFieldName.trim())) {
-      setCustomFields((prev) => [...prev, newFieldName.trim()]);
-      setNewFieldName("");
-      setShowNewField(false);
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case "complete": return "#10b981";
+      case "processing": return "#3b82f6";
+      case "pending": case "uploading": return "#f59e0b";
+      case "failed": return "#ef4444";
+      default: return "#6b7280";
     }
   };
 
-  /* ── Render ────────────────────────────────────────────────────────── */
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case "complete": return "✓";
+      case "processing": return "⏳";
+      case "pending": case "uploading": return "⏳";
+      case "failed": return "✗";
+      default: return "?";
+    }
+  };
+
+  /* ─── RENDER ─────────────────────────────────────────────────────── */
 
   return (
-    <main className="max-w-6xl mx-auto px-6 py-8">
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-zinc-100 tracking-tight">List Upload</h1>
-        <p className="text-sm text-zinc-400 mt-1">
-          Import enrichment CSV exports to build your lead segments.
-        </p>
-      </div>
+    <div style={{ maxWidth: 960, margin: "0 auto", padding: "24px 16px" }}>
+      <h2 style={{ fontWeight: 700, fontSize: 24, marginBottom: 4, color: "var(--foreground)" }}>
+        List Upload
+      </h2>
+      <p style={{ color: "var(--muted-foreground)", fontSize: 14, marginBottom: 24 }}>
+        Upload CSV contact lists — files are stored in Supabase and imported in the background.
+      </p>
 
-      {/* ── STEP: IDLE ─────────────────────────────────────────────── */}
-      {step === "idle" && (
-        <>
-          {/* Upload zone */}
-          <div
-            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={onDrop}
-            onClick={() => fileRef.current?.click()}
-            className={`relative border-2 border-dashed rounded-xl p-12 text-center cursor-pointer transition-all duration-200 ${
-              dragOver
-                ? "border-violet-500 bg-violet-500/5"
-                : "border-zinc-700/60 hover:border-zinc-600 bg-zinc-900/40 hover:bg-zinc-900/60"
-            }`}
-          >
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".csv"
-              onChange={onFileSelect}
-              className="hidden"
-            />
-            <div className="flex flex-col items-center gap-3">
-              <div className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-colors ${
-                dragOver ? "bg-violet-500/20" : "bg-zinc-800"
-              }`}>
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" className="text-zinc-400">
-                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-              </div>
-              <div>
-                <p className="text-sm font-medium text-zinc-200">
-                  Drop your CSV file here, or <span className="text-violet-400">browse</span>
-                </p>
-                <p className="text-xs text-zinc-500 mt-1">Supports enrichment exports with contact + bucket data</p>
-              </div>
-            </div>
+      {/* ── Uploading step ──────────────────────────────────────────── */}
+      {step === "uploading" && (
+        <div style={{
+          background: "var(--card-bg)", border: "1px solid var(--border-subtle)",
+          borderRadius: 12, padding: 32, textAlign: "center", marginBottom: 24,
+        }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>☁️</div>
+          <h3 style={{ fontSize: 18, fontWeight: 600, marginBottom: 8, color: "var(--foreground)" }}>
+            Uploading to Supabase Storage...
+          </h3>
+          <p style={{ color: "var(--muted-foreground)", fontSize: 14, marginBottom: 16 }}>
+            {uploadResponse?.file_name || "Processing..."}
+          </p>
+          <div style={{
+            background: "var(--border-subtle)", borderRadius: 8, height: 12,
+            overflow: "hidden", maxWidth: 400, margin: "0 auto",
+          }}>
+            <div style={{
+              height: "100%", borderRadius: 8,
+              background: "linear-gradient(90deg, #3b82f6, #8b5cf6)",
+              width: `${uploadProgress}%`,
+              transition: "width 200ms ease",
+            }} />
           </div>
-
-          {/* Upload history */}
-          <div className="mt-10">
-            <h2 className="text-sm font-semibold text-zinc-300 uppercase tracking-wider mb-4">Upload History</h2>
-            <div className="rounded-xl border border-zinc-800/60 overflow-hidden">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-zinc-900/60">
-                    <th className="text-left px-4 py-3 text-zinc-400 font-medium">File</th>
-                    <th className="text-left px-4 py-3 text-zinc-400 font-medium">Date</th>
-                    <th className="text-right px-4 py-3 text-zinc-400 font-medium">Contacts</th>
-                    <th className="text-right px-4 py-3 text-zinc-400 font-medium">Buckets</th>
-                    <th className="text-center px-4 py-3 text-zinc-400 font-medium">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-800/40">
-                  {MOCK_HISTORY.map((h) => (
-                    <tr key={h.id} className="hover:bg-zinc-800/20 transition-colors">
-                      <td className="px-4 py-3 text-zinc-200 font-medium">{h.fileName}</td>
-                      <td className="px-4 py-3 text-zinc-400">{h.date}</td>
-                      <td className="px-4 py-3 text-right text-zinc-200 font-mono">{h.contacts.toLocaleString()}</td>
-                      <td className="px-4 py-3 text-right text-zinc-200 font-mono">{h.buckets}</td>
-                      <td className="px-4 py-3 text-center">
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                          Complete
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* ── STEP: MAPPING ──────────────────────────────────────────── */}
-      {step === "mapping" && (
-        <>
-          {/* Header */}
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => setStep("idle")}
-                className="p-1.5 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition-colors"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M19 12H5M12 19l-7-7 7-7"/>
-                </svg>
-              </button>
-              <div>
-                <h2 className="text-lg font-semibold text-zinc-100">Map Columns</h2>
-                <p className="text-xs text-zinc-500">{fileName} · {allRows.length.toLocaleString()} rows · {headers.length} columns</p>
-              </div>
-            </div>
-            <button
-              onClick={handleImport}
-              className="px-5 py-2 bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium rounded-lg transition-colors"
-            >
-              Import {allRows.length.toLocaleString()} contacts
-            </button>
-          </div>
-
-          {/* Mapping grid */}
-          <div className="rounded-xl border border-zinc-800/60 overflow-hidden mb-6">
-            <div className="bg-zinc-900/60 px-4 py-3 flex items-center justify-between border-b border-zinc-800/40">
-              <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Column Mapping</span>
-              <button
-                onClick={() => setShowNewField(true)}
-                className="text-xs text-violet-400 hover:text-violet-300 font-medium transition-colors"
-              >
-                + Create New Field
-              </button>
-            </div>
-
-            {/* New field modal */}
-            {showNewField && (
-              <div className="px-4 py-3 bg-violet-500/5 border-b border-violet-500/20 flex items-center gap-3">
-                <input
-                  value={newFieldName}
-                  onChange={(e) => setNewFieldName(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && addCustomField()}
-                  placeholder="Field name (e.g. Lead Source)"
-                  className="flex-1 bg-zinc-800 border border-zinc-700 rounded-md px-3 py-1.5 text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
-                  autoFocus
-                />
-                <button
-                  onClick={addCustomField}
-                  className="px-3 py-1.5 bg-violet-600 text-white text-xs font-medium rounded-md hover:bg-violet-500 transition-colors"
-                >
-                  Add
-                </button>
-                <button
-                  onClick={() => { setShowNewField(false); setNewFieldName(""); }}
-                  className="text-zinc-400 hover:text-zinc-200 text-xs transition-colors"
-                >
-                  Cancel
-                </button>
-              </div>
-            )}
-
-            <div className="divide-y divide-zinc-800/30">
-              {headers.map((header, i) => {
-                const mapped = mappings[header] || "skip";
-                const isAutoMapped = autoMapHeader(header) !== "skip" && mapped !== "skip";
-                return (
-                  <div key={header} className="flex items-center gap-4 px-4 py-2.5 hover:bg-zinc-800/20 transition-colors">
-                    {/* CSV column name */}
-                    <div className="w-[280px] shrink-0">
-                      <span className="text-sm text-zinc-200 font-medium">{header}</span>
-                      {previewRows[0] && previewRows[0][i] && (
-                        <p className="text-xs text-zinc-500 mt-0.5 truncate max-w-[260px]">
-                          e.g. &quot;{previewRows[0][i]}&quot;
-                        </p>
-                      )}
-                    </div>
-
-                    {/* Arrow */}
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="text-zinc-600 shrink-0">
-                      <path d="M5 12h14M12 5l7 7-7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
-
-                    {/* Mapping dropdown */}
-                    <div className="flex items-center gap-2 flex-1">
-                      <select
-                        value={mapped}
-                        onChange={(e) => updateMapping(header, e.target.value)}
-                        className={`w-[240px] bg-zinc-800 border rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-violet-500 transition-colors ${
-                          mapped === "skip"
-                            ? "border-zinc-700/60 text-zinc-400"
-                            : "border-violet-500/40 text-zinc-200"
-                        }`}
-                      >
-                        <optgroup label="Action">
-                          <option value="skip">— Skip —</option>
-                        </optgroup>
-                        <optgroup label="Identity">
-                          {SYSTEM_FIELDS.filter((f) => f.group === "identity").map((f) => (
-                            <option key={f.value} value={f.value}>{f.label}</option>
-                          ))}
-                        </optgroup>
-                        <optgroup label="Enrichment">
-                          {SYSTEM_FIELDS.filter((f) => f.group === "enrichment").map((f) => (
-                            <option key={f.value} value={f.value}>{f.label}</option>
-                          ))}
-                        </optgroup>
-                        <optgroup label="Source Metadata">
-                          {SYSTEM_FIELDS.filter((f) => f.group === "source").map((f) => (
-                            <option key={f.value} value={f.value}>{f.label}</option>
-                          ))}
-                        </optgroup>
-                        {customFields.length > 0 && (
-                          <optgroup label="Custom Fields">
-                            {customFields.map((f) => (
-                              <option key={`custom_${f}`} value={`custom_${f}`}>{f}</option>
-                            ))}
-                          </optgroup>
-                        )}
-                      </select>
-
-                      {isAutoMapped && (
-                        <span className="text-[10px] font-medium text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded-full whitespace-nowrap">
-                          Auto-mapped
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Preview */}
-          <div className="rounded-xl border border-zinc-800/60 overflow-hidden">
-            <div className="bg-zinc-900/60 px-4 py-3 border-b border-zinc-800/40">
-              <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Data Preview (first 5 rows)</span>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="bg-zinc-900/40">
-                    {headers.map((h) => (
-                      <th key={h} className="text-left px-3 py-2 text-zinc-500 font-medium whitespace-nowrap">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-800/30">
-                  {previewRows.map((row, ri) => (
-                    <tr key={ri} className="hover:bg-zinc-800/20">
-                      {row.map((cell, ci) => (
-                        <td key={ci} className="px-3 py-2 text-zinc-400 whitespace-nowrap max-w-[200px] truncate">{cell}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* ── STEP: IMPORTING ────────────────────────────────────────── */}
-      {step === "importing" && (
-        <div className="flex flex-col items-center justify-center py-24">
-          <div className="w-12 h-12 border-2 border-violet-500 border-t-transparent rounded-full animate-spin mb-4" />
-          <p className="text-sm text-zinc-300">Importing {allRows.length.toLocaleString()} contacts...</p>
-          <p className="text-xs text-zinc-500 mt-1">Parsing buckets and metadata</p>
+          <p style={{ color: "var(--muted-foreground)", fontSize: 13, marginTop: 8 }}>{uploadProgress}%</p>
         </div>
       )}
 
-      {/* ── STEP: SUMMARY ──────────────────────────────────────────── */}
-      {step === "summary" && (
-        <>
-          {/* Success card */}
-          <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-6 mb-8">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-xl bg-emerald-500/20 flex items-center justify-center">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" className="text-emerald-400">
-                  <path d="M20 6L9 17l-5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
+      {/* ── Drop zone (idle) ────────────────────────────────────────── */}
+      {(step === "idle" || step === "importing") && (
+        <div
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={onDrop}
+          onClick={() => fileRef.current?.click()}
+          style={{
+            border: `2px dashed ${dragOver ? "#3b82f6" : "var(--border-subtle)"}`,
+            borderRadius: 12, padding: "32px 24px", textAlign: "center",
+            cursor: "pointer", marginBottom: 24,
+            background: dragOver ? "rgba(59,130,246,0.05)" : "var(--card-bg)",
+            transition: "all 200ms ease",
+          }}
+        >
+          <div style={{ fontSize: 36, marginBottom: 8 }}>📄</div>
+          <p style={{ fontWeight: 600, fontSize: 15, color: "var(--foreground)" }}>
+            Drop your CSV here or click to browse
+          </p>
+          <p style={{ color: "var(--muted-foreground)", fontSize: 13, marginTop: 4 }}>
+            Supports files up to 300 MB • CSV format only
+          </p>
+          <input ref={fileRef} type="file" accept=".csv" hidden onChange={onFileSelect} />
+        </div>
+      )}
+
+      {uploadError && (
+        <div style={{
+          background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)",
+          borderRadius: 8, padding: "12px 16px", marginBottom: 16, color: "#ef4444", fontSize: 14,
+        }}>
+          ⚠️ {uploadError}
+          <button
+            onClick={() => setUploadError(null)}
+            style={{ float: "right", background: "none", border: "none", color: "#ef4444", cursor: "pointer" }}
+          >✕</button>
+        </div>
+      )}
+
+      {/* ── Mapping step ────────────────────────────────────────────── */}
+      {step === "mapping" && uploadResponse && (
+        <div style={{
+          background: "var(--card-bg)", border: "1px solid var(--border-subtle)",
+          borderRadius: 16, overflow: "hidden", marginBottom: 32,
+          boxShadow: "0 4px 20px rgba(0,0,0,0.05)",
+        }}>
+          {/* Header */}
+          <div style={{
+            padding: "24px 32px", borderBottom: "1px solid var(--border-subtle)",
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            background: "var(--background)",
+          }}>
+            <div>
+              <h3 style={{ fontWeight: 700, fontSize: 18, color: "var(--foreground)", marginBottom: 4 }}>
+                Map Fields — {uploadResponse.file_name}
+              </h3>
+              <div style={{ color: "var(--muted-foreground)", fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                  <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "#3b82f6" }} />
+                  {formatNumber(uploadResponse.total_rows)} contacts
+                </span>
+                {uploadResponse.file_size ? (
+                  <>
+                    <span>•</span>
+                    <span>{formatBytes(uploadResponse.file_size)}</span>
+                  </>
+                ) : null}
               </div>
-              <div>
-                <h2 className="text-lg font-semibold text-zinc-100">Import Complete</h2>
-                <p className="text-sm text-zinc-400">{fileName} · {totalContacts.toLocaleString()} contacts across {bucketSummary.length} buckets</p>
+            </div>
+            <button
+              onClick={() => { setStep("idle"); setUploadResponse(null); }}
+              style={{
+                background: "var(--card-bg)", border: "1px solid var(--border-subtle)",
+                borderRadius: 8, padding: "8px 16px", color: "var(--foreground)",
+                cursor: "pointer", fontSize: 13, fontWeight: 500,
+                transition: "background 150ms",
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.background = "var(--border-subtle)"}
+              onMouseLeave={(e) => e.currentTarget.style.background = "var(--card-bg)"}
+            >Cancel</button>
+          </div>
+
+          <div style={{ padding: "0 32px" }}>
+            {/* Mapping table */}
+            <div style={{ margin: "24px 0", border: "1px solid var(--border-subtle)", borderRadius: 12, overflow: "hidden" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead style={{ background: "var(--background)" }}>
+                  <tr style={{ borderBottom: "1px solid var(--border-subtle)" }}>
+                    <th style={{ textAlign: "left", padding: "12px 16px", color: "var(--muted-foreground)", fontWeight: 600, width: "30%" }}>CSV Header</th>
+                    <th style={{ textAlign: "left", padding: "12px 16px", color: "var(--muted-foreground)", fontWeight: 600, width: "30%" }}>Preview</th>
+                    <th style={{ textAlign: "left", padding: "12px 16px", color: "var(--muted-foreground)", fontWeight: 600, width: "40%" }}>Map To</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {uploadResponse.headers.map((header, idx) => {
+                    const isMapped = mappings[header] && mappings[header] !== "skip";
+                    return (
+                    <tr key={header} style={{
+                      borderBottom: "1px solid var(--border-subtle)",
+                      background: isMapped ? "rgba(59,130,246,0.02)" : "transparent",
+                    }}>
+                      <td style={{ padding: "12px 16px", fontWeight: 600, color: "var(--foreground)" }}>{header}</td>
+                      <td style={{ padding: "12px 16px", color: "var(--muted-foreground)", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {uploadResponse.preview_rows[0]?.[idx] || "—"}
+                      </td>
+                      <td style={{ padding: "12px 16px" }}>
+                        <select
+                          value={mappings[header] || "skip"}
+                          onChange={(e) => setMappings((prev) => ({ ...prev, [header]: e.target.value }))}
+                          style={{
+                            background: "var(--card-bg)", color: "var(--foreground)",
+                            border: `1px solid ${isMapped ? "#3b82f6" : "var(--border-subtle)"}`,
+                            borderRadius: 8, padding: "8px 12px", fontSize: 13, width: "100%",
+                            cursor: "pointer", transition: "border-color 200ms",
+                            outline: "none", boxShadow: isMapped ? "0 0 0 1px #3b82f6" : "none",
+                          }}
+                        >
+                          {SYSTEM_FIELDS.map((f) => (
+                            <option key={f.value} value={f.value}>{f.label}</option>
+                          ))}
+                          {customFields.map((f) => (
+                            <option key={f} value={`custom:${f}`}>🏷️ {f}</option>
+                          ))}
+                        </select>
+                      </td>
+                    </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, marginBottom: 24 }}>
+              {/* Custom field add */}
+              <div style={{
+                padding: "20px", background: "var(--background)", borderRadius: 12,
+                border: "1px solid var(--border-subtle)",
+              }}>
+                <h4 style={{ fontSize: 14, fontWeight: 600, color: "var(--foreground)", marginBottom: 12 }}>Custom Fields</h4>
+                {showNewField ? (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input
+                      value={newFieldName}
+                      onChange={(e) => setNewFieldName(e.target.value)}
+                      placeholder="Field name..."
+                      style={{
+                        background: "var(--card-bg)", color: "var(--foreground)",
+                        border: "1px solid var(--border-subtle)", borderRadius: 6,
+                        padding: "8px 12px", fontSize: 13, flex: 1,
+                      }}
+                      onKeyDown={(e) => e.key === "Enter" && addCustomField()}
+                    />
+                    <button
+                      onClick={addCustomField}
+                      style={{
+                        background: "#3b82f6", color: "#fff", border: "none",
+                        borderRadius: 6, padding: "8px 16px", cursor: "pointer", fontSize: 13, fontWeight: 500,
+                      }}
+                    >Add</button>
+                    <button
+                      onClick={() => setShowNewField(false)}
+                      style={{
+                        background: "var(--card-bg)", border: "1px solid var(--border-subtle)",
+                        borderRadius: 6, padding: "8px 16px", cursor: "pointer", fontSize: 13, color: "var(--foreground)",
+                      }}
+                    >Cancel</button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setShowNewField(true)}
+                    style={{
+                      background: "var(--card-bg)", border: "1px dashed var(--border-subtle)",
+                      borderRadius: 8, padding: "10px 16px", cursor: "pointer", fontSize: 13,
+                      color: "var(--foreground)", width: "100%", fontWeight: 500,
+                      transition: "border-color 150ms",
+                    }}
+                    onMouseEnter={(e) => e.currentTarget.style.borderColor = "#3b82f6"}
+                    onMouseLeave={(e) => e.currentTarget.style.borderColor = "var(--border-subtle)"}
+                  >+ Add Custom Field</button>
+                )}
+              </div>
+
+              {/* Duplicate mode */}
+              <div style={{
+                padding: "20px", background: "rgba(59,130,246,0.04)", borderRadius: 12,
+                border: "1px solid rgba(59,130,246,0.2)",
+              }}>
+                <h4 style={{ fontSize: 14, fontWeight: 600, color: "var(--foreground)", marginBottom: 12 }}>Conflict Resolution</h4>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13, color: "var(--foreground)" }}>
+                    <input
+                      type="radio" name="dup" checked={duplicateMode === "ignore"}
+                      onChange={() => setDuplicateMode("ignore")}
+                      style={{ cursor: "pointer" }}
+                    />
+                    <div>
+                      <div style={{ fontWeight: 500 }}>Skip (Recommended)</div>
+                      <div style={{ color: "var(--muted-foreground)", fontSize: 12 }}>Keep existing DB records when emails match.</div>
+                    </div>
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13, color: "var(--foreground)" }}>
+                    <input
+                      type="radio" name="dup" checked={duplicateMode === "overwrite"}
+                      onChange={() => setDuplicateMode("overwrite")}
+                      style={{ cursor: "pointer" }}
+                    />
+                    <div>
+                      <div style={{ fontWeight: 500 }}>Overwrite</div>
+                      <div style={{ color: "var(--muted-foreground)", fontSize: 12 }}>Update existing DB records with this CSV's data.</div>
+                    </div>
+                  </label>
+                </div>
               </div>
             </div>
           </div>
 
-          {/* Bucket breakdown */}
-          <h3 className="text-sm font-semibold text-zinc-300 uppercase tracking-wider mb-4">Buckets Found</h3>
-          <div className="rounded-xl border border-zinc-800/60 overflow-hidden mb-8">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-zinc-900/60">
-                  <th className="text-left px-4 py-3 text-zinc-400 font-medium">Bucket</th>
-                  <th className="text-right px-4 py-3 text-zinc-400 font-medium">This Upload</th>
-                  <th className="text-right px-4 py-3 text-zinc-400 font-medium">Total in DB</th>
-                  <th className="text-left px-4 py-3 text-zinc-400 font-medium">Countries</th>
-                  <th className="text-right px-4 py-3 text-zinc-400 font-medium">Avg Confidence</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-800/40">
-                {bucketSummary.map((b) => {
-                  const dbTotal = JSON.parse(localStorage.getItem("competeiq:bucketTotals") || "{}");
-                  return (
-                    <tr key={b.name} className="hover:bg-zinc-800/20 transition-colors">
-                      <td className="px-4 py-3">
-                        <span className="text-zinc-200 font-medium">{b.name}</span>
-                      </td>
-                      <td className="px-4 py-3 text-right font-mono text-zinc-200">{b.count.toLocaleString()}</td>
-                      <td className="px-4 py-3 text-right font-mono text-violet-400">{(dbTotal[b.name] || b.count).toLocaleString()}</td>
-                      <td className="px-4 py-3">
-                        <div className="flex gap-1 flex-wrap">
-                          {b.countries.map((c) => (
-                            <span key={c} className="px-1.5 py-0.5 text-xs bg-zinc-800 text-zinc-400 rounded">{c}</span>
-                          ))}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <span className={`font-mono ${b.avgConfidence >= 8 ? "text-emerald-400" : b.avgConfidence >= 6 ? "text-amber-400" : "text-red-400"}`}>
-                          {b.avgConfidence}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Actions */}
-          <div className="flex gap-3">
+          <div style={{ padding: "24px 32px", borderTop: "1px solid var(--border-subtle)", background: "var(--background)" }}>
             <button
-              onClick={() => {
-                setStep("idle");
-                setHeaders([]);
-                setPreviewRows([]);
-                setAllRows([]);
-                setMappings({});
-                setBucketSummary([]);
+              onClick={handleImport}
+              style={{
+                width: "100%", padding: "14px 0", fontSize: 15, fontWeight: 600,
+                background: "linear-gradient(135deg, #3b82f6, #8b5cf6)",
+                color: "#fff", border: "none", borderRadius: 10, cursor: "pointer",
+                boxShadow: "0 4px 14px rgba(59,130,246,0.3)", transition: "transform 100ms",
               }}
-              className="px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200 border border-zinc-700/60 rounded-lg hover:bg-zinc-800/50 transition-colors"
+              onMouseDown={(e) => e.currentTarget.style.transform = "scale(0.99)"}
+              onMouseUp={(e) => e.currentTarget.style.transform = "scale(1)"}
+              onMouseLeave={(e) => e.currentTarget.style.transform = "scale(1)"}
             >
-              Upload Another
+              🚀 Start Import ({formatNumber(uploadResponse.total_rows)} rows)
             </button>
-            <a
-              href="/planning"
-              className="px-5 py-2 bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium rounded-lg transition-colors inline-flex items-center gap-2"
-            >
-              Go to Planning
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M5 12h14M12 5l7 7-7 7"/>
-              </svg>
-            </a>
           </div>
-        </>
+        </div>
       )}
-    </main>
+
+      {/* ── Import History ──────────────────────────────────────────── */}
+      {uploadHistory.length > 0 && (
+        <div style={{ marginBottom: 40 }}>
+          <h3 style={{ fontWeight: 700, fontSize: 18, marginBottom: 16, color: "var(--foreground)", display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 20 }}>📋</span> Import History
+          </h3>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {uploadHistory.map((u) => {
+              const isActive = u.status === "processing" || u.status === "pending" || u.status === "uploading";
+              return (
+              <div
+                key={u.id}
+                onClick={() => handleHistoryClick(u)}
+                style={{
+                  background: isActive ? "var(--background)" : "var(--card-bg)",
+                  border: `1px solid ${isActive ? "rgba(59,130,246,0.3)" : "var(--border-subtle)"}`,
+                  boxShadow: isActive ? "0 4px 12px rgba(59,130,246,0.05)" : "none",
+                  borderRadius: 12, padding: "16px 20px", cursor: "pointer",
+                  transition: "all 200ms ease",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.borderColor = isActive ? "rgba(59,130,246,0.6)" : "#3b82f6";
+                  e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.05)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.borderColor = isActive ? "rgba(59,130,246,0.3)" : "var(--border-subtle)";
+                  e.currentTarget.style.boxShadow = isActive ? "0 4px 12px rgba(59,130,246,0.05)" : "none";
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                    <span style={{
+                      display: "inline-flex", alignItems: "center", justifyContent: "center",
+                      width: 36, height: 36, borderRadius: "50%",
+                      background: `${getStatusColor(u.status)}15`,
+                      color: getStatusColor(u.status),
+                      fontSize: 16, fontWeight: 700,
+                    }}>
+                      {getStatusIcon(u.status)}
+                    </span>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 15, color: "var(--foreground)", marginBottom: 2 }}>
+                        {u.file_name}
+                      </div>
+                      <div style={{ fontSize: 13, color: "var(--muted-foreground)" }}>
+                        {u.created_at ? new Date(u.created_at).toLocaleDateString(undefined, {
+                          month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"
+                        }) : ""}
+                        {u.status === "complete" && ` • ${formatNumber(u.total_contacts)} contacts imported`}
+                        {u.status === "uploading" && ` • Awaiting Field Mapping`}
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <div style={{ textAlign: "right" }}>
+                      {isActive && u.status !== "uploading" && (
+                        <span style={{ fontSize: 14, color: "#3b82f6", fontWeight: 600 }}>
+                          {u.progress}%
+                        </span>
+                      )}
+                      {u.status === "uploading" && (
+                        <div style={{
+                          padding: "6px 12px", background: "#f59e0b15", color: "#f59e0b",
+                          borderRadius: 8, fontSize: 12, fontWeight: 600,
+                        }}>
+                          Map Fields →
+                        </div>
+                      )}
+                      {u.status === "complete" && (
+                        <span style={{ fontSize: 14, color: "#10b981", fontWeight: 600 }}>
+                          {formatNumber(u.total_contacts)}
+                        </span>
+                      )}
+                      {u.status === "failed" && (
+                        <span style={{ fontSize: 13, color: "#ef4444", fontWeight: 500 }}>Failed</span>
+                      )}
+                    </div>
+                    {/* Delete button — hidden for processing imports */}
+                    {u.status !== "processing" && u.status !== "pending" && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setDeleteTarget(u); }}
+                        title="Delete this import"
+                        style={{
+                          background: "transparent", border: "1px solid var(--border-subtle)",
+                          borderRadius: 8, width: 32, height: 32, cursor: "pointer",
+                          display: "inline-flex", alignItems: "center", justifyContent: "center",
+                          color: "var(--muted-foreground)", fontSize: 14,
+                          transition: "all 150ms",
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.borderColor = "#ef4444";
+                          e.currentTarget.style.color = "#ef4444";
+                          e.currentTarget.style.background = "rgba(239,68,68,0.06)";
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.borderColor = "var(--border-subtle)";
+                          e.currentTarget.style.color = "var(--muted-foreground)";
+                          e.currentTarget.style.background = "transparent";
+                        }}
+                      >🗑</button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Progress bar for active imports */}
+                {isActive && u.status !== "uploading" && (
+                  <div style={{
+                    background: "var(--background)", borderRadius: 6, height: 6,
+                    overflow: "hidden", marginTop: 14, border: "1px solid var(--border-subtle)"
+                  }}>
+                    <div style={{
+                      height: "100%", borderRadius: 6,
+                      background: "linear-gradient(90deg, #3b82f6, #8b5cf6)",
+                      width: `${u.progress}%`,
+                      transition: "width 500ms ease",
+                    }} />
+                  </div>
+                )}
+              </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── Detail Modal ───────────────────────────────────────────── */}
+      {selectedUpload && (
+        <div
+          style={{
+            position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+            background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 1000, padding: 16,
+          }}
+          onClick={() => setSelectedUpload(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "var(--background)", borderRadius: 16,
+              padding: 0, width: "100%", maxWidth: 540,
+              border: "1px solid var(--border-subtle)",
+              boxShadow: "0 24px 80px rgba(0,0,0,0.35)",
+              overflow: "hidden",
+            }}
+          >
+            {/* Header */}
+            <div style={{
+              padding: "20px 24px", borderBottom: "1px solid var(--border-subtle)",
+              display: "flex", justifyContent: "space-between", alignItems: "flex-start",
+            }}>
+              <div style={{ flex: 1, minWidth: 0, paddingRight: 12 }}>
+                <h3 style={{
+                  fontSize: 16, fontWeight: 700, color: "var(--foreground)",
+                  marginBottom: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                }}>
+                  {selectedUpload.file_name}
+                </h3>
+                <div style={{
+                  display: "inline-flex", alignItems: "center", gap: 6,
+                  padding: "3px 10px", borderRadius: 12,
+                  background: `${getStatusColor(selectedUpload.status)}15`,
+                  color: getStatusColor(selectedUpload.status),
+                  fontSize: 12, fontWeight: 600, textTransform: "capitalize",
+                }}>
+                  {getStatusIcon(selectedUpload.status)} {selectedUpload.status}
+                </div>
+              </div>
+              <button
+                onClick={() => setSelectedUpload(null)}
+                style={{
+                  background: "var(--border-subtle)", border: "none",
+                  width: 28, height: 28, borderRadius: 8,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  color: "var(--muted-foreground)", cursor: "pointer", fontSize: 14,
+                  flexShrink: 0,
+                }}
+              >✕</button>
+            </div>
+
+            {/* Body */}
+            <div style={{ padding: "20px 24px" }}>
+              {/* Progress bar */}
+              {(selectedUpload.status === "processing" || selectedUpload.status === "pending") && (
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                    <span style={{ fontSize: 13, color: "var(--muted-foreground)" }}>Importing...</span>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: "#3b82f6" }}>
+                      {detailStatus?.progress ?? selectedUpload.progress}%
+                    </span>
+                  </div>
+                  <div style={{ background: "var(--border-subtle)", borderRadius: 6, height: 8, overflow: "hidden" }}>
+                    <div style={{
+                      height: "100%", borderRadius: 6,
+                      background: "linear-gradient(90deg, #3b82f6, #8b5cf6)",
+                      width: `${detailStatus?.progress ?? selectedUpload.progress}%`,
+                      transition: "width 500ms ease",
+                    }} />
+                  </div>
+                </div>
+              )}
+
+              {/* Stats grid */}
+              {(() => {
+                const s = detailStatus || selectedUpload;
+                const totalRows = s.total_contacts || (detailStatus?.total_rows ?? 0);
+                const stats = [
+                  { label: "Total Rows", value: formatNumber(totalRows), color: "var(--foreground)", icon: "📊" },
+                  { label: "Processed", value: formatNumber(s.processed_rows), color: "#3b82f6", icon: "⚙️" },
+                  { label: "Inserted", value: formatNumber(s.inserted_count), color: "#10b981", icon: "✅" },
+                  { label: "Skipped", value: formatNumber(s.skipped_count), color: "#f59e0b", icon: "⏭️" },
+                  { label: "Overwritten", value: formatNumber(s.overwritten_count), color: "#8b5cf6", icon: "🔄" },
+                ];
+                return (
+                  <div style={{
+                    display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10,
+                    marginBottom: 20,
+                  }}>
+                    {stats.map((stat, idx) => (
+                      <div
+                        key={stat.label}
+                        style={{
+                          background: "var(--card-bg)", borderRadius: 10,
+                          padding: "12px 14px", border: "1px solid var(--border-subtle)",
+                          ...(idx === 0 ? { gridColumn: "1 / -1" } : {}),
+                        }}
+                      >
+                        <div style={{ fontSize: 11, color: "var(--muted-foreground)", marginBottom: 4, display: "flex", alignItems: "center", gap: 4 }}>
+                          <span>{stat.icon}</span> {stat.label}
+                        </div>
+                        <div style={{ fontSize: idx === 0 ? 22 : 18, fontWeight: 700, color: stat.color }}>
+                          {stat.value}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+
+              {/* Error message */}
+              {(selectedUpload.error_message || detailStatus?.error_message) && (
+                <div style={{
+                  background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)",
+                  borderRadius: 10, padding: "12px 16px", fontSize: 13, color: "#ef4444",
+                  marginBottom: 16, lineHeight: 1.5,
+                }}>
+                  ⚠️ {detailStatus?.error_message || selectedUpload.error_message}
+                </div>
+              )}
+
+              {/* Bucket summary */}
+              {(detailStatus?.bucket_summary || selectedUpload.bucket_summary) && (
+                <div>
+                  <h4 style={{ fontSize: 13, fontWeight: 600, color: "var(--foreground)", marginBottom: 8 }}>
+                    Bucket Summary ({(detailStatus?.bucket_summary || selectedUpload.bucket_summary || []).length})
+                  </h4>
+                  <div style={{
+                    maxHeight: 220, overflowY: "auto", borderRadius: 10,
+                    border: "1px solid var(--border-subtle)",
+                  }}>
+                    {(detailStatus?.bucket_summary || selectedUpload.bucket_summary || []).map((b, i) => (
+                      <div
+                        key={b.name}
+                        style={{
+                          display: "flex", justifyContent: "space-between", alignItems: "center",
+                          padding: "8px 14px",
+                          borderBottom: i < (detailStatus?.bucket_summary || selectedUpload.bucket_summary || []).length - 1
+                            ? "1px solid var(--border-subtle)" : "none",
+                          fontSize: 13,
+                        }}
+                      >
+                        <span style={{ color: "var(--foreground)" }}>{b.name}</span>
+                        <span style={{ fontWeight: 600, color: "#3b82f6", fontVariantNumeric: "tabular-nums" }}>
+                          {formatNumber(b.count)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div style={{ padding: "16px 24px", borderTop: "1px solid var(--border-subtle)" }}>
+              <button
+                onClick={() => setSelectedUpload(null)}
+                style={{
+                  width: "100%", padding: "10px 0",
+                  background: "var(--card-bg)", color: "var(--foreground)",
+                  border: "1px solid var(--border-subtle)", borderRadius: 8,
+                  cursor: "pointer", fontSize: 14, fontWeight: 500,
+                  transition: "background 150ms",
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.background = "var(--border-subtle)"}
+                onMouseLeave={(e) => e.currentTarget.style.background = "var(--card-bg)"}
+              >Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ── Delete Confirmation Modal ────────────────────────────────── */}
+      {deleteTarget && (
+        <div
+          onClick={() => !deleteLoading && setDeleteTarget(null)}
+          style={{
+            position: "fixed", inset: 0, zIndex: 9999,
+            background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "var(--background)", borderRadius: 16,
+              border: "1px solid var(--border-subtle)",
+              width: "100%", maxWidth: 440, overflow: "hidden",
+              boxShadow: "0 20px 60px rgba(0,0,0,0.2)",
+            }}
+          >
+            {/* Header */}
+            <div style={{ padding: "24px 24px 0" }}>
+              <div style={{
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                width: 48, height: 48, borderRadius: "50%",
+                background: "rgba(239,68,68,0.1)", marginBottom: 16,
+              }}>
+                <span style={{ fontSize: 24 }}>⚠️</span>
+              </div>
+              <h3 style={{ fontWeight: 700, fontSize: 18, color: "var(--foreground)", marginBottom: 8 }}>
+                Delete Import
+              </h3>
+              <p style={{ fontSize: 14, color: "var(--muted-foreground)", lineHeight: 1.6, marginBottom: 4 }}>
+                {deleteTarget.status === "uploading" ? (
+                  <>This will remove the uploaded file <strong style={{ color: "var(--foreground)" }}>{deleteTarget.file_name}</strong> and its record. The CSV has not been imported yet.</>
+                ) : (
+                  <>This will permanently delete <strong style={{ color: "var(--foreground)" }}>{deleteTarget.file_name}</strong> and remove <strong style={{ color: "#ef4444" }}>{formatNumber(deleteTarget.total_contacts)} contacts</strong> that were imported with this list.</>
+                )}
+              </p>
+              <p style={{ fontSize: 13, color: "#ef4444", fontWeight: 500, marginTop: 8 }}>
+                This action cannot be undone.
+              </p>
+            </div>
+
+            {/* Actions */}
+            <div style={{ padding: "24px", display: "flex", gap: 12 }}>
+              <button
+                onClick={() => setDeleteTarget(null)}
+                disabled={deleteLoading}
+                style={{
+                  flex: 1, padding: "12px 0", fontSize: 14, fontWeight: 500,
+                  background: "var(--card-bg)", color: "var(--foreground)",
+                  border: "1px solid var(--border-subtle)", borderRadius: 10,
+                  cursor: "pointer", transition: "background 150ms",
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.background = "var(--border-subtle)"}
+                onMouseLeave={(e) => e.currentTarget.style.background = "var(--card-bg)"}
+              >Cancel</button>
+              <button
+                onClick={() => handleDelete(deleteTarget)}
+                disabled={deleteLoading}
+                style={{
+                  flex: 1, padding: "12px 0", fontSize: 14, fontWeight: 600,
+                  background: deleteLoading ? "#b91c1c" : "#ef4444",
+                  color: "#fff", border: "none", borderRadius: 10,
+                  cursor: deleteLoading ? "wait" : "pointer",
+                  transition: "background 150ms",
+                  opacity: deleteLoading ? 0.7 : 1,
+                }}
+                onMouseEnter={(e) => !deleteLoading && (e.currentTarget.style.background = "#dc2626")}
+                onMouseLeave={(e) => !deleteLoading && (e.currentTarget.style.background = "#ef4444")}
+              >{deleteLoading ? "Deleting..." : deleteTarget.status === "uploading" ? "Delete File" : `Delete & Remove ${formatNumber(deleteTarget.total_contacts)} Contacts`}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

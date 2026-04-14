@@ -1,0 +1,28 @@
+"""
+Webinar Studio — SQLAlchemy ORM Models
+Re-exports all models from domain-specific modules so existing imports work unchanged.
+"""
+
+from db.models._common import gen_uuid  # noqa: F401
+from db.models.users import User  # noqa: F401
+from db.models.competitors import Competitor, ScrapeJob, CompetitorAd  # noqa: F401
+from db.models.content import (  # noqa: F401
+    CreativeConcept, GeneratedOutput, GeneratedOutputVersion,
+    ChatSession, CopyFeedbackLog, MonitoringRun, WhatsAppSession,
+)
+from db.models.brain import (  # noqa: F401
+    CopywritingPrinciple, UniversalBrain, FormatBrain,
+    ContentRun, ContentPiece, ContentPieceVersion,
+    BrainUpdate, SourceExample, CaseStudy,
+)
+from db.models.outreach import (  # noqa: F401
+    OutreachBucket, BucketCopy, OutreachSender,
+    Webinar, WebinarListAssignment, CopyUsageLog,
+)
+from db.models.uploads import (  # noqa: F401
+    UploadHistory, ContactCustomField, Contact,
+)
+from db.models.costs import CostLog  # noqa: F401
+
+# Re-export Base so `from db.models import Base` keeps working
+from db.base import Base  # noqa: F401

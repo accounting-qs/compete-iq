@@ -3,6 +3,7 @@ Ads router — thin HTTP wrapper over services.ads.
 All routes require bearer auth.
 Pre-signed R2 URLs generated fresh on every request — never stored in DB.
 """
+from __future__ import annotations
 
 from datetime import datetime
 

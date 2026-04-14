@@ -2,6 +2,7 @@
 Competitors service — all business logic for competitor CRUD.
 Routes call these functions; they never touch the DB directly.
 """
+from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone

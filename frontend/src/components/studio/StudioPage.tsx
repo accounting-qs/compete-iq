@@ -22,7 +22,7 @@ function CopyBtn({ onClick, copied }: { onClick: () => void; copied: boolean }) 
   return (
     <button onClick={onClick}
       className={`flex items-center gap-1 text-[11px] font-medium px-2 py-[3px] rounded transition-all duration-100 ${
-        copied ? "bg-emerald-500/10 text-emerald-400" : "text-zinc-600 hover:text-zinc-300 hover:bg-zinc-700/40"
+        copied ? "bg-emerald-500/10 text-emerald-400" : "text-zinc-600 hover:text-zinc-800 dark:text-zinc-300 hover:bg-zinc-200 dark:bg-zinc-700/40"
       }`}
     >
       {copied
@@ -83,33 +83,33 @@ export function StudioPage() {
     : elapsed < 5 ? "Reading context..." : elapsed < 15 ? "Writing variants..." : elapsed < 25 ? "Almost there..." : "Just a moment...";
 
   return (
-    <div className="min-h-[calc(100vh-48px)] bg-zinc-950">
+    <div className="min-h-[calc(100vh-48px)] bg-white dark:bg-zinc-950">
       <div className="max-w-3xl mx-auto px-6 py-12 space-y-8">
 
         {/* Header */}
         <div>
-          <h1 className="text-2xl font-bold text-zinc-100 tracking-tight">Content Studio</h1>
+          <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100 tracking-tight">Content Studio</h1>
           <p className="text-sm text-zinc-500 mt-1.5">Generate high-converting copy for your next campaign.</p>
         </div>
 
         {/* Format picker */}
         <div className="space-y-2.5">
           <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-500">Format</p>
-          <div className="inline-flex items-center gap-1 p-1 rounded-lg bg-zinc-900 border border-zinc-800">
-            <div className="flex items-center gap-2.5 px-4 py-2 rounded-md bg-zinc-800 border border-zinc-700 shadow-sm">
+          <div className="inline-flex items-center gap-1 p-1 rounded-lg bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800">
+            <div className="flex items-center gap-2.5 px-4 py-2 rounded-md bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 shadow-sm">
               <span className="text-base leading-none select-none">📅</span>
-              <span className="text-sm font-medium text-zinc-100">Calendar Blockers</span>
+              <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Calendar Blockers</span>
             </div>
             <div className="flex items-center gap-2 px-4 py-2 rounded-md cursor-not-allowed opacity-30 select-none">
               <span className="text-base leading-none">📣</span>
-              <span className="text-sm text-zinc-400">Meta Ads</span>
+              <span className="text-sm text-zinc-600 dark:text-zinc-400">Meta Ads</span>
               <span className="text-[9px] font-bold uppercase tracking-widest text-zinc-500 ml-0.5">soon</span>
             </div>
           </div>
         </div>
 
         {/* Input card */}
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden">
+        <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 overflow-hidden">
           <div className="p-6 space-y-3">
             <div className="flex items-center justify-between">
               <label className="text-[11px] font-semibold uppercase tracking-widest text-zinc-500">
@@ -118,7 +118,7 @@ export function StudioPage() {
               <span className="text-xs text-zinc-600">One per line for bulk</span>
             </div>
             <Textarea
-              className="bg-zinc-950 border-zinc-700/60 text-zinc-100 text-sm placeholder:text-zinc-700 resize-none h-[88px] focus-visible:ring-1 focus-visible:ring-zinc-500 focus-visible:border-zinc-500 rounded-lg"
+              className="bg-white dark:bg-zinc-950 border-zinc-300 dark:border-zinc-700/60 text-zinc-900 dark:text-zinc-100 text-sm placeholder:text-zinc-700 resize-none h-[88px] focus-visible:ring-1 focus-visible:ring-zinc-500 focus-visible:border-zinc-500 rounded-lg"
               placeholder={"Fractional CFOs\nFee-only RIAs\nB2B SaaS founders"}
               value={audiences} onChange={(e) => setAudiences(e.target.value)} autoFocus
             />
@@ -126,27 +126,27 @@ export function StudioPage() {
               {AUDIENCE_PRESETS.map((p) => (
                 <button key={p} onClick={() => togglePreset(p)}
                   className={`text-xs px-3 py-1 rounded-full border transition-all duration-100 ${
-                    audienceList.includes(p) ? "border-zinc-500 bg-zinc-700/50 text-zinc-200" : "border-zinc-700/60 text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+                    audienceList.includes(p) ? "border-zinc-500 bg-zinc-200 dark:bg-zinc-700/50 text-zinc-800 dark:text-zinc-200" : "border-zinc-300 dark:border-zinc-700/60 text-zinc-500 hover:border-zinc-600 hover:text-zinc-800 dark:text-zinc-300"
                   }`}
                 >{p}</button>
               ))}
             </div>
           </div>
 
-          <div className="p-6 pt-0 space-y-3 border-t border-zinc-800">
+          <div className="p-6 pt-0 space-y-3 border-t border-zinc-200 dark:border-zinc-800">
             <div className="flex items-center justify-between pt-5">
               <label className="text-[11px] font-semibold uppercase tracking-widest text-zinc-500">Proof Story</label>
               <span className="text-xs text-zinc-600">Optional</span>
             </div>
             <Textarea
-              className="bg-zinc-950 border-zinc-700/60 text-zinc-100 text-sm placeholder:text-zinc-700 resize-none h-[80px] focus-visible:ring-1 focus-visible:ring-zinc-500 focus-visible:border-zinc-500 rounded-lg"
+              className="bg-white dark:bg-zinc-950 border-zinc-300 dark:border-zinc-700/60 text-zinc-900 dark:text-zinc-100 text-sm placeholder:text-zinc-700 resize-none h-[80px] focus-visible:ring-1 focus-visible:ring-zinc-500 focus-visible:border-zinc-500 rounded-lg"
               placeholder="e.g. Bora Ger scaled from $60K → $360K/year, calls 3 → 25/month..."
               value={clientStory} onChange={(e) => setClientStory(e.target.value)}
             />
             <p className="text-xs text-zinc-600">Leave blank to auto-pick the best case study from your brain.</p>
           </div>
 
-          <div className="px-6 py-4 bg-zinc-950/50 border-t border-zinc-800 flex items-center justify-between gap-4">
+          <div className="px-6 py-4 bg-white dark:bg-zinc-950/50 border-t border-zinc-200 dark:border-zinc-800 flex items-center justify-between gap-4">
             <p className="text-xs text-zinc-600 hidden sm:block">
               {audienceList.length > 1 ? `${audienceList.length} × 3 = ${audienceList.length * 3} blockers` : "Generates curiosity · outcome · mechanism"}
             </p>
@@ -161,8 +161,8 @@ export function StudioPage() {
           </div>
 
           {loading && (
-            <div className="px-6 pb-5 space-y-2 border-t border-zinc-800/40">
-              <div className="w-full h-[2px] bg-zinc-800 rounded-full overflow-hidden mt-4">
+            <div className="px-6 pb-5 space-y-2 border-t border-zinc-200 dark:border-zinc-800/40">
+              <div className="w-full h-[2px] bg-zinc-100 dark:bg-zinc-800 rounded-full overflow-hidden mt-4">
                 {progress.total > 1
                   ? <div className="h-full bg-zinc-500 rounded-full transition-all duration-500" style={{ width: `${((progress.current - 1) / progress.total) * 100}%` }} />
                   : <div className="h-full bg-zinc-500 rounded-full transition-all duration-1000 ease-out" style={{ width: `${Math.min((elapsed / 30) * 100, 92)}%` }} />
@@ -188,17 +188,17 @@ export function StudioPage() {
               <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-600">
                 {!loading && results.length === audienceList.length ? `${results.length} generated · saved` : `${results.length} / ${audienceList.length}`}
               </p>
-              {!loading && <a href="/library" className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors">View in library →</a>}
+              {!loading && <a href="/library" className="text-xs text-zinc-500 hover:text-zinc-800 dark:text-zinc-300 transition-colors">View in library →</a>}
             </div>
             {results.map((group, gi) => (
               <div key={gi} className="space-y-2">
-                {results.length > 1 && <p className="text-sm font-medium text-zinc-400 px-1">{group.audience}</p>}
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden">
+                {results.length > 1 && <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400 px-1">{group.audience}</p>}
+                <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 overflow-hidden">
                   {group.variants.map((v, vi) => {
                     const cfg = VARIANT_CONFIG[v.variant];
                     return (
-                      <div key={v.variant} className={vi > 0 ? "border-t border-zinc-800" : ""}>
-                        <div className="flex items-center justify-between px-5 py-3 bg-zinc-950/50">
+                      <div key={v.variant} className={vi > 0 ? "border-t border-zinc-200 dark:border-zinc-800" : ""}>
+                        <div className="flex items-center justify-between px-5 py-3 bg-white dark:bg-zinc-950/50">
                           <div className="flex items-center gap-2.5">
                             <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
                             <span className={`text-[11px] font-semibold uppercase tracking-widest ${cfg.color}`}>{v.variant} · {cfg.label}</span>
@@ -206,7 +206,7 @@ export function StudioPage() {
                           </div>
                           <CopyBtn onClick={() => copy(`${gi}-${v.variant}-full`, `TITLE: ${v.title}\n\nDESCRIPTION:\n${v.description}`)} copied={copied === `${gi}-${v.variant}-full`} />
                         </div>
-                        <div className={`px-5 py-4 border-t border-zinc-800/40 ${cfg.activeBg}`}>
+                        <div className={`px-5 py-4 border-t border-zinc-200 dark:border-zinc-800/40 ${cfg.activeBg}`}>
                           <div className="flex items-center justify-between mb-2">
                             <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600">Title</span>
                             <div className="flex items-center gap-2">
@@ -214,14 +214,14 @@ export function StudioPage() {
                               <CopyBtn onClick={() => copy(`${gi}-${v.variant}-t`, v.title)} copied={copied === `${gi}-${v.variant}-t`} />
                             </div>
                           </div>
-                          <p className="text-zinc-100 text-[15px] font-semibold leading-snug">{v.title}</p>
+                          <p className="text-zinc-900 dark:text-zinc-100 text-[15px] font-semibold leading-snug">{v.title}</p>
                         </div>
-                        <div className={`px-5 py-4 border-t border-zinc-800/40 ${cfg.activeBg}`}>
+                        <div className={`px-5 py-4 border-t border-zinc-200 dark:border-zinc-800/40 ${cfg.activeBg}`}>
                           <div className="flex items-center justify-between mb-2">
                             <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600">Description</span>
                             <CopyBtn onClick={() => copy(`${gi}-${v.variant}-d`, v.description)} copied={copied === `${gi}-${v.variant}-d`} />
                           </div>
-                          <pre className="text-zinc-300 text-sm leading-relaxed whitespace-pre-wrap font-sans">{v.description}</pre>
+                          <pre className="text-zinc-800 dark:text-zinc-300 text-sm leading-relaxed whitespace-pre-wrap font-sans">{v.description}</pre>
                         </div>
                       </div>
                     );
@@ -235,7 +235,7 @@ export function StudioPage() {
         {/* Empty state */}
         {!loading && !results.length && !error && (
           <div className="flex flex-col items-center justify-center py-16 gap-3 text-center">
-            <div className="w-10 h-10 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-xl bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 flex items-center justify-center">
               <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
                 <rect x="2" y="3" width="14" height="12" rx="2" stroke="#52525b" strokeWidth="1.3"/>
                 <path d="M6 3V1M12 3V1M2 7h14" stroke="#52525b" strokeWidth="1.3" strokeLinecap="round"/>
@@ -243,7 +243,7 @@ export function StudioPage() {
               </svg>
             </div>
             <div>
-              <p className="text-sm text-zinc-400">Enter an audience above and generate.</p>
+              <p className="text-sm text-zinc-600 dark:text-zinc-400">Enter an audience above and generate.</p>
               <p className="text-xs text-zinc-600 mt-0.5">Output is auto-saved to your library.</p>
             </div>
           </div>

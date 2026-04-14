@@ -1,6 +1,8 @@
 """
 Generation router — POST /generate/calendar-event (streaming + non-streaming)
 """
+from __future__ import annotations
+
 from anthropic import RateLimitError
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse

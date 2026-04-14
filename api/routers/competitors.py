@@ -2,6 +2,7 @@
 Competitors router — thin HTTP wrapper over services.competitors.
 All routes require bearer auth.
 """
+from __future__ import annotations
 
 from datetime import datetime
 

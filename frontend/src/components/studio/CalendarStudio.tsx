@@ -31,7 +31,7 @@ function CopyButton({ onClick, copied }: { onClick: () => void; copied: boolean 
       className={`flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-md border transition-all duration-150 ${
         copied
           ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
-          : "border-zinc-700 bg-zinc-800/60 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200 hover:bg-zinc-800"
+          : "border-zinc-300 dark:border-zinc-700 bg-zinc-100 dark:bg-zinc-800/60 text-zinc-600 dark:text-zinc-400 hover:border-zinc-600 hover:text-zinc-800 dark:text-zinc-200 hover:bg-zinc-100 dark:bg-zinc-800"
       }`}
     >
       {copied ? (
@@ -103,26 +103,26 @@ export function CalendarStudio() {
   }
 
   return (
-    <div className="min-h-[calc(100vh-57px)] bg-zinc-950">
+    <div className="min-h-[calc(100vh-57px)] bg-white dark:bg-zinc-950">
       <div className="max-w-4xl mx-auto px-6 py-12 space-y-10">
 
         {/* Page header */}
         <div className="space-y-1">
-          <h1 className="text-xl font-semibold text-zinc-100 tracking-tight">Calendar Blockers</h1>
+          <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100 tracking-tight">Calendar Blockers</h1>
           <p className="text-sm text-zinc-500">Generate 3 variants — curiosity, outcome, and mechanism — ready to paste into any calendar invite.</p>
         </div>
 
         {/* Input panel */}
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+        <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/50 overflow-hidden">
 
           {/* Audience row */}
-          <div className="p-6 space-y-3 border-b border-zinc-800">
+          <div className="p-6 space-y-3 border-b border-zinc-200 dark:border-zinc-800">
             <div className="flex items-baseline justify-between">
-              <label className="text-sm font-medium text-zinc-200">Audience</label>
+              <label className="text-sm font-medium text-zinc-800 dark:text-zinc-200">Audience</label>
               <span className="text-xs text-zinc-600">Required</span>
             </div>
             <input
-              className="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg px-4 py-3 text-zinc-100 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-zinc-500 focus:border-zinc-500 transition-colors"
+              className="w-full bg-white dark:bg-zinc-950 border border-zinc-300 dark:border-zinc-700/80 rounded-lg px-4 py-3 text-zinc-900 dark:text-zinc-100 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-zinc-500 focus:border-zinc-500 transition-colors"
               placeholder="e.g. Fractional CFOs, fee-only RIAs, B2B SaaS founders..."
               value={audience}
               onChange={(e) => setAudience(e.target.value)}
@@ -136,8 +136,8 @@ export function CalendarStudio() {
                   onClick={() => setAudience(p)}
                   className={`text-xs px-3 py-1.5 rounded-full border transition-all duration-150 ${
                     audience === p
-                      ? "border-zinc-500 bg-zinc-800 text-zinc-200"
-                      : "border-zinc-800 text-zinc-500 hover:border-zinc-600 hover:text-zinc-300 hover:bg-zinc-800/50"
+                      ? "border-zinc-500 bg-zinc-100 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200"
+                      : "border-zinc-200 dark:border-zinc-800 text-zinc-500 hover:border-zinc-600 hover:text-zinc-800 dark:text-zinc-300 hover:bg-zinc-100 dark:bg-zinc-800/50"
                   }`}
                 >
                   {p}
@@ -147,13 +147,13 @@ export function CalendarStudio() {
           </div>
 
           {/* Proof story row */}
-          <div className="p-6 space-y-3 border-b border-zinc-800">
+          <div className="p-6 space-y-3 border-b border-zinc-200 dark:border-zinc-800">
             <div className="flex items-baseline justify-between">
-              <label className="text-sm font-medium text-zinc-200">Client proof story</label>
+              <label className="text-sm font-medium text-zinc-800 dark:text-zinc-200">Client proof story</label>
               <span className="text-xs text-zinc-600">Optional</span>
             </div>
             <Textarea
-              className="bg-zinc-950 border-zinc-700/80 text-zinc-100 text-sm placeholder:text-zinc-600 resize-none h-[88px] focus:ring-zinc-500 focus:border-zinc-500 rounded-lg"
+              className="bg-white dark:bg-zinc-950 border-zinc-300 dark:border-zinc-700/80 text-zinc-900 dark:text-zinc-100 text-sm placeholder:text-zinc-600 resize-none h-[88px] focus:ring-zinc-500 focus:border-zinc-500 rounded-lg"
               placeholder="e.g. Bora Ger scaled from $60K → $360K/year, calls 3 → 25/month..."
               value={clientStory}
               onChange={(e) => setClientStory(e.target.value)}
@@ -162,7 +162,7 @@ export function CalendarStudio() {
           </div>
 
           {/* Generate button row */}
-          <div className="px-6 py-4 bg-zinc-900/80 flex items-center justify-between gap-4">
+          <div className="px-6 py-4 bg-zinc-50 dark:bg-zinc-900/80 flex items-center justify-between gap-4">
             <p className="text-xs text-zinc-600 hidden sm:block">Generates 3 variants: curiosity · outcome · mechanism</p>
             <button
               onClick={handleGenerate}
@@ -188,7 +188,7 @@ export function CalendarStudio() {
           {/* Progress bar — visible only while loading */}
           {loading && (
             <div className="px-6 pb-5 space-y-2">
-              <div className="w-full h-1 bg-zinc-800 rounded-full overflow-hidden">
+              <div className="w-full h-1 bg-zinc-100 dark:bg-zinc-800 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-zinc-400 rounded-full transition-all duration-1000 ease-out"
                   style={{ width: `${Math.min((elapsed / 30) * 100, 92)}%` }}
@@ -222,8 +222,8 @@ export function CalendarStudio() {
         {variants.length > 0 && (
           <div className="space-y-5">
             <div className="flex items-center gap-3">
-              <h2 className="text-sm font-medium text-zinc-400">3 variants for</h2>
-              <span className="text-sm font-semibold text-zinc-200">{audience}</span>
+              <h2 className="text-sm font-medium text-zinc-600 dark:text-zinc-400">3 variants for</h2>
+              <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">{audience}</span>
             </div>
 
             <div className="space-y-4">
@@ -240,7 +240,7 @@ export function CalendarStudio() {
                           Variant {v.variant}
                         </span>
                         <span className="text-xs text-zinc-500">·</span>
-                        <span className="text-xs text-zinc-400">{cfg.label}</span>
+                        <span className="text-xs text-zinc-600 dark:text-zinc-400">{cfg.label}</span>
                         {v.style && (
                           <>
                             <span className="text-xs text-zinc-500">·</span>
@@ -268,7 +268,7 @@ export function CalendarStudio() {
                           />
                         </div>
                       </div>
-                      <p className="text-zinc-100 text-[15px] font-semibold leading-snug">{v.title}</p>
+                      <p className="text-zinc-900 dark:text-zinc-100 text-[15px] font-semibold leading-snug">{v.title}</p>
                     </div>
 
                     {/* Description */}
@@ -280,7 +280,7 @@ export function CalendarStudio() {
                           copied={copied === `${v.variant}-description`}
                         />
                       </div>
-                      <pre className="text-zinc-300 text-sm leading-relaxed whitespace-pre-wrap font-sans">{v.description}</pre>
+                      <pre className="text-zinc-800 dark:text-zinc-300 text-sm leading-relaxed whitespace-pre-wrap font-sans">{v.description}</pre>
                     </div>
                   </div>
                 );
@@ -292,7 +292,7 @@ export function CalendarStudio() {
         {/* Empty state */}
         {!loading && variants.length === 0 && !error && (
           <div className="flex flex-col items-center justify-center py-16 space-y-3 text-center">
-            <div className="w-10 h-10 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-full bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 flex items-center justify-center">
               <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
                 <rect x="2" y="3" width="14" height="12" rx="2" stroke="#52525b" strokeWidth="1.4"/>
                 <path d="M6 3V1M12 3V1M2 7h14" stroke="#52525b" strokeWidth="1.4" strokeLinecap="round"/>
