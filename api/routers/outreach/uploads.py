@@ -38,6 +38,10 @@ _bg_engine = create_async_engine(_BG_DATABASE_URL, poolclass=pool.NullPool) if _
 # Store background task references so they aren't garbage-collected
 _active_import_tasks: dict[str, asyncio.Task] = {}
 
+# Import control: pause/cancel state per upload_id
+_import_pause_events: dict[str, asyncio.Event] = {}   # set=running, clear=paused
+_import_cancel_flags: dict[str, bool] = {}
+
 
 def _parse_csv_line(line: str) -> list[str]:
     """Parse a single CSV line handling quoted fields and escaped quotes ("")."""
@@ -184,13 +188,99 @@ async def start_import(
 
     await db.flush()
 
+    # Set up control state
+    pause_event = asyncio.Event()
+    pause_event.set()  # start running (not paused)
+    _import_pause_events[upload_id] = pause_event
+    _import_cancel_flags[upload_id] = False
+
+    def _cleanup(t):
+        _active_import_tasks.pop(upload_id, None)
+        _import_pause_events.pop(upload_id, None)
+        _import_cancel_flags.pop(upload_id, None)
+
     task = asyncio.create_task(
         _process_csv_import(upload_id, upload.storage_path, body.field_mappings, body.duplicate_mode)
     )
     _active_import_tasks[upload_id] = task
-    task.add_done_callback(lambda t: _active_import_tasks.pop(upload_id, None))
+    task.add_done_callback(_cleanup)
 
     return {"id": upload_id, "status": "processing"}
+
+
+@router.post("/uploads/{upload_id}/pause", status_code=200)
+async def pause_import(
+    upload_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Pause a running import. The import will finish its current batch then wait."""
+    if upload_id not in _active_import_tasks:
+        raise HTTPException(404, "No active import for this upload")
+
+    event = _import_pause_events.get(upload_id)
+    if not event:
+        raise HTTPException(404, "No active import for this upload")
+
+    event.clear()  # clear = paused
+
+    result = await db.execute(select(UploadHistory).where(UploadHistory.id == upload_id))
+    upload = result.scalar_one_or_none()
+    if upload:
+        upload.status = "paused"
+        await db.flush()
+
+    return {"id": upload_id, "status": "paused"}
+
+
+@router.post("/uploads/{upload_id}/resume", status_code=200)
+async def resume_import(
+    upload_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Resume a paused import."""
+    if upload_id not in _active_import_tasks:
+        raise HTTPException(404, "No active import for this upload")
+
+    event = _import_pause_events.get(upload_id)
+    if not event:
+        raise HTTPException(404, "No active import for this upload")
+
+    event.set()  # set = running
+
+    result = await db.execute(select(UploadHistory).where(UploadHistory.id == upload_id))
+    upload = result.scalar_one_or_none()
+    if upload:
+        upload.status = "processing"
+        await db.flush()
+
+    return {"id": upload_id, "status": "processing"}
+
+
+@router.post("/uploads/{upload_id}/cancel", status_code=200)
+async def cancel_import(
+    upload_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Cancel a running or paused import. Already-inserted rows remain in the database."""
+    if upload_id not in _active_import_tasks:
+        raise HTTPException(404, "No active import for this upload")
+
+    _import_cancel_flags[upload_id] = True
+    # If paused, unpause so the loop can exit
+    event = _import_pause_events.get(upload_id)
+    if event:
+        event.set()
+
+    result = await db.execute(select(UploadHistory).where(UploadHistory.id == upload_id))
+    upload = result.scalar_one_or_none()
+    if upload:
+        upload.status = "cancelled"
+        await db.flush()
+
+    return {"id": upload_id, "status": "cancelled"}
 
 
 @router.get("/uploads/{upload_id}/status")
@@ -287,12 +377,24 @@ async def delete_upload(
     if not upload:
         raise HTTPException(404, "Upload not found")
 
-    if upload.status == "processing":
-        raise HTTPException(409, "Cannot delete while import is in progress. Wait for it to finish or fail.")
+    if upload.status in ("processing", "paused"):
+        # Cancel the import first if it's still running
+        if upload_id in _active_import_tasks:
+            _import_cancel_flags[upload_id] = True
+            event = _import_pause_events.get(upload_id)
+            if event:
+                event.set()
+            # Wait briefly for task to finish
+            task = _active_import_tasks.get(upload_id)
+            if task:
+                try:
+                    await asyncio.wait_for(task, timeout=5.0)
+                except (asyncio.TimeoutError, Exception):
+                    task.cancel()
 
     deleted_contacts = 0
 
-    if upload.status in ("complete", "failed"):
+    if upload.status in ("complete", "failed", "cancelled"):
         count_result = await db.execute(
             select(sa_func.count()).select_from(Contact).where(Contact.upload_id == upload_id)
         )
@@ -428,6 +530,38 @@ async def _process_csv_import(
         last_progress_at = 0
 
         for batch_start in range(0, total_rows, BATCH_SIZE):
+            # Check for cancel
+            if _import_cancel_flags.get(upload_id, False):
+                print(f"[IMPORT] Cancelled: {upload_id} at row {batch_start}")
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        update(UploadHistory.__table__)
+                        .where(UploadHistory.__table__.c.id == upload_id)
+                        .values(status="cancelled", processed_rows=processed,
+                                inserted_count=inserted, skipped_count=skipped,
+                                overwritten_count=overwritten)
+                    )
+                return
+
+            # Check for pause — wait until resumed
+            pause_event = _import_pause_events.get(upload_id)
+            if pause_event and not pause_event.is_set():
+                print(f"[IMPORT] Paused: {upload_id} at row {batch_start}")
+                await pause_event.wait()
+                # Re-check cancel after resume
+                if _import_cancel_flags.get(upload_id, False):
+                    print(f"[IMPORT] Cancelled after pause: {upload_id}")
+                    async with engine.begin() as conn:
+                        await conn.execute(
+                            update(UploadHistory.__table__)
+                            .where(UploadHistory.__table__.c.id == upload_id)
+                            .values(status="cancelled", processed_rows=processed,
+                                    inserted_count=inserted, skipped_count=skipped,
+                                    overwritten_count=overwritten)
+                        )
+                    return
+                print(f"[IMPORT] Resumed: {upload_id}")
+
             batch_rows = data_rows[batch_start:batch_start + BATCH_SIZE]
             rows_to_insert = []
 

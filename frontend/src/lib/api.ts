@@ -461,6 +461,33 @@ export async function deleteUpload(uploadId: string): Promise<{ id: string; dele
   return res.json();
 }
 
+export async function pauseImport(uploadId: string): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/outreach/uploads/${uploadId}/pause`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to pause import");
+  return res.json();
+}
+
+export async function resumeImport(uploadId: string): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/outreach/uploads/${uploadId}/resume`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to resume import");
+  return res.json();
+}
+
+export async function cancelImport(uploadId: string): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/outreach/uploads/${uploadId}/cancel`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to cancel import");
+  return res.json();
+}
+
 /* ── Outreach: Custom Fields ───────────────────────────────────────────── */
 
 export interface ApiCustomField {

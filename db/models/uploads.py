@@ -63,6 +63,7 @@ class Contact(Base):
     user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     upload_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("upload_history.id", ondelete="SET NULL"))
     bucket_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("outreach_buckets.id", ondelete="SET NULL"))
+    assignment_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("webinar_list_assignments.id", ondelete="SET NULL"))
 
     # Core identity
     contact_id: Mapped[Optional[str]] = mapped_column(Text)
@@ -98,6 +99,7 @@ class Contact(Base):
     # Relationships
     bucket = relationship("OutreachBucket")
     upload = relationship("UploadHistory")
+    assignment = relationship("WebinarListAssignment")
 
     __table_args__ = (
         UniqueConstraint("user_id", "email", name="uq_contacts_user_email"),
@@ -105,4 +107,6 @@ class Contact(Base):
         Index("ix_contacts_bucket_id", "bucket_id"),
         Index("ix_contacts_upload_id", "upload_id"),
         Index("ix_contacts_email", "user_id", "email"),
+        Index("ix_contacts_assignment_id", "assignment_id"),
+        Index("ix_contacts_bucket_unassigned", "bucket_id", "assignment_id"),
     )

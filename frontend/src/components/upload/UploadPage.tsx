@@ -3,7 +3,7 @@
 import { useState, useCallback, useRef, useEffect, type DragEvent, type ChangeEvent } from "react";
 import {
   uploadCsvFile, startImport, fetchUploads, fetchUploadStatus, fetchUploadHeaders,
-  deleteUpload,
+  deleteUpload, pauseImport, resumeImport, cancelImport,
   type ApiUpload, type UploadFileResponse, type UploadStatusResponse,
 } from "@/lib/api";
 
@@ -95,6 +95,7 @@ export function UploadPage() {
   const [deleteTarget, setDeleteTarget] = useState<ApiUpload | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [detailStatus, setDetailStatus] = useState<UploadStatusResponse | null>(null);
+  const [controlLoading, setControlLoading] = useState(false);
 
   /* ── Load upload history ─────────────────────────────────────────── */
   const loadHistory = useCallback(() => {
@@ -107,10 +108,10 @@ export function UploadPage() {
     loadHistory();
   }, [loadHistory]);
 
-  // Poll for active imports
+  // Poll for active imports (include paused to keep status fresh)
   useEffect(() => {
     const hasActive = uploadHistory.some(
-      (u) => u.status === "pending" || u.status === "processing" || u.status === "uploading"
+      (u) => u.status === "pending" || u.status === "processing" || u.status === "uploading" || u.status === "paused"
     );
     if (!hasActive) return;
 
@@ -225,7 +226,7 @@ export function UploadPage() {
     };
     load();
 
-    if (selectedUpload.status === "processing" || selectedUpload.status === "pending") {
+    if (selectedUpload.status === "processing" || selectedUpload.status === "pending" || selectedUpload.status === "paused") {
       const interval = setInterval(load, 2000);
       return () => clearInterval(interval);
     }
@@ -255,6 +256,54 @@ export function UploadPage() {
     }
   }, [loadHistory]);
 
+  /* ── Import control handlers ──────────────────────────────────────── */
+
+  const handlePause = useCallback(async (uploadId: string) => {
+    setControlLoading(true);
+    try {
+      await pauseImport(uploadId);
+      loadHistory();
+      if (selectedUpload?.id === uploadId) {
+        setSelectedUpload((prev) => prev ? { ...prev, status: "paused" } : null);
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to pause");
+    } finally {
+      setControlLoading(false);
+    }
+  }, [loadHistory, selectedUpload]);
+
+  const handleResume = useCallback(async (uploadId: string) => {
+    setControlLoading(true);
+    try {
+      await resumeImport(uploadId);
+      loadHistory();
+      if (selectedUpload?.id === uploadId) {
+        setSelectedUpload((prev) => prev ? { ...prev, status: "processing" } : null);
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to resume");
+    } finally {
+      setControlLoading(false);
+    }
+  }, [loadHistory, selectedUpload]);
+
+  const handleCancel = useCallback(async (uploadId: string) => {
+    if (!confirm("Cancel this import? Already-imported rows will remain in the database.")) return;
+    setControlLoading(true);
+    try {
+      await cancelImport(uploadId);
+      loadHistory();
+      if (selectedUpload?.id === uploadId) {
+        setSelectedUpload((prev) => prev ? { ...prev, status: "cancelled" } : null);
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to cancel");
+    } finally {
+      setControlLoading(false);
+    }
+  }, [loadHistory, selectedUpload]);
+
   /* ── Custom field ────────────────────────────────────────────────── */
 
   const addCustomField = useCallback(() => {
@@ -279,6 +328,8 @@ export function UploadPage() {
       case "complete": return "#10b981";
       case "processing": return "#3b82f6";
       case "pending": case "uploading": return "#f59e0b";
+      case "paused": return "#f59e0b";
+      case "cancelled": return "#6b7280";
       case "failed": return "#ef4444";
       default: return "#6b7280";
     }
@@ -289,6 +340,8 @@ export function UploadPage() {
       case "complete": return "✓";
       case "processing": return "⏳";
       case "pending": case "uploading": return "⏳";
+      case "paused": return "⏸";
+      case "cancelled": return "⊘";
       case "failed": return "✗";
       default: return "?";
     }
@@ -576,7 +629,7 @@ export function UploadPage() {
           </h3>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {uploadHistory.map((u) => {
-              const isActive = u.status === "processing" || u.status === "pending" || u.status === "uploading";
+              const isActive = u.status === "processing" || u.status === "pending" || u.status === "uploading" || u.status === "paused";
               return (
               <div
                 key={u.id}
@@ -624,8 +677,8 @@ export function UploadPage() {
                   <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                     <div style={{ textAlign: "right" }}>
                       {isActive && u.status !== "uploading" && (
-                        <span style={{ fontSize: 14, color: "#3b82f6", fontWeight: 600 }}>
-                          {u.progress}%
+                        <span style={{ fontSize: 14, color: u.status === "paused" ? "#f59e0b" : "#3b82f6", fontWeight: 600 }}>
+                          {u.status === "paused" ? "Paused" : `${u.progress}%`}
                         </span>
                       )}
                       {u.status === "uploading" && (
@@ -641,12 +694,15 @@ export function UploadPage() {
                           {formatNumber(u.total_contacts)}
                         </span>
                       )}
+                      {u.status === "cancelled" && (
+                        <span style={{ fontSize: 13, color: "#6b7280", fontWeight: 500 }}>Cancelled</span>
+                      )}
                       {u.status === "failed" && (
                         <span style={{ fontSize: 13, color: "#ef4444", fontWeight: 500 }}>Failed</span>
                       )}
                     </div>
                     {/* Delete button — hidden for processing imports */}
-                    {u.status !== "processing" && u.status !== "pending" && (
+                    {u.status !== "processing" && u.status !== "pending" && u.status !== "paused" && (
                       <button
                         onClick={(e) => { e.stopPropagation(); setDeleteTarget(u); }}
                         title="Delete this import"
@@ -672,18 +728,58 @@ export function UploadPage() {
                   </div>
                 </div>
 
-                {/* Progress bar for active imports */}
+                {/* Progress bar and controls for active imports */}
                 {isActive && u.status !== "uploading" && (
-                  <div style={{
-                    background: "var(--background)", borderRadius: 6, height: 6,
-                    overflow: "hidden", marginTop: 14, border: "1px solid var(--border-subtle)"
-                  }}>
+                  <div style={{ marginTop: 14 }}>
                     <div style={{
-                      height: "100%", borderRadius: 6,
-                      background: "linear-gradient(90deg, #3b82f6, #8b5cf6)",
-                      width: `${u.progress}%`,
-                      transition: "width 500ms ease",
-                    }} />
+                      background: "var(--background)", borderRadius: 6, height: 6,
+                      overflow: "hidden", border: "1px solid var(--border-subtle)"
+                    }}>
+                      <div style={{
+                        height: "100%", borderRadius: 6,
+                        background: u.status === "paused"
+                          ? "linear-gradient(90deg, #f59e0b, #d97706)"
+                          : "linear-gradient(90deg, #3b82f6, #8b5cf6)",
+                        width: `${u.progress}%`,
+                        transition: "width 500ms ease",
+                      }} />
+                    </div>
+                    {/* Inline import controls */}
+                    <div style={{ display: "flex", gap: 8, marginTop: 10, justifyContent: "flex-end" }}>
+                      {u.status === "processing" && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handlePause(u.id); }}
+                          disabled={controlLoading}
+                          style={{
+                            background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.3)",
+                            borderRadius: 6, padding: "5px 12px", fontSize: 12, fontWeight: 600,
+                            color: "#f59e0b", cursor: "pointer", transition: "all 150ms",
+                          }}
+                        >⏸ Pause</button>
+                      )}
+                      {u.status === "paused" && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleResume(u.id); }}
+                          disabled={controlLoading}
+                          style={{
+                            background: "rgba(59,130,246,0.08)", border: "1px solid rgba(59,130,246,0.3)",
+                            borderRadius: 6, padding: "5px 12px", fontSize: 12, fontWeight: 600,
+                            color: "#3b82f6", cursor: "pointer", transition: "all 150ms",
+                          }}
+                        >▶ Resume</button>
+                      )}
+                      {(u.status === "processing" || u.status === "paused") && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleCancel(u.id); }}
+                          disabled={controlLoading}
+                          style={{
+                            background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.3)",
+                            borderRadius: 6, padding: "5px 12px", fontSize: 12, fontWeight: 600,
+                            color: "#ef4444", cursor: "pointer", transition: "all 150ms",
+                          }}
+                        >✕ Cancel</button>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
@@ -750,22 +846,65 @@ export function UploadPage() {
 
             {/* Body */}
             <div style={{ padding: "20px 24px" }}>
-              {/* Progress bar */}
-              {(selectedUpload.status === "processing" || selectedUpload.status === "pending") && (
+              {/* Progress bar + controls */}
+              {(selectedUpload.status === "processing" || selectedUpload.status === "pending" || selectedUpload.status === "paused") && (
                 <div style={{ marginBottom: 20 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                    <span style={{ fontSize: 13, color: "var(--muted-foreground)" }}>Importing...</span>
-                    <span style={{ fontSize: 13, fontWeight: 600, color: "#3b82f6" }}>
+                    <span style={{ fontSize: 13, color: "var(--muted-foreground)" }}>
+                      {selectedUpload.status === "paused" ? "Paused" : "Importing..."}
+                    </span>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: selectedUpload.status === "paused" ? "#f59e0b" : "#3b82f6" }}>
                       {detailStatus?.progress ?? selectedUpload.progress}%
                     </span>
                   </div>
                   <div style={{ background: "var(--border-subtle)", borderRadius: 6, height: 8, overflow: "hidden" }}>
                     <div style={{
                       height: "100%", borderRadius: 6,
-                      background: "linear-gradient(90deg, #3b82f6, #8b5cf6)",
+                      background: selectedUpload.status === "paused"
+                        ? "linear-gradient(90deg, #f59e0b, #d97706)"
+                        : "linear-gradient(90deg, #3b82f6, #8b5cf6)",
                       width: `${detailStatus?.progress ?? selectedUpload.progress}%`,
                       transition: "width 500ms ease",
                     }} />
+                  </div>
+                  {/* Control buttons */}
+                  <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                    {selectedUpload.status === "processing" && (
+                      <button
+                        onClick={() => handlePause(selectedUpload.id)}
+                        disabled={controlLoading}
+                        style={{
+                          flex: 1, padding: "8px 0", fontSize: 13, fontWeight: 600,
+                          background: "rgba(245,158,11,0.08)", color: "#f59e0b",
+                          border: "1px solid rgba(245,158,11,0.3)", borderRadius: 8,
+                          cursor: controlLoading ? "wait" : "pointer", transition: "all 150ms",
+                        }}
+                      >⏸ Pause Import</button>
+                    )}
+                    {selectedUpload.status === "paused" && (
+                      <button
+                        onClick={() => handleResume(selectedUpload.id)}
+                        disabled={controlLoading}
+                        style={{
+                          flex: 1, padding: "8px 0", fontSize: 13, fontWeight: 600,
+                          background: "rgba(59,130,246,0.08)", color: "#3b82f6",
+                          border: "1px solid rgba(59,130,246,0.3)", borderRadius: 8,
+                          cursor: controlLoading ? "wait" : "pointer", transition: "all 150ms",
+                        }}
+                      >▶ Resume Import</button>
+                    )}
+                    {(selectedUpload.status === "processing" || selectedUpload.status === "paused") && (
+                      <button
+                        onClick={() => handleCancel(selectedUpload.id)}
+                        disabled={controlLoading}
+                        style={{
+                          flex: 1, padding: "8px 0", fontSize: 13, fontWeight: 600,
+                          background: "rgba(239,68,68,0.08)", color: "#ef4444",
+                          border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8,
+                          cursor: controlLoading ? "wait" : "pointer", transition: "all 150ms",
+                        }}
+                      >✕ Cancel Import</button>
+                    )}
                   </div>
                 </div>
               )}

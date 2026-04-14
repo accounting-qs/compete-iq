@@ -1,6 +1,6 @@
 """Outreach sub-router: Webinars + Assignments CRUD + Account tracking."""
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, func as sa_func, delete
+from sqlalchemy import select, func as sa_func, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -11,6 +11,7 @@ from api.routers.outreach._helpers import (
 from api.schemas import WebinarCreate, WebinarUpdate, AssignRequest, AssignmentUpdate
 from db.models import (
     OutreachBucket, OutreachSender, Webinar, WebinarListAssignment, CopyUsageLog,
+    Contact,
 )
 from db.session import get_db
 
@@ -129,8 +130,20 @@ async def assign_bucket(
     if not bucket:
         raise HTTPException(404, "Bucket not found")
 
-    if bucket.remaining_contacts < body.volume:
-        raise HTTPException(400, f"Volume {body.volume} exceeds bucket remaining {bucket.remaining_contacts}")
+    # Count actual unassigned contacts in this bucket
+    unassigned_count_result = await db.execute(
+        select(sa_func.count()).where(
+            Contact.bucket_id == body.bucket_id,
+            Contact.assignment_id.is_(None),
+        )
+    )
+    unassigned_count = unassigned_count_result.scalar() or 0
+
+    if unassigned_count < body.volume:
+        raise HTTPException(
+            400,
+            f"Volume {body.volume} exceeds available unassigned contacts ({unassigned_count})",
+        )
 
     # Validate sender
     s_result = await db.execute(
@@ -176,9 +189,24 @@ async def assign_bucket(
         display_order=next_order,
     )
     db.add(assignment)
+    await db.flush()  # get assignment.id
 
-    # Decrement bucket remaining
-    bucket.remaining_contacts -= body.volume
+    # Claim unassigned contacts in a single SQL statement (no Python round-trip).
+    # Single UPDATE ... WHERE id IN (SELECT ... LIMIT N) — runs entirely in Postgres.
+    claim_subq = (
+        select(Contact.id)
+        .where(Contact.bucket_id == body.bucket_id, Contact.assignment_id.is_(None))
+        .limit(body.volume)
+    )
+    claim_result = await db.execute(
+        update(Contact)
+        .where(Contact.id.in_(claim_subq))
+        .values(assignment_id=assignment.id)
+    )
+    claimed = claim_result.rowcount
+
+    # Update bucket remaining counter
+    bucket.remaining_contacts = max(0, unassigned_count - claimed)
 
     # Log copy usage
     if title_copy:
@@ -241,14 +269,22 @@ async def delete_assignment(
     if not assignment:
         raise HTTPException(404, "Assignment not found")
 
-    # Restore bucket remaining
-    if assignment.bucket_id:
+    # Release claimed contacts in a single indexed UPDATE — no row-by-row
+    release_result = await db.execute(
+        update(Contact)
+        .where(Contact.assignment_id == assignment_id)
+        .values(assignment_id=None)
+    )
+    released = release_result.rowcount
+
+    # Restore bucket remaining using rowcount (no extra COUNT query)
+    if assignment.bucket_id and released > 0:
         b_result = await db.execute(select(OutreachBucket).where(OutreachBucket.id == assignment.bucket_id))
         bucket = b_result.scalar_one_or_none()
         if bucket:
-            bucket.remaining_contacts += assignment.volume
+            bucket.remaining_contacts += released
 
-    # Delete usage logs
+    # Delete usage logs + assignment in parallel deletes
     await db.execute(
         delete(CopyUsageLog).where(CopyUsageLog.assignment_id == assignment_id)
     )

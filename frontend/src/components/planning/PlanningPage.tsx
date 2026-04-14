@@ -5,7 +5,7 @@ import {
   fetchBuckets, fetchSenders, fetchWebinars, fetchWebinarLists,
   assignBucketToWebinar, createWebinar as apiCreateWebinar,
   updateSender as apiUpdateSender, fetchBucketCopies, generateCopies,
-  createSender as apiCreateSender,
+  createSender as apiCreateSender, deleteAssignment as apiDeleteAssignment,
   type ApiBucket, type ApiSender, type ApiWebinar, type ApiAssignment, type ApiCopy,
 } from "@/lib/api";
 
@@ -50,7 +50,6 @@ interface Webinar {
   mainTitle: string;
   lists: PlannedList[];
   expanded: boolean;
-  showAssignment: boolean;
 }
 
 interface Sender {
@@ -270,7 +269,6 @@ export function PlanningPage() {
             mainTitle: w.main_title || "",
             lists,
             expanded: w.status === "planning",
-            showAssignment: w.status === "planning",
           });
         }
 
@@ -313,9 +311,7 @@ export function PlanningPage() {
         }
 
         setWebinars(webinarList);
-        // Default assignment target to first planning webinar
-        const planningW = webinarList.find(w => w.status.toLowerCase() === "planning");
-        if (planningW) setAssignWebinar(planningW.id);
+        // Assignment form is not auto-opened — user clicks "Assign Lists"
       } catch (err) {
         console.error("Failed to load data:", err);
       } finally {
@@ -355,11 +351,11 @@ export function PlanningPage() {
   const [newWebinarNumber, setNewWebinarNumber] = useState(0);
   const [newWebinarDate, setNewWebinarDate] = useState("");
 
-  // Assignment form state
+  // Assignment form state — scoped to one webinar at a time
+  const [assigningWebinarId, setAssigningWebinarId] = useState<string | null>(null);
   const [assignBucket, setAssignBucket] = useState("");
   const [assignSender, setAssignSender] = useState("");
   const [assignVolume, setAssignVolume] = useState(0);
-  const [assignWebinar, setAssignWebinar] = useState("");
   // Assignment filter overrides (pre-filled from bucket, editable)
   const [assignCountries, setAssignCountries] = useState("");
   const [assignEmpRange, setAssignEmpRange] = useState("");
@@ -456,6 +452,23 @@ export function PlanningPage() {
     setWebinars((prev) => prev.map((w) => (w.id === id ? { ...w, expanded: !w.expanded } : w)));
   };
 
+  const toggleAssignForm = (webinarId: string) => {
+    if (assigningWebinarId === webinarId) {
+      setAssigningWebinarId(null);
+    } else {
+      // Reset form and open for this webinar
+      setAssigningWebinarId(webinarId);
+      setAssignBucket("");
+      setAssignSender("");
+      setAssignVolume(0);
+      setAssignCountries("");
+      setAssignEmpRange("");
+      setAssignAccounts(0);
+      setAssignSendPerAcct(0);
+      setAssignDays(5);
+    }
+  };
+
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -478,7 +491,7 @@ export function PlanningPage() {
   };
 
   const handleAssign = useCallback(async () => {
-    if (!assignBucket || !assignSender || assignVolume <= 0 || !assignWebinar) return;
+    if (!assignBucket || !assignSender || assignVolume <= 0 || !assigningWebinarId) return;
     const bucket = buckets.find((b) => b.id === assignBucket);
     const sender = senders.find((s) => s.id === assignSender);
     if (!bucket || !sender) return;
@@ -493,8 +506,9 @@ export function PlanningPage() {
     const countries = assignCountries || (bucket.countries || []).join(", ");
     const empRange = assignEmpRange || bucket.emp_range || "";
 
+    const targetWebinarId = assigningWebinarId;
     try {
-      const assignment = await assignBucketToWebinar(assignWebinar, {
+      const assignment = await assignBucketToWebinar(targetWebinarId, {
         bucket_id: assignBucket,
         sender_id: assignSender,
         volume,
@@ -508,7 +522,7 @@ export function PlanningPage() {
       // Add to webinar in local state
       const newList = apiAssignmentToList(assignment);
       setWebinars((prev) => prev.map((w) =>
-        w.id === assignWebinar ? { ...w, lists: [...w.lists, newList] } : w
+        w.id === targetWebinarId ? { ...w, lists: [...w.lists, newList] } : w
       ));
 
       // Decrease bucket remaining
@@ -529,7 +543,40 @@ export function PlanningPage() {
       console.error("Failed to assign:", err);
       alert(err instanceof Error ? err.message : "Failed to assign bucket");
     }
-  }, [assignBucket, assignSender, assignVolume, assignWebinar, assignCountries, assignEmpRange, assignAccounts, assignSendPerAcct, assignDays, buckets, senders]);
+  }, [assignBucket, assignSender, assignVolume, assigningWebinarId, assignCountries, assignEmpRange, assignAccounts, assignSendPerAcct, assignDays, buckets, senders]);
+
+  const handleDeleteAssignment = useCallback(async (listId: string, webinarId: string) => {
+    const w = webinars.find((w) => w.id === webinarId);
+    const list = w?.lists.find((l) => l.id === listId);
+    if (!list) return;
+    if (!confirm(`Remove "${list.bucket}" (${list.listSize.toLocaleString()} contacts) from W${w?.number}? Contacts will be released back to the bucket.`)) return;
+
+    try {
+      await apiDeleteAssignment(listId);
+
+      // Remove list from webinar in local state
+      setWebinars((prev) => prev.map((w) =>
+        w.id === webinarId ? { ...w, lists: w.lists.filter((l) => l.id !== listId) } : w
+      ));
+
+      // Restore bucket remaining (backend recalculates from actual contacts)
+      if (list.bucketId) {
+        setBuckets((prev) => prev.map((b) =>
+          b.id === list.bucketId ? { ...b, remaining_contacts: b.remaining_contacts + list.listSize } : b
+        ));
+      }
+
+      // Deselect if selected
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(listId);
+        return next;
+      });
+    } catch (err) {
+      console.error("Failed to delete assignment:", err);
+      alert(err instanceof Error ? err.message : "Failed to delete assignment");
+    }
+  }, [webinars]);
 
   const openCopyModal = () => {
     const lists = webinars.flatMap((w) => w.lists).filter((l) => selectedIds.has(l.id) && !l.isNonjoiners && !l.isNoListData);
@@ -646,10 +693,10 @@ export function PlanningPage() {
         mainTitle: "",
         lists: [],
         expanded: true,
-        showAssignment: true,
       };
       setWebinars((prev) => [newWebinar, ...prev]);
-      setAssignWebinar(created.id);
+      // Auto-open assignment form for the new webinar
+      toggleAssignForm(created.id);
       setShowNewWebinarModal(false);
     } catch (err) {
       console.error("Failed to create webinar:", err);
@@ -847,6 +894,7 @@ export function PlanningPage() {
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[250px]">Description</th>
               <th className="text-right px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Accts</th>
               <th className="text-center px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Copies</th>
+              <th className="w-8 px-2 py-2"></th>
             </tr>
           </thead>
           {filteredWebinars.map((w) => {
@@ -885,15 +933,30 @@ export function PlanningPage() {
                     </td>
                     <td className="px-2 py-2.5 text-right font-mono text-zinc-800 dark:text-zinc-200 font-bold">{wTotal > 0 ? wTotal.toLocaleString() : ""}</td>
                     <td className="px-2 py-2.5 text-right font-mono text-violet-400 font-bold">{wRemain > 0 ? wRemain.toLocaleString() : ""}</td>
-                    <td className="px-2 py-2.5" colSpan={2}></td>
+                    <td className="px-2 py-2.5" colSpan={2}>
+                      {w.expanded && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); toggleAssignForm(w.id); }}
+                          className={`px-2.5 py-1 text-[10px] font-semibold rounded-md transition-colors flex items-center gap-1 ${
+                            assigningWebinarId === w.id
+                              ? "bg-violet-600 text-white"
+                              : "bg-zinc-200 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-violet-500/20 hover:text-violet-500"
+                          }`}
+                        >
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                          Assign Lists
+                        </button>
+                      )}
+                    </td>
                     <td className="px-2 py-2.5 text-right font-mono text-emerald-400 font-bold">{wAccounts > 0 ? wAccounts : ""}</td>
+                    <td className="px-2 py-2.5"></td>
                     <td className="px-2 py-2.5"></td>
                   </tr>
 
-                  {/* ── Assignment section (for Planning webinars) ──── */}
-                  {w.expanded && w.showAssignment && (
+                  {/* ── Assignment section (only for the active webinar) ── */}
+                  {w.expanded && assigningWebinarId === w.id && (
                     <tr>
-                      <td colSpan={13} className="p-0">
+                      <td colSpan={14} className="p-0">
                         <div className="relative z-20 bg-zinc-50 dark:bg-zinc-900/40 border-y border-zinc-200 dark:border-zinc-800/30 px-6 py-4">
                           <div className="flex items-center justify-between mb-3">
                             <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">Assign Buckets to W{w.number}</span>
@@ -1186,6 +1249,19 @@ export function PlanningPage() {
                         ) : !l.isNonjoiners && !l.isNoListData ? (
                           <span className="text-zinc-600 text-[10px]">—</span>
                         ) : null}
+                      </td>
+                      <td className="px-2 py-1.5 text-center">
+                        {!l.isNonjoiners && !l.isNoListData && (
+                          <button
+                            onClick={() => handleDeleteAssignment(l.id, w.id)}
+                            className="p-1 rounded hover:bg-red-500/10 text-zinc-500 hover:text-red-400 transition-colors"
+                            title="Remove assignment"
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+                            </svg>
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
