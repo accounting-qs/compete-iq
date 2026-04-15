@@ -71,6 +71,8 @@ def webinar_dict(w: Webinar) -> dict:
         "status": w.status,
         "broadcast_id": w.broadcast_id,
         "main_title": w.main_title,
+        "registration_link": w.registration_link,
+        "unsubscribe_link": w.unsubscribe_link,
         "assignment_count": len(assignments),
         "total_volume": sum(a.volume for a in assignments),
         "total_remaining": sum(a.remaining for a in assignments),

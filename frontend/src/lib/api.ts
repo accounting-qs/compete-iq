@@ -98,6 +98,8 @@ export interface ApiWebinar {
   status: string;
   broadcast_id: string | null;
   main_title: string | null;
+  registration_link: string | null;
+  unsubscribe_link: string | null;
   assignment_count: number;
   total_volume: number;
   total_remaining: number;
@@ -322,7 +324,7 @@ export async function createWebinar(data: { number: number; date: string }): Pro
 
 export async function updateWebinar(
   webinarId: string,
-  data: Partial<{ number: number; date: string; status: string; broadcast_id: string; main_title: string }>
+  data: Partial<{ number: number; date: string; status: string; broadcast_id: string; main_title: string; registration_link: string; unsubscribe_link: string }>
 ): Promise<ApiWebinar> {
   const res = await fetch(`${API_URL}/outreach/webinars/${webinarId}`, {
     method: "PUT",

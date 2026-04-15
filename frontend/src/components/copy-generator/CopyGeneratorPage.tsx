@@ -665,6 +665,8 @@ export function CopyGeneratorPage() {
                 const primaryDesc = getPrimary(bucket.id, "description");
                 const titleVariants = getCopies(bucket.id, "title");
                 const descVariants = getCopies(bucket.id, "description");
+                const primaryTitleIdx = titleVariants.findIndex(v => v.isPrimary);
+                const primaryDescIdx = descVariants.findIndex(v => v.isPrimary);
                 const isTitleEditing = editingCell?.bucketId === bucket.id && editingCell?.type === "title";
                 const isDescEditing = editingCell?.bucketId === bucket.id && editingCell?.type === "description";
 
@@ -707,13 +709,22 @@ export function CopyGeneratorPage() {
                               rows={2}
                             />
                           ) : (
-                            <p
-                              className="text-xs text-zinc-700 dark:text-zinc-300 leading-snug line-clamp-2 cursor-text hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
-                              onClick={() => startInlineEdit(bucket.id, "title", primaryTitle.text)}
-                              title={primaryTitle.text}
-                            >
-                              {primaryTitle.text}
-                            </p>
+                            <>
+                              {titleVariants.length > 1 && primaryTitleIdx >= 0 && (
+                                <span className="inline-flex items-center gap-1 mb-1">
+                                  <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-violet-100 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400">
+                                    Variant {primaryTitleIdx + 1}
+                                  </span>
+                                </span>
+                              )}
+                              <p
+                                className="text-xs text-zinc-700 dark:text-zinc-300 leading-snug line-clamp-2 cursor-text hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+                                onClick={() => startInlineEdit(bucket.id, "title", primaryTitle.text)}
+                                title={primaryTitle.text}
+                              >
+                                {primaryTitle.text}
+                              </p>
+                            </>
                           )}
                           {titleVariants.length > 1 && (
                             <button
@@ -756,13 +767,22 @@ export function CopyGeneratorPage() {
                               rows={3}
                             />
                           ) : (
-                            <p
-                              className="text-xs text-zinc-700 dark:text-zinc-300 leading-snug line-clamp-2 cursor-text hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
-                              onClick={() => startInlineEdit(bucket.id, "description", primaryDesc.text)}
-                              title={primaryDesc.text}
-                            >
-                              {primaryDesc.text}
-                            </p>
+                            <>
+                              {descVariants.length > 1 && primaryDescIdx >= 0 && (
+                                <span className="inline-flex items-center gap-1 mb-1">
+                                  <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400">
+                                    Variant {primaryDescIdx + 1}
+                                  </span>
+                                </span>
+                              )}
+                              <p
+                                className="text-xs text-zinc-700 dark:text-zinc-300 leading-snug line-clamp-2 cursor-text hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+                                onClick={() => startInlineEdit(bucket.id, "description", primaryDesc.text)}
+                                title={primaryDesc.text}
+                              >
+                                {primaryDesc.text}
+                              </p>
+                            </>
                           )}
                           {descVariants.length > 1 && (
                             <button

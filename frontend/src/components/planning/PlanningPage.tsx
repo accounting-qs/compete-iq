@@ -1,17 +1,62 @@
 "use client";
 
-import { useState, useMemo, useCallback, useRef, useEffect } from "react";
+import { useState, useMemo, useCallback, useRef, useEffect, type ReactNode } from "react";
 import {
   fetchBuckets, fetchSenders, fetchWebinars, fetchWebinarLists,
   assignBucketToWebinar, createWebinar as apiCreateWebinar,
   updateSender as apiUpdateSender, fetchBucketCopies, generateCopies,
   createSender as apiCreateSender, deleteAssignment as apiDeleteAssignment,
   updateAssignment as apiUpdateAssignment, updateWebinar as apiUpdateWebinar,
-  deleteWebinar as apiDeleteWebinar,
+  deleteWebinar as apiDeleteWebinar, deleteCopy,
   type ApiBucket, type ApiSender, type ApiWebinar, type ApiAssignment, type ApiCopy,
 } from "@/lib/api";
 
-/* ─── Types ────────────────────────────────────────────────────────────── */
+/* ─── Copy link helper ────────────────────────────────────────────────── */
+
+/**
+ * Replace occurrences of "Register" and "Unsubscribe" in copy text with
+ * hyperlinks to the webinar-level registration and unsubscribe URLs.
+ * Case-insensitive match. Returns React nodes.
+ */
+function linkifyCopyText(
+  text: string,
+  registrationLink: string,
+  unsubscribeLink: string,
+): ReactNode {
+  if (!registrationLink && !unsubscribeLink) return text;
+
+  // Build a regex that matches whichever words we have links for
+  const patterns: string[] = [];
+  if (registrationLink) patterns.push("register");
+  if (unsubscribeLink) patterns.push("unsubscribe");
+  if (patterns.length === 0) return text;
+
+  const regex = new RegExp(`(${patterns.join("|")})`, "gi");
+  const parts = text.split(regex);
+
+  if (parts.length === 1) return text;
+
+  return parts.map((part, i) => {
+    const lower = part.toLowerCase();
+    if (lower === "register" && registrationLink) {
+      return (
+        <a key={i} href={registrationLink} target="_blank" rel="noopener noreferrer"
+          className="text-violet-500 hover:text-violet-400 underline underline-offset-2"
+        >{part}</a>
+      );
+    }
+    if (lower === "unsubscribe" && unsubscribeLink) {
+      return (
+        <a key={i} href={unsubscribeLink} target="_blank" rel="noopener noreferrer"
+          className="text-zinc-500 hover:text-zinc-400 underline underline-offset-2"
+        >{part}</a>
+      );
+    }
+    return part;
+  });
+}
+
+/* ─── Types ──────────────��──────────────────────────────��──────────────── */
 
 // AvailableBucket now uses ApiBucket from API
 type AvailableBucket = ApiBucket;
@@ -45,6 +90,8 @@ interface Webinar {
   status: string;
   broadcastId: string;
   mainTitle: string;
+  registrationLink: string;
+  unsubscribeLink: string;
   lists: PlannedList[];
   expanded: boolean;
 }
@@ -247,6 +294,8 @@ export function PlanningPage() {
             status: w.status.charAt(0).toUpperCase() + w.status.slice(1),
             broadcastId: w.broadcast_id || "—",
             mainTitle: w.main_title || "",
+            registrationLink: w.registration_link || "",
+            unsubscribeLink: w.unsubscribe_link || "",
             lists,
             expanded: w.status === "planning",
           });
@@ -332,7 +381,7 @@ export function PlanningPage() {
   const [newWebinarDate, setNewWebinarDate] = useState("");
 
   // Edit Webinar modal state
-  const [editWebinar, setEditWebinar] = useState<{ id: string; number: number; date: string; broadcastId: string; status: string } | null>(null);
+  const [editWebinar, setEditWebinar] = useState<{ id: string; number: number; date: string; broadcastId: string; status: string; registrationLink: string; unsubscribeLink: string } | null>(null);
 
   // Assignment form state — scoped to one webinar at a time
   const [assigningWebinarId, setAssigningWebinarId] = useState<string | null>(null);
@@ -450,12 +499,14 @@ export function PlanningPage() {
     }
   };
 
-  const handleUpdateWebinar = async (webinarId: string, field: "main_title" | "broadcast_id" | "status" | "number" | "date", value: string | number) => {
+  const handleUpdateWebinar = async (webinarId: string, field: "main_title" | "broadcast_id" | "status" | "number" | "date" | "registration_link" | "unsubscribe_link", value: string | number) => {
     // Optimistic update
     setWebinars((prev) => prev.map((w) => {
       if (w.id !== webinarId) return w;
       if (field === "main_title") return { ...w, mainTitle: value as string };
       if (field === "broadcast_id") return { ...w, broadcastId: (value as string) || "—" };
+      if (field === "registration_link") return { ...w, registrationLink: value as string };
+      if (field === "unsubscribe_link") return { ...w, unsubscribeLink: value as string };
       if (field === "status") return { ...w, status: (value as string).charAt(0).toUpperCase() + (value as string).slice(1) };
       if (field === "number") return { ...w, number: value as number };
       if (field === "date") {
@@ -715,6 +766,37 @@ export function PlanningPage() {
     );
   };
 
+  const deleteVariant = async (listId: string, type: "title" | "desc", variantId: string) => {
+    try {
+      await deleteCopy(variantId);
+    } catch (err) {
+      console.error("Failed to delete variant:", err);
+      return;
+    }
+    const removeFromList = (l: typeof webinars[0]["lists"][0]) => {
+      if (l.id !== listId) return l;
+      const key = type === "title" ? "titleVariants" : "descVariants";
+      const remaining = l[key]?.filter((v) => v.id !== variantId);
+      const wasSelected = l[key]?.find((v) => v.id === variantId)?.selected;
+      // If the deleted variant was selected, auto-select the first remaining
+      if (wasSelected && remaining && remaining.length > 0) {
+        remaining[0].selected = true;
+        if (type === "title") {
+          const payload = { title_copy_id: remaining[0].id };
+          apiUpdateAssignment(listId, payload).catch(() => {});
+          return { ...l, title: remaining[0].text, [key]: remaining };
+        } else {
+          const payload = { desc_copy_id: remaining[0].id };
+          apiUpdateAssignment(listId, payload).catch(() => {});
+          return { ...l, [key]: remaining };
+        }
+      }
+      return { ...l, [key]: remaining };
+    };
+    setWebinars((prev) => prev.map((w) => ({ ...w, lists: w.lists.map(removeFromList) })));
+    setCopyModalLists((prev) => prev.map(removeFromList as any));
+  };
+
   const closeCopyModal = () => {
     setShowCopyModal(false);
     setSelectedIds(new Set());
@@ -740,6 +822,8 @@ export function PlanningPage() {
         status: "Planning",
         broadcastId: "—",
         mainTitle: "",
+        registrationLink: created.registration_link || "",
+        unsubscribeLink: created.unsubscribe_link || "",
         lists: [],
         expanded: true,
       };
@@ -997,6 +1081,8 @@ export function PlanningPage() {
                                 date: !isNaN(d.getTime()) ? d.toISOString().split("T")[0] : "",
                                 broadcastId: w.broadcastId === "—" ? "" : w.broadcastId,
                                 status: w.status.toLowerCase(),
+                                registrationLink: w.registrationLink,
+                                unsubscribeLink: w.unsubscribeLink,
                               });
                             }} className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors" title="Edit webinar">
                               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
@@ -1331,7 +1417,7 @@ export function PlanningPage() {
                       <td className="px-2 py-1.5">
                         {l.title ? (
                           <div className="max-w-[240px]">
-                            <span className="text-zinc-700 dark:text-zinc-300 text-[10px] leading-snug line-clamp-2 block" title={l.title}>{l.title}</span>
+                            <span className="text-zinc-700 dark:text-zinc-300 text-[10px] leading-snug line-clamp-2 block" title={l.title}>{linkifyCopyText(l.title, w.registrationLink, w.unsubscribeLink)}</span>
                             {l.titleVariants && l.titleVariants.length > 1 && (
                               <button onClick={() => setPlanningCopyModal({ listId: l.id, webinarId: w.id, tab: "title" })}
                                 className="text-[9px] text-violet-500 hover:text-violet-400 font-medium mt-0.5 transition-colors">
@@ -1347,7 +1433,7 @@ export function PlanningPage() {
                           const descText = selectedDesc?.text || "";
                           return descText ? (
                             <div className="max-w-[240px]">
-                              <span className="text-zinc-700 dark:text-zinc-300 text-[10px] leading-snug line-clamp-2 block" title={descText}>{descText}</span>
+                              <span className="text-zinc-700 dark:text-zinc-300 text-[10px] leading-snug line-clamp-2 block" title={descText}>{linkifyCopyText(descText, w.registrationLink, w.unsubscribeLink)}</span>
                               {l.descVariants && l.descVariants.length > 1 && (
                                 <button onClick={() => setPlanningCopyModal({ listId: l.id, webinarId: w.id, tab: "description" })}
                                   className="text-[9px] text-blue-500 hover:text-blue-400 font-medium mt-0.5 transition-colors">
@@ -1431,7 +1517,11 @@ export function PlanningPage() {
 
             {/* Modal body */}
             <div className="px-6 py-4 max-h-[70vh] overflow-y-auto space-y-6">
-              {copyModalLists.map((l) => (
+              {copyModalLists.map((l) => {
+                const lWebinar = webinars.find(w => w.id === l.webinarId);
+                const lRegLink = lWebinar?.registrationLink || "";
+                const lUnsubLink = lWebinar?.unsubscribeLink || "";
+                return (
                 <div key={l.id} className="rounded-xl border border-zinc-200 dark:border-zinc-800/60 overflow-hidden">
                   {/* List header */}
                   <div className="bg-zinc-100 dark:bg-zinc-800/30 px-4 py-3 flex items-center justify-between">
@@ -1454,7 +1544,7 @@ export function PlanningPage() {
                         <div className="space-y-2">
                           {l.titleVariants.map((v, i) => (
                             <label key={v.id} onClick={() => selectVariant(l.id, "title", v.id)}
-                              className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
+                              className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all group ${
                                 v.selected ? "border-violet-500/40 bg-violet-500/5" : "border-zinc-200 dark:border-zinc-800/40 hover:border-zinc-300 dark:border-zinc-700/60"
                               }`}>
                               <div className={`w-4 h-4 mt-0.5 rounded-full border-2 flex items-center justify-center shrink-0 ${
@@ -1462,10 +1552,16 @@ export function PlanningPage() {
                               }`}>
                                 {v.selected && <div className="w-1.5 h-1.5 bg-white rounded-full" />}
                               </div>
-                              <div>
+                              <div className="flex-1 min-w-0">
                                 <span className="text-[10px] text-zinc-500 font-semibold uppercase">Variant {String.fromCharCode(65 + i)}</span>
-                                <p className="text-sm text-zinc-800 dark:text-zinc-200 mt-0.5 leading-relaxed">{v.text}</p>
+                                <p className="text-sm text-zinc-800 dark:text-zinc-200 mt-0.5 leading-relaxed">{linkifyCopyText(v.text, lRegLink, lUnsubLink)}</p>
                               </div>
+                              {l.titleVariants!.length > 1 && (
+                                <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); if (confirm("Delete this title variant?")) deleteVariant(l.id, "title", v.id); }}
+                                  className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-100 dark:hover:bg-red-500/10 text-zinc-400 hover:text-red-500 transition-all shrink-0 mt-0.5">
+                                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                                </button>
+                              )}
                             </label>
                           ))}
                         </div>
@@ -1477,7 +1573,7 @@ export function PlanningPage() {
                         <div className="space-y-2">
                           {l.descVariants.map((v, i) => (
                             <label key={v.id} onClick={() => selectVariant(l.id, "desc", v.id)}
-                              className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
+                              className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all group ${
                                 v.selected ? "border-violet-500/40 bg-violet-500/5" : "border-zinc-200 dark:border-zinc-800/40 hover:border-zinc-300 dark:border-zinc-700/60"
                               }`}>
                               <div className={`w-4 h-4 mt-0.5 rounded-full border-2 flex items-center justify-center shrink-0 ${
@@ -1485,10 +1581,16 @@ export function PlanningPage() {
                               }`}>
                                 {v.selected && <div className="w-1.5 h-1.5 bg-white rounded-full" />}
                               </div>
-                              <div>
+                              <div className="flex-1 min-w-0">
                                 <span className="text-[10px] text-zinc-500 font-semibold uppercase">Variant {String.fromCharCode(65 + i)}</span>
-                                <p className="text-sm text-zinc-800 dark:text-zinc-300 mt-0.5 leading-relaxed">{v.text}</p>
+                                <p className="text-sm text-zinc-800 dark:text-zinc-300 mt-0.5 leading-relaxed">{linkifyCopyText(v.text, lRegLink, lUnsubLink)}</p>
                               </div>
+                              {l.descVariants!.length > 1 && (
+                                <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); if (confirm("Delete this description variant?")) deleteVariant(l.id, "desc", v.id); }}
+                                  className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-100 dark:hover:bg-red-500/10 text-zinc-400 hover:text-red-500 transition-all shrink-0 mt-0.5">
+                                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                                </button>
+                              )}
                             </label>
                           ))}
                         </div>
@@ -1502,7 +1604,8 @@ export function PlanningPage() {
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
             </div>
 
             {/* Modal footer */}
@@ -1520,11 +1623,14 @@ export function PlanningPage() {
 
       {/* ── Planning Copy Variant Modal ─────────────────────────────── */}
       {planningCopyModal && (() => {
+        const modalWebinar = webinars.find(w => w.id === planningCopyModal.webinarId);
         const targetList = webinars.flatMap(w => w.lists).find(l => l.id === planningCopyModal.listId);
         if (!targetList) return null;
         const variants = planningCopyModal.tab === "title" ? targetList.titleVariants : targetList.descVariants;
         if (!variants || variants.length === 0) return null;
         const isTitle = planningCopyModal.tab === "title";
+        const regLink = modalWebinar?.registrationLink || "";
+        const unsubLink = modalWebinar?.unsubscribeLink || "";
         return (
           <div className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center" onClick={(e) => { if (e.target === e.currentTarget) setPlanningCopyModal(null); }}>
             <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800/60 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[70vh] flex flex-col overflow-hidden">
@@ -1561,7 +1667,7 @@ export function PlanningPage() {
                     onClick={() => {
                       selectVariant(targetList.id, isTitle ? "title" : "desc", v.id);
                     }}
-                    className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${
+                    className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 group ${
                       v.selected
                         ? isTitle
                           ? "border-violet-400 dark:border-violet-500/40 bg-violet-50/50 dark:bg-violet-500/5"
@@ -1576,10 +1682,16 @@ export function PlanningPage() {
                     }`}>
                       {v.selected && <div className="w-1.5 h-1.5 bg-white rounded-full" />}
                     </div>
-                    <div>
+                    <div className="flex-1 min-w-0">
                       <span className="text-[9px] text-zinc-500 font-semibold uppercase">Variant {i + 1}</span>
-                      <p className="text-xs text-zinc-800 dark:text-zinc-200 mt-0.5 leading-relaxed">{v.text}</p>
+                      <p className="text-xs text-zinc-800 dark:text-zinc-200 mt-0.5 leading-relaxed">{linkifyCopyText(v.text, regLink, unsubLink)}</p>
                     </div>
+                    {variants.length > 1 && (
+                      <div onClick={(e) => { e.stopPropagation(); if (confirm(`Delete this ${isTitle ? "title" : "description"} variant?`)) deleteVariant(targetList.id, isTitle ? "title" : "desc", v.id); }}
+                        className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-100 dark:hover:bg-red-500/10 text-zinc-400 hover:text-red-500 transition-all shrink-0 mt-0.5">
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                      </div>
+                    )}
                   </button>
                 ))}
               </div>
@@ -1705,6 +1817,20 @@ export function PlanningPage() {
                   className="w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-800 dark:text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-colors" />
               </div>
               <div>
+                <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-medium block mb-1.5">Registration Link</label>
+                <input type="url" value={editWebinar.registrationLink}
+                  onChange={(e) => setEditWebinar({ ...editWebinar, registrationLink: e.target.value })}
+                  placeholder="https://..."
+                  className="w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-800 dark:text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-colors" />
+              </div>
+              <div>
+                <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-medium block mb-1.5">Unsubscribe Link</label>
+                <input type="url" value={editWebinar.unsubscribeLink}
+                  onChange={(e) => setEditWebinar({ ...editWebinar, unsubscribeLink: e.target.value })}
+                  placeholder="https://..."
+                  className="w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-800 dark:text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-colors" />
+              </div>
+              <div>
                 <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-medium block mb-1.5">Status</label>
                 <select value={editWebinar.status}
                   onChange={(e) => setEditWebinar({ ...editWebinar, status: e.target.value })}
@@ -1733,6 +1859,8 @@ export function PlanningPage() {
                   }
                   const currentBroadcast = w.broadcastId === "—" ? "" : w.broadcastId;
                   if (ew.broadcastId !== currentBroadcast) await handleUpdateWebinar(ew.id, "broadcast_id", ew.broadcastId);
+                  if (ew.registrationLink !== w.registrationLink) await handleUpdateWebinar(ew.id, "registration_link", ew.registrationLink);
+                  if (ew.unsubscribeLink !== w.unsubscribeLink) await handleUpdateWebinar(ew.id, "unsubscribe_link", ew.unsubscribeLink);
                   if (ew.status !== w.status.toLowerCase()) await handleUpdateWebinar(ew.id, "status", ew.status);
                   setEditWebinar(null);
                 }}

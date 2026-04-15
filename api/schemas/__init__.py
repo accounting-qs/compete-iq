@@ -72,6 +72,8 @@ class WebinarUpdate(BaseModel):
     status: str | None = None
     broadcast_id: str | None = None
     main_title: str | None = None
+    registration_link: str | None = None
+    unsubscribe_link: str | None = None
 
 
 # ── Assignments ────────────────────────────────────────────────────────────

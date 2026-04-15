@@ -48,11 +48,21 @@ async def create_webinar(
     if existing.scalar_one_or_none():
         raise HTTPException(409, f"Webinar number {body.number} already exists")
 
+    # Default registration_link and unsubscribe_link from the latest webinar
+    latest_result = await db.execute(
+        select(Webinar).where(Webinar.user_id == LLOYD_USER_ID)
+        .order_by(Webinar.number.desc())
+        .limit(1)
+    )
+    latest = latest_result.scalar_one_or_none()
+
     webinar = Webinar(
         user_id=LLOYD_USER_ID,
         number=body.number,
         date=body.date,
         status="planning",
+        registration_link=latest.registration_link if latest else None,
+        unsubscribe_link=latest.unsubscribe_link if latest else None,
     )
     db.add(webinar)
     await db.flush()

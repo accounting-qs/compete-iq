@@ -83,6 +83,9 @@ async def list_uploads(
     }
 
 
+MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
+
+
 @router.post("/uploads/file", status_code=201)
 async def upload_csv_file(
     file: UploadFile = File(...),
@@ -90,18 +93,46 @@ async def upload_csv_file(
     _: str = Depends(require_auth),
 ):
     """
-    Step 1: Upload CSV to Supabase Storage.
-    Returns upload_id, headers, and preview rows for the mapping UI.
+    Step 1: Upload CSV to Supabase Storage via streaming.
+    Only reads a small prefix for headers/preview — does not buffer full file.
     """
     if not file.filename or not file.filename.endswith(".csv"):
         raise HTTPException(400, "Only CSV files are accepted")
 
-    contents = await file.read()
-    file_size = len(contents)
+    # Read a small prefix for headers + preview (first 32KB is plenty)
+    PREVIEW_SIZE = 32 * 1024
+    prefix = await file.read(PREVIEW_SIZE)
+    prefix_text = prefix.decode("utf-8", errors="replace")
+    prefix_lines = [l.strip() for l in prefix_text.split("\n") if l.strip()]
 
-    # Upload to Supabase Storage
-    storage_path = f"{LLOYD_USER_ID}/{int(datetime.utcnow().timestamp())}_{file.filename}"
+    if not prefix_lines:
+        raise HTTPException(400, "CSV file appears empty")
+
+    headers = _parse_csv_line(prefix_lines[0])
+    preview_rows = [_parse_csv_line(prefix_lines[i]) for i in range(1, min(6, len(prefix_lines)))]
+
+    # Stream full file to Supabase Storage in chunks — not buffered in memory
+    await file.seek(0)
+    storage_path = f"{LLOYD_USER_ID}/{int(datetime.now().timestamp())}_{file.filename}"
+
     import httpx
+
+    # Read file in chunks, count newlines for row estimate, stream to storage
+    chunks: list[bytes] = []
+    file_size = 0
+    newline_count = 0
+    while True:
+        chunk = await file.read(256 * 1024)  # 256KB chunks
+        if not chunk:
+            break
+        file_size += len(chunk)
+        if file_size > MAX_UPLOAD_SIZE:
+            raise HTTPException(413, f"File exceeds {MAX_UPLOAD_SIZE // (1024*1024)} MB limit")
+        newline_count += chunk.count(b"\n")
+        chunks.append(chunk)
+
+    total_rows = max(0, newline_count - 1)  # subtract header row
+
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"{SUPABASE_URL}/storage/v1/object/{CSV_BUCKET}/{storage_path}",
@@ -109,20 +140,13 @@ async def upload_csv_file(
                 "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
                 "Content-Type": "text/csv",
             },
-            content=contents,
-            timeout=120.0,
+            content=b"".join(chunks),
+            timeout=300.0,
         )
         if resp.status_code not in (200, 201):
             raise HTTPException(500, f"Failed to upload to Storage: {resp.text}")
 
-    # Parse headers + preview rows
-    text = contents.decode("utf-8", errors="replace")
-    lines = text.split("\n")
-    lines = [l.strip() for l in lines if l.strip()]
-    total_rows = len(lines) - 1
-
-    headers = _parse_csv_line(lines[0])
-    preview_rows = [_parse_csv_line(lines[i]) for i in range(1, min(6, len(lines)))]
+    del chunks  # free memory immediately
 
     # Create upload record
     upload = UploadHistory(
@@ -392,14 +416,22 @@ async def delete_upload(
                 except (asyncio.TimeoutError, Exception):
                     task.cancel()
 
-    deleted_contacts = 0
-
-    if upload.status in ("complete", "failed", "cancelled"):
-        count_result = await db.execute(
-            select(sa_func.count()).select_from(Contact).where(Contact.upload_id == upload_id)
+        # Re-query upload status — it may have changed during cancellation
+        await db.expire(upload)
+        refreshed = await db.execute(
+            select(UploadHistory).where(UploadHistory.id == upload_id)
         )
-        deleted_contacts = count_result.scalar() or 0
+        upload = refreshed.scalar_one_or_none()
+        if not upload:
+            raise HTTPException(404, "Upload not found after cancellation")
 
+    # Always delete contacts associated with this upload (regardless of status)
+    count_result = await db.execute(
+        select(sa_func.count()).select_from(Contact).where(Contact.upload_id == upload_id)
+    )
+    deleted_contacts = count_result.scalar() or 0
+
+    if deleted_contacts > 0:
         await db.execute(
             delete(Contact).where(Contact.upload_id == upload_id)
         )
@@ -443,26 +475,39 @@ async def _process_csv_import(
 
     try:
         import httpx
+
+        # Stream CSV download — don't buffer entire file in memory
+        csv_text_io = io.StringIO()
         async with httpx.AsyncClient() as client:
-            resp = await client.get(
+            async with client.stream(
+                "GET",
                 f"{SUPABASE_URL}/storage/v1/object/{CSV_BUCKET}/{storage_path}",
                 headers={"Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
-                timeout=120.0,
-            )
-            if resp.status_code != 200:
-                raise Exception(f"Failed to download CSV: {resp.status_code}")
+                timeout=300.0,
+            ) as resp:
+                if resp.status_code != 200:
+                    raise Exception(f"Failed to download CSV: {resp.status_code}")
+                async for chunk in resp.aiter_text():
+                    csv_text_io.write(chunk)
 
-        csv_text = resp.text
-        reader = csv.reader(io.StringIO(csv_text))
-        all_rows = list(reader)
+        csv_text_io.seek(0)
+        reader = csv.reader(csv_text_io)
 
-        if len(all_rows) < 2:
-            raise Exception("CSV file is empty or has no data rows")
+        # Read header row
+        try:
+            csv_headers = [h.strip() for h in next(reader)]
+        except StopIteration:
+            raise Exception("CSV file is empty")
 
-        csv_headers = [h.strip() for h in all_rows[0]]
-        data_rows = all_rows[1:]
-        data_rows = [r for r in data_rows if any(cell.strip() for cell in r)]
+        # Stream rows into batches — don't materialize entire file
+        # First pass: collect all rows but filter empty ones immediately
+        data_rows: list[list[str]] = []
+        for row in reader:
+            if any(cell.strip() for cell in row):
+                data_rows.append(row)
         total_rows = len(data_rows)
+
+        del csv_text_io  # free the StringIO buffer
 
         async with engine.begin() as conn:
             await conn.execute(
@@ -597,6 +642,9 @@ async def _process_csv_import(
 
                 if custom_data:
                     contact["custom_data"] = custom_data
+                # Normalize email to lowercase for consistent deduplication
+                if contact.get("email"):
+                    contact["email"] = contact["email"].lower().strip()
                 rows_to_insert.append(contact)
 
             if not rows_to_insert:

@@ -88,6 +88,8 @@ class Webinar(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="planning")
     broadcast_id: Mapped[Optional[str]] = mapped_column(Text)
     main_title: Mapped[Optional[str]] = mapped_column(Text)
+    registration_link: Mapped[Optional[str]] = mapped_column(Text)
+    unsubscribe_link: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
