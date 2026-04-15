@@ -9,7 +9,7 @@ LLOYD_USER_ID = "9baf8117-db65-4f30-87a5-a76cf4f23d82"
 
 # ── Serialization helpers ─────────────────────────────────────────────────
 
-def bucket_dict(b: OutreachBucket, include_copies: bool = False) -> dict:
+def bucket_dict(b: OutreachBucket, include_copies: bool = False, assigned_copy_ids: set[str] | None = None) -> dict:
     try:
         all_copies = b.copies or []
     except Exception:
@@ -28,16 +28,19 @@ def bucket_dict(b: OutreachBucket, include_copies: bool = False) -> dict:
         "copies_count": {"titles": len(titles), "descriptions": len(descs)},
         "has_primary_title": any(c.is_primary for c in titles),
         "has_primary_description": any(c.is_primary for c in descs),
+        "title_primary_picked": any(c.is_primary and c.primary_picked_by_user for c in titles),
+        "desc_primary_picked": any(c.is_primary and c.primary_picked_by_user for c in descs),
         "created_at": b.created_at.isoformat() if b.created_at else None,
     }
     if include_copies:
-        d["titles"] = [copy_dict(c) for c in sorted(titles, key=lambda x: x.variant_index)]
-        d["descriptions"] = [copy_dict(c) for c in sorted(descs, key=lambda x: x.variant_index)]
+        aids = assigned_copy_ids or set()
+        d["titles"] = [copy_dict(c, is_assigned=c.id in aids) for c in sorted(titles, key=lambda x: x.variant_index)]
+        d["descriptions"] = [copy_dict(c, is_assigned=c.id in aids) for c in sorted(descs, key=lambda x: x.variant_index)]
     return d
 
 
-def copy_dict(c: BucketCopy) -> dict:
-    return {
+def copy_dict(c: BucketCopy, is_assigned: bool | None = None) -> dict:
+    d = {
         "id": c.id,
         "bucket_id": c.bucket_id,
         "copy_type": c.copy_type,
@@ -47,6 +50,9 @@ def copy_dict(c: BucketCopy) -> dict:
         "ai_feedback": c.ai_feedback,
         "created_at": c.created_at.isoformat() if c.created_at else None,
     }
+    if is_assigned is not None:
+        d["is_assigned"] = is_assigned
+    return d
 
 
 def sender_dict(s: OutreachSender) -> dict:

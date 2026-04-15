@@ -63,6 +63,8 @@ export interface ApiBucket {
   copies_count: { titles: number; descriptions: number };
   has_primary_title: boolean;
   has_primary_description: boolean;
+  title_primary_picked: boolean;
+  desc_primary_picked: boolean;
   created_at: string | null;
   // included when ?include=copies
   titles?: ApiCopy[];
@@ -78,6 +80,7 @@ export interface ApiCopy {
   is_primary: boolean;
   ai_feedback: string | null;
   created_at: string | null;
+  is_assigned?: boolean;
 }
 
 export interface ApiSender {
@@ -240,6 +243,19 @@ export async function updateCopy(
     body: JSON.stringify(data),
   });
   if (!res.ok) throw new Error("Failed to update copy");
+  return res.json();
+}
+
+export async function createCopy(
+  bucketId: string,
+  data: { copy_type: "title" | "description"; text?: string }
+): Promise<ApiCopy> {
+  const res = await fetch(`${API_URL}/outreach/buckets/${bucketId}/copies`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error("Failed to create copy");
   return res.json();
 }
 
@@ -512,5 +528,140 @@ export async function createCustomField(data: {
     body: JSON.stringify(data),
   });
   if (!res.ok) throw new Error("Failed to create custom field");
+  return res.json();
+}
+
+
+/* ── Brain Management ────────────────────────────────────────────────────── */
+
+export interface ApiPrinciple {
+  id: string;
+  principle_text: string;
+  knowledge_type: string;
+  category: string | null;
+  is_active: boolean;
+  display_order: number | null;
+  times_applied: number;
+  created_at: string | null;
+}
+
+export interface ApiCaseStudy {
+  id: string;
+  title: string;
+  client_name: string | null;
+  industry: string | null;
+  tags: string[];
+  content: string;
+  is_active: boolean;
+  created_at: string | null;
+}
+
+export interface ApiBrainContent {
+  universal_brain: string;
+  format_brain: string;
+  format_brain_id: string | null;
+}
+
+// Principles
+export async function fetchPrinciples(): Promise<ApiPrinciple[]> {
+  const res = await fetch(`${API_URL}/outreach/brain/principles`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to fetch principles");
+  return res.json();
+}
+
+export async function createPrinciple(data: {
+  principle_text: string;
+  knowledge_type?: string;
+  category?: string;
+}): Promise<ApiPrinciple> {
+  const res = await fetch(`${API_URL}/outreach/brain/principles`, {
+    method: "POST", headers: jsonHeaders(), body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error("Failed to create principle");
+  return res.json();
+}
+
+export async function updatePrinciple(id: string, data: {
+  principle_text?: string;
+  category?: string;
+  is_active?: boolean;
+}): Promise<ApiPrinciple> {
+  const res = await fetch(`${API_URL}/outreach/brain/principles/${id}`, {
+    method: "PUT", headers: jsonHeaders(), body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error("Failed to update principle");
+  return res.json();
+}
+
+export async function deletePrinciple(id: string): Promise<void> {
+  const res = await fetch(`${API_URL}/outreach/brain/principles/${id}`, {
+    method: "DELETE", headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to delete principle");
+}
+
+// Case Studies
+export async function fetchCaseStudies(): Promise<ApiCaseStudy[]> {
+  const res = await fetch(`${API_URL}/outreach/brain/case-studies`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to fetch case studies");
+  return res.json();
+}
+
+export async function createCaseStudy(data: {
+  title: string;
+  client_name?: string;
+  industry?: string;
+  tags?: string[];
+  content: string;
+}): Promise<ApiCaseStudy> {
+  const res = await fetch(`${API_URL}/outreach/brain/case-studies`, {
+    method: "POST", headers: jsonHeaders(), body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error("Failed to create case study");
+  return res.json();
+}
+
+export async function updateCaseStudy(id: string, data: {
+  title?: string;
+  client_name?: string;
+  industry?: string;
+  tags?: string[];
+  content?: string;
+  is_active?: boolean;
+}): Promise<ApiCaseStudy> {
+  const res = await fetch(`${API_URL}/outreach/brain/case-studies/${id}`, {
+    method: "PUT", headers: jsonHeaders(), body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error("Failed to update case study");
+  return res.json();
+}
+
+export async function deleteCaseStudy(id: string): Promise<void> {
+  const res = await fetch(`${API_URL}/outreach/brain/case-studies/${id}`, {
+    method: "DELETE", headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to delete case study");
+}
+
+// Brain Content
+export async function fetchBrainContent(): Promise<ApiBrainContent> {
+  const res = await fetch(`${API_URL}/outreach/brain/content`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to fetch brain content");
+  return res.json();
+}
+
+export async function updateUniversalBrain(brain_content: string): Promise<{ brain_content: string; version: number }> {
+  const res = await fetch(`${API_URL}/outreach/brain/content/universal`, {
+    method: "PUT", headers: jsonHeaders(), body: JSON.stringify({ brain_content }),
+  });
+  if (!res.ok) throw new Error("Failed to update universal brain");
+  return res.json();
+}
+
+export async function updateFormatBrain(brain_content: string): Promise<{ brain_content: string }> {
+  const res = await fetch(`${API_URL}/outreach/brain/content/format`, {
+    method: "PUT", headers: jsonHeaders(), body: JSON.stringify({ brain_content }),
+  });
+  if (!res.ok) throw new Error("Failed to update format brain");
   return res.json();
 }

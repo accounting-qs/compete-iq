@@ -41,6 +41,7 @@ class BucketCopy(Base):
     variant_index: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     text: Mapped[str] = mapped_column(Text, nullable=False)
     is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    primary_picked_by_user: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     ai_feedback: Mapped[Optional[str]] = mapped_column(Text)
     generation_batch_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False))
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))

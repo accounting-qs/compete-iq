@@ -4,11 +4,13 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import {
   fetchBuckets,
   generateCopies as apiGenerateCopies,
+  createCopy as apiCreateCopy,
   updateCopy as apiUpdateCopy,
   regenerateCopy as apiRegenerateCopy,
   type ApiBucket,
   type ApiCopy,
 } from "@/lib/api";
+import { BrainPanel } from "./BrainPanel";
 
 /* ─── Types ────────────────────────────────────────────────────────────── */
 
@@ -16,6 +18,7 @@ interface CopyVariant {
   id: string;
   text: string;
   isPrimary: boolean;
+  isAssigned?: boolean;
 }
 
 interface GeneratedCopy {
@@ -30,7 +33,7 @@ type GenerationStatus = "idle" | "generating" | "done";
 /* ─── Helpers: Convert API types to local types ────────────────────────── */
 
 function apiCopyToVariant(c: ApiCopy): CopyVariant {
-  return { id: c.id, text: c.text, isPrimary: c.is_primary };
+  return { id: c.id, text: c.text, isPrimary: c.is_primary, isAssigned: c.is_assigned };
 }
 
 /* ─── Country Badge ────────────────────────────────────────────────────── */
@@ -54,6 +57,7 @@ function VariationsModal({
   onUpdateVariant,
   onSetPrimary,
   onRegenerate,
+  onAddVariant,
 }: {
   bucket: ApiBucket;
   initialTab: "title" | "description";
@@ -63,17 +67,24 @@ function VariationsModal({
   onUpdateVariant: (bucketId: string, type: "title" | "description", variantId: string, newText: string) => void;
   onSetPrimary: (bucketId: string, type: "title" | "description", variantId: string) => void;
   onRegenerate: (bucketId: string, type: "title" | "description", copyId: string, feedback: string) => Promise<void>;
+  onAddVariant: (bucketId: string, type: "title" | "description", text: string) => Promise<void>;
 }) {
   const [activeTab, setActiveTab] = useState<"title" | "description">(initialTab);
   const [feedback, setFeedback] = useState("");
   const [regenerating, setRegenerating] = useState(false);
+  const [regeneratingIds, setRegeneratingIds] = useState<Set<string>>(new Set());
+  const [selectedForRegen, setSelectedForRegen] = useState<Set<string>>(new Set());
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
+  const [addingManual, setAddingManual] = useState(false);
+  const [manualText, setManualText] = useState("");
+  const [generatingNew, setGeneratingNew] = useState(false);
   const backdropRef = useRef<HTMLDivElement>(null);
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const manualTextareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Auto-resize textarea to match content height
+  // Auto-resize textareas to match content height
   useEffect(() => {
     const ta = editTextareaRef.current;
     if (ta) {
@@ -82,7 +93,30 @@ function VariationsModal({
     }
   }, [editText, editingId]);
 
+  useEffect(() => {
+    const ta = manualTextareaRef.current;
+    if (ta) {
+      ta.style.height = "auto";
+      ta.style.height = `${ta.scrollHeight}px`;
+      ta.focus();
+    }
+  }, [addingManual, manualText]);
+
   const variants = activeTab === "title" ? titles : descriptions;
+
+  // Clear selection when switching tabs
+  const switchTab = useCallback((tab: "title" | "description") => {
+    setActiveTab(tab);
+    setSelectedForRegen(new Set());
+  }, []);
+
+  const toggleRegenSelect = useCallback((id: string) => {
+    setSelectedForRegen(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
 
   const handleCopy = useCallback((id: string, text: string) => {
     navigator.clipboard.writeText(text);
@@ -103,15 +137,45 @@ function VariationsModal({
 
   const handleRegenerate = useCallback(async () => {
     if (!feedback.trim()) return;
+    const targetIds = selectedForRegen.size > 0
+      ? Array.from(selectedForRegen)
+      : [];
+    if (targetIds.length === 0) return;
+
     setRegenerating(true);
-    // Find the primary variant to regenerate from
-    const primary = variants.find(v => v.isPrimary) || variants[0];
-    if (primary) {
-      await onRegenerate(bucket.id, activeTab, primary.id, feedback);
+    setRegeneratingIds(new Set(targetIds));
+
+    for (const copyId of targetIds) {
+      await onRegenerate(bucket.id, activeTab, copyId, feedback);
+      setRegeneratingIds(prev => {
+        const next = new Set(prev);
+        next.delete(copyId);
+        return next;
+      });
     }
+
     setFeedback("");
+    setSelectedForRegen(new Set());
     setRegenerating(false);
+    setRegeneratingIds(new Set());
+  }, [feedback, activeTab, bucket, selectedForRegen, onRegenerate]);
+
+  const handleGenerateNew = useCallback(async () => {
+    if (!feedback.trim() || variants.length === 0) return;
+    setGeneratingNew(true);
+    // Use the primary (or first) variant as a base for the AI to riff on with the user's direction
+    const base = variants.find(v => v.isPrimary) || variants[0];
+    await onRegenerate(bucket.id, activeTab, base.id, feedback);
+    setFeedback("");
+    setGeneratingNew(false);
   }, [feedback, activeTab, bucket, variants, onRegenerate]);
+
+  const handleAddManual = useCallback(async () => {
+    if (!manualText.trim()) return;
+    await onAddVariant(bucket.id, activeTab, manualText.trim());
+    setManualText("");
+    setAddingManual(false);
+  }, [manualText, activeTab, bucket, onAddVariant]);
 
   // Close on Escape
   useEffect(() => {
@@ -146,7 +210,7 @@ function VariationsModal({
         {/* ── Tab Bar ─────────────────────────────────────────────── */}
         <div className="flex items-center gap-1 px-6 py-2.5 border-b border-zinc-200 dark:border-zinc-800/40 shrink-0">
           <button
-            onClick={() => setActiveTab("title")}
+            onClick={() => switchTab("title")}
             className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${
               activeTab === "title"
                 ? "bg-violet-100 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400 border border-violet-200 dark:border-violet-500/25"
@@ -156,7 +220,7 @@ function VariationsModal({
             Titles ({titles.length})
           </button>
           <button
-            onClick={() => setActiveTab("description")}
+            onClick={() => switchTab("description")}
             className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${
               activeTab === "description"
                 ? "bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-500/25"
@@ -176,27 +240,37 @@ function VariationsModal({
           ) : (
             variants.map((v, i) => {
               const isEditing = editingId === v.id;
+              const isSelectedForRegen = selectedForRegen.has(v.id);
+              const isRegenerating = regeneratingIds.has(v.id);
               return (
                 <div
                   key={v.id}
                   className={`rounded-xl border transition-all ${
-                    v.isPrimary
-                      ? activeTab === "title"
-                        ? "border-violet-300 dark:border-violet-500/30 bg-violet-50/50 dark:bg-violet-500/5"
-                        : "border-blue-300 dark:border-blue-500/30 bg-blue-50/50 dark:bg-blue-500/5"
-                      : "border-zinc-200 dark:border-zinc-800/40 bg-white dark:bg-zinc-900/60"
-                  }`}
+                    isSelectedForRegen
+                      ? "border-amber-300 dark:border-amber-500/40 bg-amber-50/50 dark:bg-amber-500/5 ring-1 ring-amber-300/50 dark:ring-amber-500/20"
+                      : v.isPrimary
+                        ? activeTab === "title"
+                          ? "border-violet-300 dark:border-violet-500/30 bg-violet-50/50 dark:bg-violet-500/5"
+                          : "border-blue-300 dark:border-blue-500/30 bg-blue-50/50 dark:bg-blue-500/5"
+                        : "border-zinc-200 dark:border-zinc-800/40 bg-white dark:bg-zinc-900/60"
+                  } ${isRegenerating ? "opacity-60" : ""}`}
                 >
                   <div className="px-4 py-3">
                     {/* Top row: number + actions */}
                     <div className="flex items-center gap-2 mb-2">
-                      <span className={`shrink-0 w-5 h-5 flex items-center justify-center rounded text-[10px] font-bold ${
-                        activeTab === "title"
-                          ? "bg-violet-100 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400"
-                          : "bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400"
-                      }`}>
-                        {i + 1}
-                      </span>
+                      <button
+                        onClick={() => toggleRegenSelect(v.id)}
+                        className={`shrink-0 w-5 h-5 flex items-center justify-center rounded text-[10px] font-bold transition-all ${
+                          isSelectedForRegen
+                            ? "bg-amber-400 dark:bg-amber-500 text-white ring-1 ring-amber-500/50"
+                            : activeTab === "title"
+                              ? "bg-violet-100 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400 hover:bg-violet-200 dark:hover:bg-violet-500/25"
+                              : "bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-500/25"
+                        }`}
+                        title={isSelectedForRegen ? "Deselect for regeneration" : "Select for regeneration"}
+                      >
+                        {isSelectedForRegen ? "✓" : i + 1}
+                      </button>
                       {v.isPrimary && (
                         <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
                           activeTab === "title"
@@ -206,7 +280,12 @@ function VariationsModal({
                           Primary
                         </span>
                       )}
-                      <span className="text-[10px] text-zinc-400 font-mono">{v.text.length} chars</span>
+                      {v.isAssigned && (
+                        <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-200/60 dark:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400">
+                          Picked
+                        </span>
+                      )}
+                      <span className="text-[10px] text-zinc-400 font-mono">{v.text.length} chars{activeTab === "description" ? ` · ${v.text.trim().split(/\s+/).length} words` : ""}</span>
                       <div className="flex-1" />
 
                       {/* Actions */}
@@ -248,7 +327,11 @@ function VariationsModal({
                     </div>
 
                     {/* Text content */}
-                    {isEditing ? (
+                    {isRegenerating ? (
+                      <div className="flex items-center gap-2 py-2 text-amber-500 text-xs font-medium">
+                        <LoadingSpinner /> Regenerating this variant…
+                      </div>
+                    ) : isEditing ? (
                       <textarea
                         ref={editTextareaRef}
                         value={editText}
@@ -276,30 +359,111 @@ function VariationsModal({
               );
             })
           )}
+
+          {/* ── Add Manual Variant ─────────────────────────────────── */}
+          {addingManual ? (
+            <div className="rounded-xl border border-dashed border-emerald-300 dark:border-emerald-500/30 bg-emerald-50/30 dark:bg-emerald-500/5 p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
+                  New manual variant
+                </span>
+              </div>
+              <textarea
+                ref={manualTextareaRef}
+                value={manualText}
+                onChange={(e) => setManualText(e.target.value)}
+                placeholder={`Type your ${activeTab} text here…`}
+                className="w-full bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-800 dark:text-zinc-200 leading-relaxed focus:outline-none focus:ring-2 focus:ring-emerald-500/50 resize-vertical min-h-[60px] font-sans whitespace-pre-wrap"
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") { setAddingManual(false); setManualText(""); }
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); handleAddManual(); }
+                }}
+              />
+              <div className="flex items-center gap-2 mt-2">
+                <button
+                  onClick={handleAddManual}
+                  disabled={!manualText.trim()}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-lg transition-colors"
+                >
+                  Add variant
+                </button>
+                <button
+                  onClick={() => { setAddingManual(false); setManualText(""); }}
+                  className="px-3 py-1.5 text-xs font-medium text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                >
+                  Cancel
+                </button>
+                <span className="text-[10px] text-zinc-400 ml-auto">Cmd+Enter to save</span>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setAddingManual(true)}
+              className="w-full rounded-xl border border-dashed border-zinc-300 dark:border-zinc-700/40 hover:border-zinc-400 dark:hover:border-zinc-600 py-3 text-xs font-medium text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors flex items-center justify-center gap-1.5"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+              Add variant manually
+            </button>
+          )}
         </div>
 
-        {/* ── AI Feedback ─────────────────────────────────────────── */}
+        {/* ── AI Generator ─────────────────────────────────────────── */}
         <div className="shrink-0 border-t border-zinc-200 dark:border-zinc-800/40 px-6 py-4 bg-zinc-50/50 dark:bg-zinc-800/20">
-          <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold mb-2 block">
-            AI Feedback — tell the AI how to modify or generate a new variation
-          </label>
+          <div className="flex items-center gap-2 mb-2">
+            <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold">
+              AI Copy Generator
+            </label>
+            {selectedForRegen.size > 0 ? (
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-500/25">
+                {selectedForRegen.size} variant{selectedForRegen.size !== 1 ? "s" : ""} selected — will regenerate
+              </span>
+            ) : (
+              <span className="text-[10px] text-zinc-400">
+                describe what you want — generates a new variant, or select variants to regenerate them
+              </span>
+            )}
+          </div>
           <div className="flex gap-2">
             <input
               type="text"
               value={feedback}
               onChange={(e) => setFeedback(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleRegenerate(); } }}
-              placeholder="e.g. Make it shorter, add more urgency, focus on ROI..."
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  if (selectedForRegen.size > 0) handleRegenerate();
+                  else handleGenerateNew();
+                }
+              }}
+              placeholder={selectedForRegen.size > 0
+                ? `Describe how to improve the ${selectedForRegen.size} selected variant${selectedForRegen.size !== 1 ? "s" : ""}…`
+                : `e.g. "Make it about ROI", "Shorter and punchier", "Focus on AI angle"…`
+              }
               className="flex-1 bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-colors"
+              disabled={regenerating || generatingNew}
             />
-            <button
-              onClick={handleRegenerate}
-              disabled={!feedback.trim() || regenerating}
-              className="px-4 py-2 bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-500 hover:to-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 shrink-0"
-            >
-              {regenerating && <LoadingSpinner />}
-              {regenerating ? "Generating…" : "Regenerate"}
-            </button>
+            {selectedForRegen.size > 0 ? (
+              <button
+                onClick={handleRegenerate}
+                disabled={!feedback.trim() || regenerating}
+                className="px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 shrink-0"
+              >
+                {regenerating && <LoadingSpinner />}
+                {regenerating
+                  ? `Regenerating${regeneratingIds.size > 0 ? ` (${regeneratingIds.size} left)` : ""}…`
+                  : `Regenerate ${selectedForRegen.size} variant${selectedForRegen.size !== 1 ? "s" : ""}`
+                }
+              </button>
+            ) : (
+              <button
+                onClick={handleGenerateNew}
+                disabled={!feedback.trim() || generatingNew || variants.length === 0}
+                className="px-4 py-2 bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-500 hover:to-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 shrink-0"
+              >
+                {generatingNew && <LoadingSpinner />}
+                {generatingNew ? "Generating…" : "Generate new variant"}
+              </button>
+            )}
           </div>
         </div>
 
@@ -544,6 +708,34 @@ export function CopyGeneratorPage() {
     }
   }, []);
 
+  const handleAddVariant = useCallback(async (bucketId: string, type: "title" | "description", text: string) => {
+    try {
+      const newCopy = await apiCreateCopy(bucketId, { copy_type: type, text });
+      setGeneratedCopies(prev => {
+        const next = new Map(prev);
+        const existing = next.get(bucketId) || [];
+        const found = existing.find(c => c.type === type);
+        if (found) {
+          const copies = existing.map(c => {
+            if (c.type !== type) return c;
+            return { ...c, variants: [...c.variants, apiCopyToVariant(newCopy)] };
+          });
+          next.set(bucketId, copies);
+        } else {
+          existing.push({
+            bucketId, type,
+            variants: [apiCopyToVariant(newCopy)],
+            generatedAt: new Date().toLocaleTimeString(),
+          });
+          next.set(bucketId, existing);
+        }
+        return next;
+      });
+    } catch (err) {
+      console.error("Failed to add variant:", err);
+    }
+  }, []);
+
   /* ── Inline edit handlers ────────────────────────────────────────────── */
 
   const startInlineEdit = (bucketId: string, type: "title" | "description", text: string) => {
@@ -604,6 +796,11 @@ export function CopyGeneratorPage() {
               </div>
             )}
           </div>
+        </div>
+
+        {/* ── Brain Panel ──────────────────────────────────────────────── */}
+        <div className="mb-4">
+          <BrainPanel />
         </div>
 
         {/* ── Floating Action Bar ──────────────────────────────────────── */}
@@ -710,11 +907,18 @@ export function CopyGeneratorPage() {
                             />
                           ) : (
                             <>
-                              {titleVariants.length > 1 && primaryTitleIdx >= 0 && (
-                                <span className="inline-flex items-center gap-1 mb-1">
-                                  <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-violet-100 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400">
-                                    Variant {primaryTitleIdx + 1}
-                                  </span>
+                              {(titleVariants.length > 1 || bucket.title_primary_picked) && (
+                                <span className="inline-flex items-center gap-1 mb-1 flex-wrap">
+                                  {titleVariants.length > 1 && primaryTitleIdx >= 0 && (
+                                    <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-violet-100 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400">
+                                      Variant {primaryTitleIdx + 1}
+                                    </span>
+                                  )}
+                                  {bucket.title_primary_picked && (
+                                    <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                                      Primary picked
+                                    </span>
+                                  )}
                                 </span>
                               )}
                               <p
@@ -768,11 +972,18 @@ export function CopyGeneratorPage() {
                             />
                           ) : (
                             <>
-                              {descVariants.length > 1 && primaryDescIdx >= 0 && (
-                                <span className="inline-flex items-center gap-1 mb-1">
-                                  <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400">
-                                    Variant {primaryDescIdx + 1}
-                                  </span>
+                              {(descVariants.length > 1 || bucket.desc_primary_picked) && (
+                                <span className="inline-flex items-center gap-1 mb-1 flex-wrap">
+                                  {descVariants.length > 1 && primaryDescIdx >= 0 && (
+                                    <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400">
+                                      Variant {primaryDescIdx + 1}
+                                    </span>
+                                  )}
+                                  {bucket.desc_primary_picked && (
+                                    <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                                      Primary picked
+                                    </span>
+                                  )}
                                 </span>
                               )}
                               <p
@@ -824,6 +1035,7 @@ export function CopyGeneratorPage() {
           onUpdateVariant={updateVariantText}
           onSetPrimary={setPrimaryVariant}
           onRegenerate={handleRegenerate}
+          onAddVariant={handleAddVariant}
         />
       )}
     </main>

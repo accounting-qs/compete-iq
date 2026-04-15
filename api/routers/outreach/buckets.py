@@ -12,8 +12,8 @@ from sqlalchemy.orm import selectinload
 
 from api.auth import require_auth
 from api.routers.outreach._helpers import LLOYD_USER_ID, bucket_dict, copy_dict
-from api.schemas import BucketCreate, BucketUpdate, CopyGenerateRequest, CopyUpdate, CopyRegenerateRequest
-from db.models import OutreachBucket, BucketCopy, Contact
+from api.schemas import BucketCreate, BucketUpdate, CopyCreate, CopyGenerateRequest, CopyUpdate, CopyRegenerateRequest
+from db.models import OutreachBucket, BucketCopy, Contact, WebinarListAssignment
 from db.session import get_db
 from services.generation import generate_bucket_copies, regenerate_bucket_copy
 
@@ -65,7 +65,23 @@ async def list_buckets(
                 b.remaining_contacts = available
         await db.flush()
 
-    return {"buckets": [bucket_dict(b, include_copies=(include == "copies")) for b in buckets]}
+    # When including copies, also fetch which copy IDs are actively assigned
+    assigned_copy_ids: set[str] = set()
+    if include == "copies" and bucket_ids:
+        assigned_result = await db.execute(
+            select(WebinarListAssignment.title_copy_id, WebinarListAssignment.desc_copy_id)
+            .where(
+                WebinarListAssignment.user_id == LLOYD_USER_ID,
+                WebinarListAssignment.bucket_id.in_(bucket_ids),
+            )
+        )
+        for row in assigned_result:
+            if row.title_copy_id:
+                assigned_copy_ids.add(row.title_copy_id)
+            if row.desc_copy_id:
+                assigned_copy_ids.add(row.desc_copy_id)
+
+    return {"buckets": [bucket_dict(b, include_copies=(include == "copies"), assigned_copy_ids=assigned_copy_ids) for b in buckets]}
 
 
 @router.post("/buckets", status_code=201)
@@ -149,6 +165,42 @@ async def get_bucket_copies(
     titles = [copy_dict(c) for c in copies if c.copy_type == "title"]
     descriptions = [copy_dict(c) for c in copies if c.copy_type == "description"]
     return {"bucket_id": bucket_id, "titles": titles, "descriptions": descriptions}
+
+
+@router.post("/buckets/{bucket_id}/copies", status_code=201)
+async def create_copy(
+    bucket_id: str,
+    body: CopyCreate,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    result = await db.execute(
+        select(OutreachBucket).where(OutreachBucket.id == bucket_id, OutreachBucket.user_id == LLOYD_USER_ID)
+    )
+    bucket = result.scalar_one_or_none()
+    if not bucket:
+        raise HTTPException(404, "Bucket not found")
+
+    max_idx_result = await db.execute(
+        select(sa_func.max(BucketCopy.variant_index)).where(
+            BucketCopy.bucket_id == bucket_id,
+            BucketCopy.copy_type == body.copy_type,
+        )
+    )
+    max_idx = max_idx_result.scalar()
+    next_idx = (max_idx + 1) if max_idx is not None else 0
+
+    copy = BucketCopy(
+        user_id=LLOYD_USER_ID,
+        bucket_id=bucket_id,
+        copy_type=body.copy_type,
+        variant_index=next_idx,
+        text=body.text,
+        is_primary=False,
+    )
+    db.add(copy)
+    await db.flush()
+    return copy_dict(copy)
 
 
 @router.post("/buckets/{bucket_id}/copies/generate", status_code=201)
@@ -253,9 +305,10 @@ async def update_copy(
                 BucketCopy.copy_type == copy.copy_type,
                 BucketCopy.id != copy_id,
                 BucketCopy.deleted_at.is_(None),
-            ).values(is_primary=False)
+            ).values(is_primary=False, primary_picked_by_user=False)
         )
         copy.is_primary = True
+        copy.primary_picked_by_user = True
 
     await db.flush()
     return copy_dict(copy)

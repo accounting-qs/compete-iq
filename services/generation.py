@@ -14,7 +14,7 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
-from db.models import UniversalBrain, FormatBrain, CopywritingPrinciple
+from db.models import UniversalBrain, FormatBrain, CopywritingPrinciple, CaseStudy
 from db.session import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
@@ -111,6 +111,65 @@ async def _load_brain_context(
         )
 
     return universal_content, format_content, principles, example_outputs
+
+
+async def _load_case_studies(
+    db: AsyncSession,
+    user_id: str,
+    industry: str | None = None,
+    bucket_name: str | None = None,
+) -> list[dict]:
+    """
+    Load active case studies, prioritising those that match the bucket's
+    industry or whose tags overlap with the bucket name / industry.
+    Returns a list of dicts with title, client_name, industry, content.
+    """
+    result = await db.execute(
+        select(CaseStudy).where(
+            CaseStudy.user_id == user_id,
+            CaseStudy.is_active == True,
+        ).order_by(CaseStudy.created_at.desc())
+    )
+    all_studies = result.scalars().all()
+    if not all_studies:
+        return []
+
+    # Score each study for relevance to this bucket
+    def relevance(cs: CaseStudy) -> int:
+        score = 0
+        cs_industry = (cs.industry or "").lower()
+        cs_tags = [t.lower() for t in (cs.tags or [])]
+        bucket_industry = (industry or "").lower()
+        bucket = (bucket_name or "").lower()
+
+        # Direct industry match
+        if cs_industry and bucket_industry and cs_industry == bucket_industry:
+            score += 10
+        # Industry appears in bucket name
+        if cs_industry and bucket and cs_industry in bucket:
+            score += 5
+        # Tag matches
+        for tag in cs_tags:
+            if tag and bucket_industry and tag in bucket_industry:
+                score += 3
+            if tag and bucket and tag in bucket:
+                score += 3
+        return score
+
+    scored = [(relevance(cs), cs) for cs in all_studies]
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # Return top 3 (prioritise matched, then fill with others)
+    top = scored[:3]
+    return [
+        {
+            "title": cs.title or "",
+            "client_name": cs.client_name or "",
+            "industry": cs.industry or "",
+            "content": cs.content,
+        }
+        for _, cs in top
+    ]
 
 
 def _build_system_prompt(
@@ -315,6 +374,21 @@ async def stream_calendar_blocker(
 
 # ── Bucket Copy Generation ────────────────────────────────────────────────
 
+def _format_case_studies(case_studies: list[dict] | None) -> str:
+    """Format case studies for inclusion in prompts."""
+    if not case_studies:
+        return "No case studies available."
+    parts = []
+    for cs in case_studies:
+        label = cs.get("title", "Case Study")
+        if cs.get("client_name"):
+            label += f" ({cs['client_name']})"
+        if cs.get("industry"):
+            label += f" — {cs['industry']}"
+        parts.append(f"### {label}\n{cs['content']}")
+    return "\n\n---\n\n".join(parts)
+
+
 def _build_copy_system_prompt(
     universal_content: str,
     format_content: str,
@@ -322,6 +396,7 @@ def _build_copy_system_prompt(
     example_outputs: list[dict],
     copy_type: str,
     count: int,
+    case_studies: list[dict] | None = None,
 ) -> str:
     """Build a system prompt for generating bucket-level title or description copies."""
     principles_block = "\n".join(f"- {p}" for p in principles)
@@ -361,6 +436,9 @@ You generate {type_label} for LinkedIn calendar invites that get professionals t
 ## Real Examples (study these — match this voice and structure exactly)
 {examples_block}
 
+## Client Case Studies (use these as proof — reference real results verbatim)
+{_format_case_studies(case_studies)}
+
 ## Output Format
 Respond with valid JSON only. No markdown, no explanation, no preamble.
 
@@ -375,6 +453,7 @@ Respond with valid JSON only. No markdown, no explanation, no preamble.
 Rules:
 - Generate exactly {count} unique {copy_type} variants
 - Each variant must be meaningfully different in angle/style (curiosity, outcome, mechanism, etc.)
+- The bucket name describes the unique audience segment — use it to tailor the copy so it speaks directly to that specific niche/vertical
 - All client proof numbers must be verbatim from the provided brief — never fabricate
 - {type_instruction}
 """
@@ -389,6 +468,11 @@ def _build_copy_user_prompt(
 ) -> str:
     """Build the user prompt for bucket copy generation."""
     parts = [f"Generate {copy_type}s for outreach bucket: **{bucket_name}**"]
+    parts.append(
+        f"\nThe bucket name \"{bucket_name}\" uniquely identifies this audience segment. "
+        f"Use it as the primary lens for tailoring the {copy_type} — the copy should feel "
+        f"like it was written specifically for people in this niche."
+    )
 
     if industry:
         parts.append(f"Industry/Segment: {industry}")
@@ -422,17 +506,19 @@ async def generate_bucket_copies(
     universal, format_rules, principles, examples = await _load_brain_context(
         db, user_id, "calendar_event"
     )
+    case_studies = await _load_case_studies(db, user_id, industry, bucket_name)
 
     system = _build_copy_system_prompt(
-        universal, format_rules, principles, examples, copy_type, count
+        universal, format_rules, principles, examples, copy_type, count,
+        case_studies=case_studies,
     )
     user_msg = _build_copy_user_prompt(
         bucket_name, industry, countries, emp_range, copy_type
     )
 
     logger.info(
-        "Generating %d %s copies — bucket=%s industry=%s",
-        count, copy_type, bucket_name, industry,
+        "Generating %d %s copies — bucket=%s industry=%s case_studies=%d",
+        count, copy_type, bucket_name, industry, len(case_studies),
     )
 
     message = await _client.messages.create(
@@ -485,8 +571,10 @@ async def regenerate_bucket_copy(
     universal, format_rules, principles, examples = await _load_brain_context(
         db, user_id, "calendar_event"
     )
+    case_studies = await _load_case_studies(db, user_id, industry, bucket_name)
 
     principles_block = "\n".join(f"- {p}" for p in principles)
+    case_studies_block = _format_case_studies(case_studies)
     type_label = "calendar invite title" if copy_type == "title" else "calendar invite description"
 
     system = f"""You are a direct-response copywriter for Quantum Scaling (QS).
@@ -501,6 +589,9 @@ You are refining a {type_label} based on user feedback.
 
 ## Copywriting Principles
 {principles_block}
+
+## Client Case Studies (use these as proof — reference real results verbatim)
+{case_studies_block}
 
 ## Output Format
 Respond with valid JSON only. No markdown, no explanation.

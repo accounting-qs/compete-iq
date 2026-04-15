@@ -1,0 +1,464 @@
+"use client";
+
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import {
+  fetchPrinciples, createPrinciple, updatePrinciple, deletePrinciple,
+  fetchCaseStudies, createCaseStudy as apiCreateCaseStudy, updateCaseStudy as apiUpdateCaseStudy, deleteCaseStudy as apiDeleteCaseStudy,
+  fetchBrainContent, updateUniversalBrain, updateFormatBrain,
+  type ApiPrinciple, type ApiCaseStudy, type ApiBrainContent,
+} from "@/lib/api";
+
+/* ─── Spinner ─────────────────────────────────────────────────────────── */
+
+function Spinner() {
+  return (
+    <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+    </svg>
+  );
+}
+
+/* ─── Principles Tab ──────────────────────────────────────────────────── */
+
+function PrinciplesTab() {
+  const [principles, setPrinciples] = useState<ApiPrinciple[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [newText, setNewText] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editText, setEditText] = useState("");
+
+  useEffect(() => {
+    fetchPrinciples().then(setPrinciples).catch(console.error).finally(() => setLoading(false));
+  }, []);
+
+  const handleAdd = useCallback(async () => {
+    if (!newText.trim()) return;
+    setAdding(true);
+    try {
+      const p = await createPrinciple({ principle_text: newText.trim() });
+      setPrinciples(prev => [...prev, p]);
+      setNewText("");
+    } catch (err) { console.error(err); }
+    setAdding(false);
+  }, [newText]);
+
+  const handleToggle = useCallback(async (p: ApiPrinciple) => {
+    try {
+      const updated = await updatePrinciple(p.id, { is_active: !p.is_active });
+      setPrinciples(prev => prev.map(x => x.id === p.id ? updated : x));
+    } catch (err) { console.error(err); }
+  }, []);
+
+  const handleSaveEdit = useCallback(async (id: string) => {
+    if (!editText.trim()) return;
+    try {
+      const updated = await updatePrinciple(id, { principle_text: editText.trim() });
+      setPrinciples(prev => prev.map(x => x.id === id ? updated : x));
+      setEditingId(null);
+    } catch (err) { console.error(err); }
+  }, [editText]);
+
+  const handleDelete = useCallback(async (id: string) => {
+    try {
+      await deletePrinciple(id);
+      setPrinciples(prev => prev.filter(x => x.id !== id));
+    } catch (err) { console.error(err); }
+  }, []);
+
+  if (loading) return <div className="flex items-center gap-2 py-8 justify-center text-zinc-400 text-sm"><Spinner /> Loading…</div>;
+
+  const active = principles.filter(p => p.is_active);
+  const inactive = principles.filter(p => !p.is_active);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-zinc-500">{active.length} active, {inactive.length} inactive</span>
+      </div>
+
+      {/* Add new */}
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={newText}
+          onChange={(e) => setNewText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") handleAdd(); }}
+          placeholder="Add a new copywriting principle…"
+          className="flex-1 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-violet-500"
+        />
+        <button
+          onClick={handleAdd}
+          disabled={!newText.trim() || adding}
+          className="px-3 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5"
+        >
+          {adding && <Spinner />} Add
+        </button>
+      </div>
+
+      {/* List */}
+      <div className="space-y-1.5 max-h-[400px] overflow-y-auto">
+        {principles.map((p) => (
+          <div
+            key={p.id}
+            className={`flex items-start gap-2 px-3 py-2 rounded-lg border transition-all ${
+              p.is_active
+                ? "border-zinc-200 dark:border-zinc-800/40 bg-white dark:bg-zinc-900/60"
+                : "border-zinc-100 dark:border-zinc-800/20 bg-zinc-50 dark:bg-zinc-900/30 opacity-60"
+            }`}
+          >
+            <button
+              onClick={() => handleToggle(p)}
+              className={`mt-0.5 shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${
+                p.is_active
+                  ? "bg-violet-600 border-violet-600 text-white"
+                  : "border-zinc-300 dark:border-zinc-600"
+              }`}
+            >
+              {p.is_active && (
+                <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>
+              )}
+            </button>
+
+            {editingId === p.id ? (
+              <div className="flex-1 flex gap-1.5">
+                <input
+                  type="text"
+                  value={editText}
+                  onChange={(e) => setEditText(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleSaveEdit(p.id); if (e.key === "Escape") setEditingId(null); }}
+                  className="flex-1 bg-white dark:bg-zinc-800 border border-violet-400 rounded px-2 py-1 text-xs text-zinc-800 dark:text-zinc-200 focus:outline-none"
+                  autoFocus
+                />
+                <button onClick={() => handleSaveEdit(p.id)} className="text-[10px] text-emerald-500 font-medium px-1.5">Save</button>
+                <button onClick={() => setEditingId(null)} className="text-[10px] text-zinc-400 font-medium px-1.5">Cancel</button>
+              </div>
+            ) : (
+              <>
+                <p className="flex-1 text-xs text-zinc-700 dark:text-zinc-300 leading-relaxed">{p.principle_text}</p>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={() => { setEditingId(p.id); setEditText(p.principle_text); }}
+                    className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 px-1"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => handleDelete(p.id)}
+                    className="text-[10px] text-zinc-400 hover:text-red-500 px-1"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Case Studies Tab ────────────────────────────────────────────────── */
+
+function CaseStudiesTab() {
+  const [studies, setStudies] = useState<ApiCaseStudy[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState({ title: "", client_name: "", industry: "", tags: "", content: "" });
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    fetchCaseStudies().then(setStudies).catch(console.error).finally(() => setLoading(false));
+  }, []);
+
+  const resetForm = () => {
+    setForm({ title: "", client_name: "", industry: "", tags: "", content: "" });
+    setShowForm(false);
+    setEditingId(null);
+  };
+
+  const handleSave = useCallback(async () => {
+    if (!form.title.trim() || !form.content.trim()) return;
+    setSaving(true);
+    const tags = form.tags.split(",").map(t => t.trim()).filter(Boolean);
+    try {
+      if (editingId) {
+        const updated = await apiUpdateCaseStudy(editingId, {
+          title: form.title, client_name: form.client_name || undefined,
+          industry: form.industry || undefined, tags, content: form.content,
+        });
+        setStudies(prev => prev.map(s => s.id === editingId ? updated : s));
+      } else {
+        const created = await apiCreateCaseStudy({
+          title: form.title, client_name: form.client_name || undefined,
+          industry: form.industry || undefined, tags, content: form.content,
+        });
+        setStudies(prev => [created, ...prev]);
+      }
+      resetForm();
+    } catch (err) { console.error(err); }
+    setSaving(false);
+  }, [form, editingId]);
+
+  const handleEdit = (cs: ApiCaseStudy) => {
+    setForm({
+      title: cs.title || "", client_name: cs.client_name || "",
+      industry: cs.industry || "", tags: (cs.tags || []).join(", "), content: cs.content,
+    });
+    setEditingId(cs.id);
+    setShowForm(true);
+  };
+
+  const handleToggle = useCallback(async (cs: ApiCaseStudy) => {
+    try {
+      const updated = await apiUpdateCaseStudy(cs.id, { is_active: !cs.is_active });
+      setStudies(prev => prev.map(s => s.id === cs.id ? updated : s));
+    } catch (err) { console.error(err); }
+  }, []);
+
+  const handleDelete = useCallback(async (id: string) => {
+    try {
+      await apiDeleteCaseStudy(id);
+      setStudies(prev => prev.filter(s => s.id !== id));
+    } catch (err) { console.error(err); }
+  }, []);
+
+  if (loading) return <div className="flex items-center gap-2 py-8 justify-center text-zinc-400 text-sm"><Spinner /> Loading…</div>;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-zinc-500">{studies.filter(s => s.is_active).length} active case studies</span>
+        {!showForm && (
+          <button
+            onClick={() => { resetForm(); setShowForm(true); }}
+            className="text-xs font-medium text-violet-500 hover:text-violet-400 flex items-center gap-1"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+            Add case study
+          </button>
+        )}
+      </div>
+
+      {/* Add/Edit Form */}
+      {showForm && (
+        <div className="rounded-xl border border-violet-200 dark:border-violet-500/25 bg-violet-50/30 dark:bg-violet-500/5 p-4 space-y-3">
+          <div className="grid grid-cols-3 gap-2">
+            <input value={form.title} onChange={(e) => setForm(f => ({ ...f, title: e.target.value }))}
+              placeholder="Title *" className="col-span-1 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-violet-500" />
+            <input value={form.client_name} onChange={(e) => setForm(f => ({ ...f, client_name: e.target.value }))}
+              placeholder="Client name" className="col-span-1 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-violet-500" />
+            <input value={form.industry} onChange={(e) => setForm(f => ({ ...f, industry: e.target.value }))}
+              placeholder="Industry (for matching)" className="col-span-1 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-violet-500" />
+          </div>
+          <input value={form.tags} onChange={(e) => setForm(f => ({ ...f, tags: e.target.value }))}
+            placeholder="Tags (comma-separated, e.g. SaaS, B2B, coaching)" className="w-full bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-violet-500" />
+          <textarea value={form.content} onChange={(e) => setForm(f => ({ ...f, content: e.target.value }))}
+            placeholder="Case study content — include client results, metrics, story… *" rows={5}
+            className="w-full bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-violet-500 resize-vertical" />
+          <div className="flex gap-2">
+            <button onClick={handleSave} disabled={!form.title.trim() || !form.content.trim() || saving}
+              className="px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5">
+              {saving && <Spinner />} {editingId ? "Update" : "Add"} case study
+            </button>
+            <button onClick={resetForm} className="px-3 py-2 text-xs text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300">Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* List */}
+      <div className="space-y-2 max-h-[400px] overflow-y-auto">
+        {studies.map((cs) => (
+          <div
+            key={cs.id}
+            className={`rounded-xl border px-4 py-3 transition-all ${
+              cs.is_active
+                ? "border-zinc-200 dark:border-zinc-800/40 bg-white dark:bg-zinc-900/60"
+                : "border-zinc-100 dark:border-zinc-800/20 bg-zinc-50 dark:bg-zinc-900/30 opacity-60"
+            }`}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h4 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200 truncate">{cs.title}</h4>
+                  {cs.client_name && <span className="text-[10px] text-zinc-500">{cs.client_name}</span>}
+                  {cs.industry && (
+                    <span className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400">
+                      {cs.industry}
+                    </span>
+                  )}
+                  {(cs.tags || []).map(tag => (
+                    <span key={tag} className="text-[9px] font-medium px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800/60 text-zinc-500 dark:text-zinc-400">
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 line-clamp-2 leading-relaxed">{cs.content}</p>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                <button onClick={() => handleToggle(cs)}
+                  className={`text-[10px] font-medium px-1.5 py-0.5 rounded transition-colors ${cs.is_active ? "text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-500/10" : "text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-500/10"}`}>
+                  {cs.is_active ? "Disable" : "Enable"}
+                </button>
+                <button onClick={() => handleEdit(cs)} className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 px-1">Edit</button>
+                <button onClick={() => handleDelete(cs.id)} className="text-[10px] text-zinc-400 hover:text-red-500 px-1">Delete</button>
+              </div>
+            </div>
+          </div>
+        ))}
+        {studies.length === 0 && (
+          <div className="text-center py-8 text-zinc-400 text-sm">No case studies yet. Add one to use in copy generation.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Brain Content Tab ───────────────────────────────────────────────── */
+
+function BrainContentTab() {
+  const [content, setContent] = useState<ApiBrainContent | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [universalText, setUniversalText] = useState("");
+  const [formatText, setFormatText] = useState("");
+  const [savingU, setSavingU] = useState(false);
+  const [savingF, setSavingF] = useState(false);
+  const [savedU, setSavedU] = useState(false);
+  const [savedF, setSavedF] = useState(false);
+
+  useEffect(() => {
+    fetchBrainContent().then(c => {
+      setContent(c);
+      setUniversalText(c.universal_brain);
+      setFormatText(c.format_brain);
+    }).catch(console.error).finally(() => setLoading(false));
+  }, []);
+
+  const handleSaveUniversal = useCallback(async () => {
+    setSavingU(true);
+    try {
+      await updateUniversalBrain(universalText);
+      setSavedU(true);
+      setTimeout(() => setSavedU(false), 2000);
+    } catch (err) { console.error(err); }
+    setSavingU(false);
+  }, [universalText]);
+
+  const handleSaveFormat = useCallback(async () => {
+    setSavingF(true);
+    try {
+      await updateFormatBrain(formatText);
+      setSavedF(true);
+      setTimeout(() => setSavedF(false), 2000);
+    } catch (err) { console.error(err); }
+    setSavingF(false);
+  }, [formatText]);
+
+  if (loading) return <div className="flex items-center gap-2 py-8 justify-center text-zinc-400 text-sm"><Spinner /> Loading…</div>;
+
+  const universalChanged = universalText !== (content?.universal_brain ?? "");
+  const formatChanged = formatText !== (content?.format_brain ?? "");
+
+  return (
+    <div className="space-y-4">
+      {/* Universal Brain */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold">Business Context (Universal Brain)</label>
+          <button onClick={handleSaveUniversal} disabled={!universalChanged || savingU}
+            className="text-xs font-medium px-3 py-1 rounded-md bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white transition-colors flex items-center gap-1.5">
+            {savingU && <Spinner />} {savedU ? "Saved!" : "Save"}
+          </button>
+        </div>
+        <textarea
+          value={universalText}
+          onChange={(e) => setUniversalText(e.target.value)}
+          rows={8}
+          placeholder="Describe your business, offer, target audience, unique selling points…"
+          className="w-full bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-violet-500 resize-vertical font-mono leading-relaxed"
+        />
+      </div>
+
+      {/* Format Brain */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <label className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold">Format Rules (Calendar Invite Structure)</label>
+          <button onClick={handleSaveFormat} disabled={!formatChanged || savingF}
+            className="text-xs font-medium px-3 py-1 rounded-md bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white transition-colors flex items-center gap-1.5">
+            {savingF && <Spinner />} {savedF ? "Saved!" : "Save"}
+          </button>
+        </div>
+        <textarea
+          value={formatText}
+          onChange={(e) => setFormatText(e.target.value)}
+          rows={8}
+          placeholder="Define the structure and format rules for calendar invite descriptions…"
+          className="w-full bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-blue-500 resize-vertical font-mono leading-relaxed"
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ─── Main BrainPanel ─────────────────────────────────────────────────── */
+
+type BrainTab = "principles" | "case-studies" | "content";
+
+export function BrainPanel() {
+  const [open, setOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<BrainTab>("principles");
+
+  return (
+    <div className="rounded-xl border border-zinc-200 dark:border-zinc-800/40 bg-white dark:bg-zinc-900 overflow-hidden shadow-sm">
+      {/* Toggle Header */}
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between px-5 py-3 hover:bg-zinc-50 dark:hover:bg-zinc-800/20 transition-colors"
+      >
+        <div className="flex items-center gap-2.5">
+          <span className="text-sm font-bold text-zinc-800 dark:text-zinc-200">Copy Brain</span>
+          <span className="text-[10px] text-zinc-400">Principles, case studies & business context</span>
+        </div>
+        <svg className={`w-4 h-4 text-zinc-400 transition-transform ${open ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {/* Collapsible Content */}
+      {open && (
+        <div className="border-t border-zinc-200 dark:border-zinc-800/40">
+          {/* Tab Bar */}
+          <div className="flex items-center gap-1 px-5 py-2.5 border-b border-zinc-100 dark:border-zinc-800/30">
+            {([
+              { key: "principles" as BrainTab, label: "Principles" },
+              { key: "case-studies" as BrainTab, label: "Case Studies" },
+              { key: "content" as BrainTab, label: "Brain Content" },
+            ]).map(tab => (
+              <button
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                className={`px-4 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  activeTab === tab.key
+                    ? "bg-violet-100 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400 border border-violet-200 dark:border-violet-500/25"
+                    : "text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800/50"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Tab Content */}
+          <div className="px-5 py-4">
+            {activeTab === "principles" && <PrinciplesTab />}
+            {activeTab === "case-studies" && <CaseStudiesTab />}
+            {activeTab === "content" && <BrainContentTab />}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

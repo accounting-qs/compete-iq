@@ -34,6 +34,10 @@ class CopyGenerateRequest(BaseModel):
     copy_type: str = Field(..., pattern="^(title|description|both)$")
     variant_count: int = Field(3, ge=1, le=10)
 
+class CopyCreate(BaseModel):
+    copy_type: str = Field(..., pattern="^(title|description)$")
+    text: str = ""
+
 class CopyUpdate(BaseModel):
     text: str | None = None
     is_primary: bool | None = None
@@ -118,3 +122,34 @@ class ImportStartCreate(BaseModel):
 class CustomFieldCreate(BaseModel):
     field_name: str
     field_type: str = "text"  # text, number, date, boolean
+
+
+# ── Brain ─────────────────────────────────────────────────────────────────
+
+class PrincipleCreate(BaseModel):
+    principle_text: str
+    knowledge_type: str = "copy_general"
+    category: str | None = None
+
+class PrincipleUpdate(BaseModel):
+    principle_text: str | None = None
+    category: str | None = None
+    is_active: bool | None = None
+
+class CaseStudyCreate(BaseModel):
+    title: str
+    client_name: str | None = None
+    industry: str | None = None
+    tags: list[str] = []
+    content: str
+
+class CaseStudyUpdate(BaseModel):
+    title: str | None = None
+    client_name: str | None = None
+    industry: str | None = None
+    tags: list[str] | None = None
+    content: str | None = None
+    is_active: bool | None = None
+
+class BrainContentUpdate(BaseModel):
+    brain_content: str

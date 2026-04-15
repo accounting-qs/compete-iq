@@ -236,7 +236,10 @@ class CaseStudy(Base):
     user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     title: Mapped[Optional[str]] = mapped_column(String)
     client_name: Mapped[Optional[str]] = mapped_column(String)
+    industry: Mapped[Optional[str]] = mapped_column(String)
+    tags: Mapped[Optional[list]] = mapped_column(JSONB, server_default="'[]'")
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default="true")
     notion_page_id: Mapped[Optional[str]] = mapped_column(String, unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -244,4 +247,5 @@ class CaseStudy(Base):
     __table_args__ = (
         Index("ix_case_studies_user_id", "user_id"),
         Index("ix_case_studies_notion_page_id", "notion_page_id"),
+        Index("ix_case_studies_industry", "industry"),
     )
