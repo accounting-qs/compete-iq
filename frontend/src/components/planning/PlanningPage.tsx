@@ -384,6 +384,7 @@ export function PlanningPage() {
   const [copyModalLists, setCopyModalLists] = useState<PlannedList[]>([]);
   const [generatingCopies, setGeneratingCopies] = useState(false);
   const [planningCopyModal, setPlanningCopyModal] = useState<{ listId: string; webinarId: string; tab: "title" | "description" } | null>(null);
+  const [copiedVariantId, setCopiedVariantId] = useState<string | null>(null);
 
   // New Webinar modal state
   const [showNewWebinarModal, setShowNewWebinarModal] = useState(false);
@@ -685,6 +686,34 @@ export function PlanningPage() {
       alert(err instanceof Error ? err.message : "Failed to delete assignment");
     }
   }, [webinars]);
+
+  const handleBulkDelete = useCallback(async () => {
+    const listsToDelete = webinars.flatMap((w) => w.lists.map((l) => ({ ...l, webinarId: w.id, webinarNumber: w.number }))).filter((l) => selectedIds.has(l.id) && !l.isNonjoiners && !l.isNoListData);
+    if (listsToDelete.length === 0) return;
+    const totalContacts = listsToDelete.reduce((sum, l) => sum + l.listSize, 0);
+    if (!confirm(`Remove ${listsToDelete.length} assigned list${listsToDelete.length > 1 ? "s" : ""} (${totalContacts.toLocaleString()} contacts total)? Contacts will be released back to their buckets.`)) return;
+
+    let deletedCount = 0;
+    for (const list of listsToDelete) {
+      try {
+        const { bucket_id, bucket_remaining } = await apiDeleteAssignment(list.id);
+        setWebinars((prev) => prev.map((w) =>
+          w.id === list.webinarId ? { ...w, lists: w.lists.filter((l) => l.id !== list.id) } : w
+        ));
+        if (bucket_id && bucket_remaining !== null) {
+          setBuckets((prev) => prev.map((b) =>
+            b.id === bucket_id ? { ...b, remaining_contacts: bucket_remaining } : b
+          ));
+        }
+        deletedCount++;
+      } catch (err) {
+        console.error(`Failed to delete assignment ${list.id}:`, err);
+        alert(`Failed to delete list "${list.bucket}" from W${list.webinarNumber}. ${deletedCount} of ${listsToDelete.length} deleted so far.`);
+        break;
+      }
+    }
+    setSelectedIds(new Set());
+  }, [webinars, selectedIds]);
 
   const openCopyModal = () => {
     const lists = webinars.flatMap((w) => w.lists).filter((l) => selectedIds.has(l.id) && !l.isNonjoiners && !l.isNoListData);
@@ -1558,6 +1587,10 @@ export function PlanningPage() {
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
             Generate Copies
           </button>
+          <button onClick={handleBulkDelete} className="px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+            Delete
+          </button>
           <button onClick={() => setSelectedIds(new Set())} className="text-xs text-zinc-600 dark:text-zinc-400 hover:text-zinc-800 dark:text-zinc-200 transition-colors">Clear</button>
         </div>
       )}
@@ -1769,12 +1802,30 @@ export function PlanningPage() {
                       </div>
                       <pre className="text-xs text-zinc-800 dark:text-zinc-200 mt-1 leading-relaxed whitespace-pre-wrap font-sans">{linkifyCopyText(v.text, regLink, unsubLink)}</pre>
                     </div>
-                    {variants.length > 1 && (
-                      <div onClick={(e) => { e.stopPropagation(); if (confirm(`Delete this ${isTitle ? "title" : "description"} variant?`)) deleteVariant(targetList.id, isTitle ? "title" : "desc", v.id); }}
-                        className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-100 dark:hover:bg-red-500/10 text-zinc-400 hover:text-red-500 transition-all shrink-0 mt-0.5">
-                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                    <div className="flex items-center gap-0.5 shrink-0 mt-0.5">
+                      <div
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigator.clipboard.writeText(v.text);
+                          setCopiedVariantId(v.id);
+                          setTimeout(() => setCopiedVariantId(prev => prev === v.id ? null : prev), 1500);
+                        }}
+                        className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800/50 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-all cursor-pointer"
+                        title="Copy to clipboard"
+                      >
+                        {copiedVariantId === v.id ? (
+                          <svg className="w-3.5 h-3.5 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                        ) : (
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                        )}
                       </div>
-                    )}
+                      {variants.length > 1 && (
+                        <div onClick={(e) => { e.stopPropagation(); if (confirm(`Delete this ${isTitle ? "title" : "description"} variant?`)) deleteVariant(targetList.id, isTitle ? "title" : "desc", v.id); }}
+                          className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-100 dark:hover:bg-red-500/10 text-zinc-400 hover:text-red-500 transition-all cursor-pointer">
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                        </div>
+                      )}
+                    </div>
                   </button>
                 ))}
               </div>
