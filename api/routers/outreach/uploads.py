@@ -522,7 +522,7 @@ async def _process_csv_import(
                         bucket_cache[b["name"]] = b["id"]
 
         BATCH_SIZE = 2000
-        PROGRESS_INTERVAL = 5000
+        PROGRESS_INTERVAL = 2000
         inserted = 0
         skipped = 0
         overwritten = 0
@@ -571,6 +571,7 @@ async def _process_csv_import(
                     "user_id": LLOYD_USER_ID,
                     "upload_id": upload_id,
                     "bucket_id": None,
+                    "outreach_status": "available",
                     "custom_data": {},
                 }
                 for f in STANDARD_FIELDS:
@@ -601,6 +602,23 @@ async def _process_csv_import(
             if not rows_to_insert:
                 processed += len(batch_rows)
                 continue
+
+            # Deduplicate within batch — keep last occurrence per email
+            # This prevents intra-batch conflicts that inflate "skipped" counts
+            seen_emails: dict[str, int] = {}
+            batch_dupes = 0
+            for i, row in enumerate(rows_to_insert):
+                email = row.get("email")
+                if email:
+                    email_lower = email.lower().strip()
+                    if email_lower in seen_emails:
+                        batch_dupes += 1
+                    seen_emails[email_lower] = i
+                # rows with no email are always kept (no uniqueness conflict)
+            if batch_dupes > 0:
+                keep_indices = set(seen_emails.values()) | {i for i, r in enumerate(rows_to_insert) if not r.get("email")}
+                rows_to_insert = [rows_to_insert[i] for i in sorted(keep_indices)]
+                skipped += batch_dupes
 
             async with engine.begin() as conn:
                 try:
@@ -645,13 +663,18 @@ async def _process_csv_import(
             touched_bucket_ids = list(bucket_cache.values()) if bucket_cache else []
             if touched_bucket_ids:
                 bucket_counts = await conn.execute(
-                    select(Contact.__table__.c.bucket_id,
-                           sa_func.count(Contact.__table__.c.id).label("cnt"))
+                    select(
+                        Contact.__table__.c.bucket_id,
+                        sa_func.count(Contact.__table__.c.id).label("total"),
+                        sa_func.count(Contact.__table__.c.id).filter(
+                            Contact.__table__.c.outreach_status == "available"
+                        ).label("available"),
+                    )
                     .where(Contact.__table__.c.user_id == LLOYD_USER_ID,
                            Contact.__table__.c.bucket_id.in_(touched_bucket_ids))
                     .group_by(Contact.__table__.c.bucket_id)
                 )
-                count_map = {row.bucket_id: row.cnt for row in bucket_counts}
+                count_map = {row.bucket_id: {"total": row.total, "available": row.available} for row in bucket_counts}
             else:
                 count_map = {}
 
@@ -667,9 +690,12 @@ async def _process_csv_import(
                     await conn.execute(
                         update(OutreachBucket.__table__)
                         .where(OutreachBucket.__table__.c.id == b.id)
-                        .values(total_contacts=count_map[b.id], remaining_contacts=count_map[b.id])
+                        .values(
+                            total_contacts=count_map[b.id]["total"],
+                            remaining_contacts=count_map[b.id]["available"],
+                        )
                     )
-                real_count = count_map.get(b.id, 0)
+                real_count = count_map.get(b.id, {"total": 0})["total"]
                 bucket_summary.append({"name": b.name, "count": real_count,
                     "countries": b.countries or [], "empRanges": [b.emp_range] if b.emp_range else [],
                     "avgConfidence": 0})

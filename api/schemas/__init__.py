@@ -2,9 +2,9 @@
 Pydantic schemas for the outreach API.
 Shared across all outreach sub-routers.
 """
-from __future__ import annotations
 
-from datetime import date
+import datetime
+from typing import Optional
 from pydantic import BaseModel, Field
 
 
@@ -64,9 +64,11 @@ class SenderUpdate(BaseModel):
 
 class WebinarCreate(BaseModel):
     number: int
-    date: date
+    date: datetime.date
 
 class WebinarUpdate(BaseModel):
+    number: int | None = None
+    date: Optional[datetime.date] = None
     status: str | None = None
     broadcast_id: str | None = None
     main_title: str | None = None

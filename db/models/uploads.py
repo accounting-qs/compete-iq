@@ -34,7 +34,7 @@ class UploadHistory(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
-        CheckConstraint("status IN ('pending', 'uploading', 'processing', 'complete', 'failed')", name="ck_upload_history_status"),
+        CheckConstraint("status IN ('pending', 'uploading', 'processing', 'complete', 'failed', 'cancelled', 'paused')", name="ck_upload_history_status"),
         Index("ix_upload_history_user_id", "user_id"),
     )
 

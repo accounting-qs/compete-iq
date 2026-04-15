@@ -124,6 +124,7 @@ export interface ApiAssignment {
   is_nonjoiners: boolean;
   is_no_list_data: boolean;
   display_order: number;
+  bucket_remaining?: number;
 }
 
 export interface ApiUpload {
@@ -164,14 +165,6 @@ export interface UploadStatusResponse {
   overwritten_count: number;
   error_message: string | null;
   bucket_summary: Array<{ name: string; count: number; countries: string[]; empRanges: string[]; avgConfidence: number }> | null;
-}
-
-export interface ApiAccountUsage {
-  sender_id: string;
-  sender_name: string;
-  total_accounts: number;
-  accounts_used: number;
-  accounts_available: number;
 }
 
 /* ── Outreach: Buckets ─────────────────────────────────────────────────── */
@@ -329,7 +322,7 @@ export async function createWebinar(data: { number: number; date: string }): Pro
 
 export async function updateWebinar(
   webinarId: string,
-  data: Partial<{ status: string; broadcast_id: string; main_title: string }>
+  data: Partial<{ number: number; date: string; status: string; broadcast_id: string; main_title: string }>
 ): Promise<ApiWebinar> {
   const res = await fetch(`${API_URL}/outreach/webinars/${webinarId}`, {
     method: "PUT",
@@ -337,6 +330,15 @@ export async function updateWebinar(
     body: JSON.stringify(data),
   });
   if (!res.ok) throw new Error("Failed to update webinar");
+  return res.json();
+}
+
+export async function deleteWebinar(webinarId: string): Promise<{ deleted: boolean; released: number }> {
+  const res = await fetch(`${API_URL}/outreach/webinars/${webinarId}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to delete webinar");
   return res.json();
 }
 
@@ -386,17 +388,12 @@ export async function updateAssignment(
   return res.json();
 }
 
-export async function deleteAssignment(assignmentId: string): Promise<void> {
+export async function deleteAssignment(assignmentId: string): Promise<{ released: number; bucket_id: string | null; bucket_remaining: number | null }> {
   const res = await fetch(`${API_URL}/outreach/assignments/${assignmentId}`, {
     method: "DELETE",
     headers: authHeaders(),
   });
   if (!res.ok) throw new Error("Failed to delete assignment");
-}
-
-export async function fetchWebinarAccounts(webinarId: string): Promise<{ senders: ApiAccountUsage[] }> {
-  const res = await fetch(`${API_URL}/outreach/webinars/${webinarId}/accounts`, { headers: authHeaders() });
-  if (!res.ok) throw new Error("Failed to fetch account usage");
   return res.json();
 }
 

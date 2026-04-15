@@ -79,6 +79,69 @@ async def update_webinar(
     return webinar_dict(webinar)
 
 
+@router.delete("/webinars/{webinar_id}")
+async def delete_webinar(
+    webinar_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    result = await db.execute(
+        select(Webinar).where(Webinar.id == webinar_id, Webinar.user_id == LLOYD_USER_ID)
+        .options(selectinload(Webinar.assignments))
+    )
+    webinar = result.scalar_one_or_none()
+    if not webinar:
+        raise HTTPException(404, "Webinar not found")
+
+    # Release 'assigned' contacts back to 'available' for all assignments
+    assignment_ids = [a.id for a in (webinar.assignments or [])]
+    total_released = 0
+    if assignment_ids:
+        release_result = await db.execute(
+            update(Contact)
+            .where(Contact.assignment_id.in_(assignment_ids), Contact.outreach_status == "assigned")
+            .values(assignment_id=None, outreach_status="available", assigned_date=None)
+        )
+        total_released = release_result.rowcount
+
+        # Clear assignment_id on 'used' contacts (keep status as 'used')
+        await db.execute(
+            update(Contact)
+            .where(Contact.assignment_id.in_(assignment_ids), Contact.outreach_status == "used")
+            .values(assignment_id=None)
+        )
+
+    # Restore bucket remaining counts
+    if total_released > 0:
+        # Group released by bucket
+        for a in (webinar.assignments or []):
+            if a.bucket_id:
+                b_result = await db.execute(
+                    select(sa_func.count()).where(
+                        Contact.bucket_id == a.bucket_id,
+                        Contact.outreach_status == "available",
+                    )
+                )
+                actual_available = b_result.scalar() or 0
+                await db.execute(
+                    update(OutreachBucket)
+                    .where(OutreachBucket.id == a.bucket_id)
+                    .values(remaining_contacts=actual_available)
+                )
+
+    # Delete copy usage logs for all assignments
+    if assignment_ids:
+        await db.execute(
+            delete(CopyUsageLog).where(CopyUsageLog.assignment_id.in_(assignment_ids))
+        )
+
+    # Delete webinar (CASCADE will delete assignments)
+    await db.delete(webinar)
+    await db.flush()
+
+    return {"deleted": True, "released": total_released}
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # WEBINAR ASSIGNMENTS
 # ═══════════════════════════════════════════════════════════════════════════
@@ -235,7 +298,9 @@ async def assign_bucket(
         )
     )
     assignment = reload_result.scalar_one()
-    return assignment_dict(assignment)
+    resp = assignment_dict(assignment)
+    resp["bucket_remaining"] = bucket.remaining_contacts
+    return resp
 
 
 @router.put("/assignments/{assignment_id}")
@@ -260,7 +325,7 @@ async def update_assignment(
     return assignment_dict(assignment)
 
 
-@router.delete("/assignments/{assignment_id}", status_code=204)
+@router.delete("/assignments/{assignment_id}")
 async def delete_assignment(
     assignment_id: str,
     db: AsyncSession = Depends(get_db),
@@ -293,11 +358,14 @@ async def delete_assignment(
     )
 
     # Restore bucket remaining — only the released (previously assigned, not yet used) ones
-    if assignment.bucket_id and released > 0:
-        b_result = await db.execute(select(OutreachBucket).where(OutreachBucket.id == assignment.bucket_id))
+    bucket_id = assignment.bucket_id
+    bucket_remaining = None
+    if bucket_id and released > 0:
+        b_result = await db.execute(select(OutreachBucket).where(OutreachBucket.id == bucket_id))
         bucket = b_result.scalar_one_or_none()
         if bucket:
             bucket.remaining_contacts += released
+            bucket_remaining = bucket.remaining_contacts
 
     # Delete usage logs + assignment in parallel deletes
     await db.execute(
@@ -306,6 +374,12 @@ async def delete_assignment(
 
     await db.delete(assignment)
     await db.flush()
+
+    return {
+        "released": released,
+        "bucket_id": bucket_id,
+        "bucket_remaining": bucket_remaining,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════

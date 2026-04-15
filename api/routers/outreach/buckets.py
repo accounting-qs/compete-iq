@@ -13,7 +13,7 @@ from sqlalchemy.orm import selectinload
 from api.auth import require_auth
 from api.routers.outreach._helpers import LLOYD_USER_ID, bucket_dict, copy_dict
 from api.schemas import BucketCreate, BucketUpdate, CopyGenerateRequest, CopyUpdate, CopyRegenerateRequest
-from db.models import OutreachBucket, BucketCopy
+from db.models import OutreachBucket, BucketCopy, Contact
 from db.session import get_db
 from services.generation import generate_bucket_copies, regenerate_bucket_copy
 
@@ -42,6 +42,29 @@ async def list_buckets(
         q = q.options(selectinload(OutreachBucket.copies))
     result = await db.execute(q)
     buckets = result.scalars().all()
+
+    # Compute actual total/remaining from contacts table
+    bucket_ids = [b.id for b in buckets]
+    if bucket_ids:
+        count_result = await db.execute(
+            select(
+                Contact.bucket_id,
+                sa_func.count().label("total"),
+                sa_func.count().filter(Contact.outreach_status == "available").label("available"),
+            )
+            .where(Contact.bucket_id.in_(bucket_ids))
+            .group_by(Contact.bucket_id)
+        )
+        count_map = {row.bucket_id: (row.total, row.available) for row in count_result}
+
+        # Sync stored counters with actual counts
+        for b in buckets:
+            total, available = count_map.get(b.id, (0, 0))
+            if b.total_contacts != total or b.remaining_contacts != available:
+                b.total_contacts = total
+                b.remaining_contacts = available
+        await db.flush()
+
     return {"buckets": [bucket_dict(b, include_copies=(include == "copies")) for b in buckets]}
 
 

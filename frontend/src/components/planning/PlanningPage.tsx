@@ -7,6 +7,7 @@ import {
   updateSender as apiUpdateSender, fetchBucketCopies, generateCopies,
   createSender as apiCreateSender, deleteAssignment as apiDeleteAssignment,
   updateAssignment as apiUpdateAssignment, updateWebinar as apiUpdateWebinar,
+  deleteWebinar as apiDeleteWebinar,
   type ApiBucket, type ApiSender, type ApiWebinar, type ApiAssignment, type ApiCopy,
 } from "@/lib/api";
 
@@ -24,12 +25,8 @@ interface PlannedList {
   sender: string;
   listSize: number;
   listRemain: number;
-  gcalInvited: number;
   title: string;
   accountsNeeded: number;
-  industry: string;
-  empRange: string;
-  country: string;
   isNonjoiners?: boolean;
   isNoListData?: boolean;
   // Copy variants
@@ -37,6 +34,7 @@ interface PlannedList {
   descVariants?: { id: string; text: string; selected: boolean }[];
   copiesGenerated?: boolean;
   bucketId?: string;
+  senderId?: string;
   senderColor?: string;
 }
 
@@ -95,18 +93,6 @@ function SenderBadge({ name, color }: { name: string; color?: string }) {
   return <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border ${cls}`}>{name}</span>;
 }
 
-function VariantBadge({ variant }: { variant: string }) {
-  if (!variant) return <span className="text-zinc-600">—</span>;
-  const colors: Record<string, string> = {
-    "c&a": "bg-amber-500/15 text-amber-400 border-amber-500/25",
-    fin: "bg-cyan-500/15 text-cyan-400 border-cyan-500/25",
-    gen: "bg-violet-500/15 text-violet-300 border-violet-500/25",
-    account: "bg-emerald-500/15 text-emerald-400 border-emerald-500/25",
-  };
-  const key = variant.toLowerCase().split(" ")[0];
-  const cls = colors[key] || "bg-zinc-200 dark:bg-zinc-700/30 text-zinc-600 dark:text-zinc-400 border-zinc-600/30";
-  return <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border ${cls}`}>{variant}</span>;
-}
 
 function StatusBadge({ status }: { status: string }) {
   const colors: Record<string, { badge: string; dot: string }> = {
@@ -133,15 +119,12 @@ function apiAssignmentToList(a: ApiAssignment): PlannedList {
     description: a.description || "",
     listUrl: a.list_url || "",
     sender: a.sender?.name || "",
+    senderId: a.sender?.id || undefined,
     senderColor: a.sender?.color || undefined,
     listSize: a.volume,
     listRemain: a.remaining,
-    gcalInvited: a.gcal_invited,
     title: a.title_copy?.text || "",
     accountsNeeded: a.accounts_used,
-    industry: a.bucket?.industry || "",
-    empRange: a.emp_range_override || "",
-    country: a.countries_override || "",
     isNonjoiners: a.is_nonjoiners,
     isNoListData: a.is_no_list_data,
     copiesGenerated: !!a.title_copy,
@@ -348,6 +331,9 @@ export function PlanningPage() {
   const [newWebinarNumber, setNewWebinarNumber] = useState(0);
   const [newWebinarDate, setNewWebinarDate] = useState("");
 
+  // Edit Webinar modal state
+  const [editWebinar, setEditWebinar] = useState<{ id: string; number: number; date: string; broadcastId: string; status: string } | null>(null);
+
   // Assignment form state — scoped to one webinar at a time
   const [assigningWebinarId, setAssigningWebinarId] = useState<string | null>(null);
   const [assignBucket, setAssignBucket] = useState("");
@@ -427,14 +413,12 @@ export function PlanningPage() {
   const getAccountsUsedForSender = useCallback((webinarId: string, senderId: string): number => {
     const w = webinars.find((w) => w.id === webinarId);
     if (!w) return 0;
-    const sender = senders.find((s) => s.id === senderId);
-    if (!sender) return 0;
     return Math.round(
       w.lists
-        .filter((l) => !l.isNonjoiners && !l.isNoListData && l.sender.toLowerCase() === sender.name.toLowerCase())
+        .filter((l) => !l.isNonjoiners && !l.isNoListData && l.senderId === senderId)
         .reduce((sum, l) => sum + l.accountsNeeded, 0)
     );
-  }, [webinars, senders]);
+  }, [webinars]);
 
   const getAvailableAccounts = useCallback((webinarId: string, senderId: string): number => {
     const sender = senders.find((s) => s.id === senderId);
@@ -466,19 +450,48 @@ export function PlanningPage() {
     }
   };
 
-  const handleUpdateWebinar = async (webinarId: string, field: "main_title" | "broadcast_id" | "status", value: string) => {
+  const handleUpdateWebinar = async (webinarId: string, field: "main_title" | "broadcast_id" | "status" | "number" | "date", value: string | number) => {
     // Optimistic update
     setWebinars((prev) => prev.map((w) => {
       if (w.id !== webinarId) return w;
-      if (field === "main_title") return { ...w, mainTitle: value };
-      if (field === "broadcast_id") return { ...w, broadcastId: value || "—" };
-      if (field === "status") return { ...w, status: value.charAt(0).toUpperCase() + value.slice(1) };
+      if (field === "main_title") return { ...w, mainTitle: value as string };
+      if (field === "broadcast_id") return { ...w, broadcastId: (value as string) || "—" };
+      if (field === "status") return { ...w, status: (value as string).charAt(0).toUpperCase() + (value as string).slice(1) };
+      if (field === "number") return { ...w, number: value as number };
+      if (field === "date") {
+        const d = new Date((value as string) + "T00:00:00");
+        return { ...w, date: d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) };
+      }
       return w;
     }));
     try {
       await apiUpdateWebinar(webinarId, { [field]: value });
     } catch (err) {
       console.error("Failed to update webinar:", err);
+    }
+  };
+
+  const handleDeleteWebinar = async (webinarId: string) => {
+    const w = webinars.find((w) => w.id === webinarId);
+    if (!w) return;
+    const listCount = w.lists.length;
+    const msg = listCount > 0
+      ? `Delete W${w.number} and its ${listCount} assigned list${listCount > 1 ? "s" : ""}? Assigned contacts will be released back to their buckets.`
+      : `Delete W${w.number}?`;
+    if (!confirm(msg)) return;
+
+    try {
+      await apiDeleteWebinar(webinarId);
+      setWebinars((prev) => prev.filter((w) => w.id !== webinarId));
+      if (assigningWebinarId === webinarId) setAssigningWebinarId(null);
+      // Refetch buckets to get authoritative remaining counts
+      try {
+        const { buckets: freshBuckets } = await fetchBuckets();
+        setBuckets(freshBuckets);
+      } catch { /* non-critical */ }
+    } catch (err) {
+      console.error("Failed to delete webinar:", err);
+      alert(err instanceof Error ? err.message : "Failed to delete webinar");
     }
   };
 
@@ -538,10 +551,12 @@ export function PlanningPage() {
         w.id === targetId ? { ...w, lists: [...w.lists, newList] } : w
       ));
 
-      // Decrease bucket remaining
-      setBuckets((prev) => prev.map((b) =>
-        b.id === assignBucket ? { ...b, remaining_contacts: b.remaining_contacts - volume } : b
-      ));
+      // Update bucket remaining with authoritative DB value
+      if (assignment.bucket_remaining !== undefined) {
+        setBuckets((prev) => prev.map((b) =>
+          b.id === assignBucket ? { ...b, remaining_contacts: assignment.bucket_remaining! } : b
+        ));
+      }
 
       // Reset form
       setAssignBucket("");
@@ -565,17 +580,17 @@ export function PlanningPage() {
     if (!confirm(`Remove "${list.bucket}" (${list.listSize.toLocaleString()} contacts) from W${w?.number}? Contacts will be released back to the bucket.`)) return;
 
     try {
-      await apiDeleteAssignment(listId);
+      const { released, bucket_id, bucket_remaining } = await apiDeleteAssignment(listId);
 
       // Remove list from webinar in local state
       setWebinars((prev) => prev.map((w) =>
         w.id === webinarId ? { ...w, lists: w.lists.filter((l) => l.id !== listId) } : w
       ));
 
-      // Restore bucket remaining (backend recalculates from actual contacts)
-      if (list.bucketId) {
+      // Update bucket remaining with authoritative DB value
+      if (bucket_id && bucket_remaining !== null) {
         setBuckets((prev) => prev.map((b) =>
-          b.id === list.bucketId ? { ...b, remaining_contacts: b.remaining_contacts + list.listSize } : b
+          b.id === bucket_id ? { ...b, remaining_contacts: bucket_remaining } : b
         ));
       }
 
@@ -966,21 +981,37 @@ export function PlanningPage() {
                       )}
                     </td>
                     <td className="px-2 py-2.5" onClick={() => toggleWebinar(w.id)}>
-                      <span className="text-zinc-900 dark:text-zinc-100 font-bold text-sm">{w.number}</span>
-                      <span className="text-zinc-500 ml-2">{w.date}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-zinc-900 dark:text-zinc-100 font-bold text-sm">{w.number}</span>
+                        <span className="text-zinc-500">{w.date}</span>
+                        {w.broadcastId && w.broadcastId !== "—" && (
+                          <span className="text-[9px] text-zinc-500 font-mono bg-zinc-100 dark:bg-zinc-800/60 px-1.5 py-0.5 rounded border border-zinc-300 dark:border-zinc-700/30">ID: {w.broadcastId}</span>
+                        )}
+                        {w.expanded && (
+                          <div className="flex items-center gap-1 ml-1" onClick={(e) => e.stopPropagation()}>
+                            <button onClick={() => {
+                              const d = new Date(w.date);
+                              setEditWebinar({
+                                id: w.id,
+                                number: w.number,
+                                date: !isNaN(d.getTime()) ? d.toISOString().split("T")[0] : "",
+                                broadcastId: w.broadcastId === "—" ? "" : w.broadcastId,
+                                status: w.status.toLowerCase(),
+                              });
+                            }} className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors" title="Edit webinar">
+                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                            </button>
+                            <button onClick={() => handleDeleteWebinar(w.id)}
+                              className="p-1 rounded hover:bg-red-500/10 text-zinc-500 hover:text-red-400 transition-colors" title="Delete webinar">
+                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+                              </svg>
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </td>
-                    <td className="px-2 py-2.5" onClick={(e) => e.stopPropagation()}>
-                      <select
-                        value={w.status.toLowerCase()}
-                        onChange={(e) => handleUpdateWebinar(w.id, "status", e.target.value)}
-                        className="bg-transparent text-[10px] font-semibold border-none focus:outline-none focus:ring-1 focus:ring-violet-500 rounded cursor-pointer appearance-none pr-1"
-                        style={{ color: w.status.toLowerCase() === "sent" ? "#34d399" : w.status.toLowerCase() === "planning" ? "#fbbf24" : "#a1a1aa" }}
-                      >
-                        <option value="planning">Planning</option>
-                        <option value="sent">Sent</option>
-                        <option value="archived">Archived</option>
-                      </select>
-                    </td>
+                    <td className="px-2 py-2.5"><StatusBadge status={w.status} /></td>
                     <td className="px-2 py-2.5" colSpan={3}>
                       <input
                         type="text"
@@ -1296,25 +1327,6 @@ export function PlanningPage() {
                       <td className="px-2 py-1.5 text-right font-mono text-zinc-800 dark:text-zinc-300">{l.listSize > 0 ? l.listSize.toLocaleString() : ""}</td>
                       <td className="px-2 py-1.5 text-right">
                         <span className="font-mono text-violet-400">{l.listRemain > 0 ? l.listRemain.toLocaleString() : l.listSize > 0 ? "0" : ""}</span>
-                        {!l.isNonjoiners && !l.isNoListData && l.listSize > 0 && (
-                          <div className="flex items-center justify-end gap-1 mt-0.5">
-                            <span className="text-[9px] text-zinc-500">gcal:</span>
-                            <input
-                              type="number"
-                              defaultValue={l.gcalInvited}
-                              onBlur={(e) => {
-                                const v = parseInt(e.target.value) || 0;
-                                if (v !== l.gcalInvited) {
-                                  setWebinars((prev) => prev.map((ww) => ({ ...ww, lists: ww.lists.map((ll) => ll.id === l.id ? { ...ll, gcalInvited: v } : ll) })));
-                                  apiUpdateAssignment(l.id, { gcal_invited: v }).catch(console.error);
-                                }
-                              }}
-                              onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-                              onClick={(e) => e.stopPropagation()}
-                              className="w-10 bg-transparent border-b border-zinc-300 dark:border-zinc-700/40 text-[9px] font-mono text-zinc-500 text-right focus:outline-none focus:border-violet-500 py-0"
-                            />
-                          </div>
-                        )}
                       </td>
                       <td className="px-2 py-1.5">
                         {l.title ? (
@@ -1617,7 +1629,8 @@ export function PlanningPage() {
                   type="date"
                   value={newWebinarDate}
                   onChange={(e) => setNewWebinarDate(e.target.value)}
-                  className="w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-colors [color-scheme:dark]"
+                  onClick={(e) => (e.target as HTMLInputElement).showPicker?.()}
+                  className="w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-colors [color-scheme:dark] cursor-pointer [&::-webkit-calendar-picker-indicator]:opacity-70 [&::-webkit-calendar-picker-indicator]:invert [&::-webkit-calendar-picker-indicator]:cursor-pointer"
                 />
               </div>
               {/* Preview */}
@@ -1650,6 +1663,83 @@ export function PlanningPage() {
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14"/></svg>
                 Create Webinar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Edit Webinar Modal ─────────────────────────────────────── */}
+      {editWebinar && (
+        <div className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center" onClick={(e) => { if (e.target === e.currentTarget) setEditWebinar(null); }}>
+          <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800/60 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-zinc-200 dark:border-zinc-800/40 flex items-center justify-between">
+              <h3 className="text-base font-bold text-zinc-900 dark:text-zinc-100">Edit Webinar</h3>
+              <button onClick={() => setEditWebinar(null)} className="p-1.5 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors">
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="px-6 py-5 space-y-4">
+              <div>
+                <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-medium block mb-1.5">Webinar Number</label>
+                <input type="number" value={editWebinar.number}
+                  onChange={(e) => setEditWebinar({ ...editWebinar, number: parseInt(e.target.value) || 0 })}
+                  className="w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-800 dark:text-zinc-200 font-mono focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-colors"
+                  autoFocus />
+              </div>
+              <div>
+                <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-medium block mb-1.5">Webinar Date</label>
+                <input type="date" value={editWebinar.date}
+                  onChange={(e) => setEditWebinar({ ...editWebinar, date: e.target.value })}
+                  onClick={(e) => (e.target as HTMLInputElement).showPicker?.()}
+                  className="w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-colors [color-scheme:dark] cursor-pointer [&::-webkit-calendar-picker-indicator]:opacity-70 [&::-webkit-calendar-picker-indicator]:invert [&::-webkit-calendar-picker-indicator]:cursor-pointer" />
+              </div>
+              <div>
+                <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-medium block mb-1.5">Broadcast ID</label>
+                <input type="text" value={editWebinar.broadcastId}
+                  onChange={(e) => setEditWebinar({ ...editWebinar, broadcastId: e.target.value })}
+                  placeholder="Optional"
+                  className="w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-800 dark:text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-colors" />
+              </div>
+              <div>
+                <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-medium block mb-1.5">Status</label>
+                <select value={editWebinar.status}
+                  onChange={(e) => setEditWebinar({ ...editWebinar, status: e.target.value })}
+                  className="w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-colors">
+                  <option value="planning">Planning</option>
+                  <option value="sent">Sent</option>
+                  <option value="archived">Archived</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 border-t border-zinc-200 dark:border-zinc-800/40 flex items-center justify-between">
+              <button onClick={() => setEditWebinar(null)} className="px-4 py-2 text-sm text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors">
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  const ew = editWebinar;
+                  const w = webinars.find((w) => w.id === ew.id);
+                  if (!w) return;
+                  // Apply all changes
+                  if (ew.number !== w.number) await handleUpdateWebinar(ew.id, "number", ew.number);
+                  if (ew.date && ew.date !== (() => { const d = new Date(w.date); return !isNaN(d.getTime()) ? d.toISOString().split("T")[0] : ""; })()) {
+                    await handleUpdateWebinar(ew.id, "date", ew.date);
+                  }
+                  const currentBroadcast = w.broadcastId === "—" ? "" : w.broadcastId;
+                  if (ew.broadcastId !== currentBroadcast) await handleUpdateWebinar(ew.id, "broadcast_id", ew.broadcastId);
+                  if (ew.status !== w.status.toLowerCase()) await handleUpdateWebinar(ew.id, "status", ew.status);
+                  setEditWebinar(null);
+                }}
+                disabled={!editWebinar.number || !editWebinar.date}
+                className="px-5 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-300 dark:disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-sm font-semibold rounded-lg transition-colors"
+              >
+                Save Changes
               </button>
             </div>
           </div>
