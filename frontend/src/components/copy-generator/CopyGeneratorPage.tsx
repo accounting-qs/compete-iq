@@ -7,6 +7,7 @@ import {
   createCopy as apiCreateCopy,
   updateCopy as apiUpdateCopy,
   regenerateCopy as apiRegenerateCopy,
+  deleteCopy as apiDeleteCopy,
   type ApiBucket,
   type ApiCopy,
 } from "@/lib/api";
@@ -58,6 +59,7 @@ function VariationsModal({
   onSetPrimary,
   onRegenerate,
   onAddVariant,
+  onDeleteVariant,
 }: {
   bucket: ApiBucket;
   initialTab: "title" | "description";
@@ -68,6 +70,7 @@ function VariationsModal({
   onSetPrimary: (bucketId: string, type: "title" | "description", variantId: string) => void;
   onRegenerate: (bucketId: string, type: "title" | "description", copyId: string, feedback: string) => Promise<void>;
   onAddVariant: (bucketId: string, type: "title" | "description", text: string) => Promise<void>;
+  onDeleteVariant: (bucketId: string, type: "title" | "description", variantId: string) => Promise<void>;
 }) {
   const [activeTab, setActiveTab] = useState<"title" | "description">(initialTab);
   const [feedback, setFeedback] = useState("");
@@ -323,6 +326,17 @@ function VariationsModal({
                         >
                           {copiedId === v.id ? "Copied!" : "Copy"}
                         </button>
+                        {variants.length > 1 && (
+                          <button
+                            onClick={() => {
+                              if (confirm(`Delete this ${activeTab} variant?`))
+                                onDeleteVariant(bucket.id, activeTab, v.id);
+                            }}
+                            className="text-[10px] font-medium px-2 py-1 rounded-md text-zinc-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
+                          >
+                            Delete
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -743,6 +757,29 @@ export function CopyGeneratorPage() {
     }
   }, []);
 
+  const handleDeleteVariant = useCallback(async (bucketId: string, type: "title" | "description", variantId: string) => {
+    try {
+      await apiDeleteCopy(variantId);
+      setGeneratedCopies(prev => {
+        const next = new Map(prev);
+        const copies = (next.get(bucketId) || []).map(c => {
+          if (c.type !== type) return c;
+          const remaining = c.variants.filter(v => v.id !== variantId);
+          // If the deleted variant was primary, auto-select the first remaining
+          const deletedWasPrimary = c.variants.find(v => v.id === variantId)?.isPrimary;
+          if (deletedWasPrimary && remaining.length > 0) {
+            remaining[0] = { ...remaining[0], isPrimary: true };
+          }
+          return { ...c, variants: remaining };
+        });
+        next.set(bucketId, copies);
+        return next;
+      });
+    } catch (err) {
+      console.error("Failed to delete variant:", err);
+    }
+  }, []);
+
   /* ── Inline edit handlers ────────────────────────────────────────────── */
 
   const startInlineEdit = (bucketId: string, type: "title" | "description", text: string) => {
@@ -1043,6 +1080,7 @@ export function CopyGeneratorPage() {
           onSetPrimary={setPrimaryVariant}
           onRegenerate={handleRegenerate}
           onAddVariant={handleAddVariant}
+          onDeleteVariant={handleDeleteVariant}
         />
       )}
     </main>
