@@ -1380,36 +1380,51 @@ export function PlanningPage() {
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-zinc-800/20">
-                                {buckets.filter((b) => b.remaining_contacts > 0).map((b) => (
-                                  <tr key={b.id} onClick={() => {
-                                    setAssignBucket(b.id);
-                                    setAssignCountries((b.countries || []).join(", "));
-                                    setAssignEmpRange(b.emp_range || "");
-                                    setAssignAccounts(0);
-                                    // Cap volume to what available accounts can handle
-                                    let vol = b.remaining_contacts;
-                                    if (assignSender) {
-                                      const s = senders.find((s) => s.id === assignSender);
-                                      if (s) {
-                                        const spa = assignSendPerAcct > 0 ? assignSendPerAcct : s.sendPerAccount;
-                                        const d = assignDays > 0 ? assignDays : s.daysPerWeek;
-                                        const avail = getAvailableAccounts(w.id, assignSender);
-                                        const maxVol = avail * spa * d;
-                                        if (vol > maxVol && maxVol > 0) vol = maxVol;
-                                      }
-                                    }
-                                    setAssignVolume(vol);
-                                  }}
-                                    className={`cursor-pointer transition-colors ${assignBucket === b.id ? "bg-violet-500/10" : "hover:bg-zinc-200 dark:hover:bg-zinc-800/30"}`}>
-                                    <td className="px-3 py-1.5 text-zinc-800 dark:text-zinc-300 font-medium">{b.name}</td>
-                                    <td className="px-3 py-1.5 text-right font-mono text-zinc-600 dark:text-zinc-400">{b.total_contacts.toLocaleString()}</td>
-                                    <td className="px-3 py-1.5 text-right font-mono text-violet-400">{b.remaining_contacts.toLocaleString()}</td>
-                                    <td className="px-3 py-1.5">
-                                      <div className="flex gap-1">{b.countries.map((c) => <span key={c} className="px-1 py-0.5 text-[9px] bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 rounded">{c}</span>)}</div>
-                                    </td>
-                                    <td className="px-3 py-1.5 text-zinc-600 dark:text-zinc-400">{b.emp_range}</td>
-                                  </tr>
-                                ))}
+                                {(() => {
+                                  const availBuckets = buckets.filter((b) => b.remaining_contacts > 0);
+                                  const totalSum = availBuckets.reduce((s, b) => s + b.total_contacts, 0);
+                                  const remainSum = availBuckets.reduce((s, b) => s + b.remaining_contacts, 0);
+                                  const uniqueCountries = new Set(availBuckets.flatMap((b) => b.countries));
+                                  const uniqueEmpRanges = new Set(availBuckets.map((b) => b.emp_range).filter(Boolean));
+                                  return (<>
+                                    {availBuckets.map((b) => (
+                                      <tr key={b.id} onClick={() => {
+                                        setAssignBucket(b.id);
+                                        setAssignCountries((b.countries || []).join(", "));
+                                        setAssignEmpRange(b.emp_range || "");
+                                        setAssignAccounts(0);
+                                        let vol = b.remaining_contacts;
+                                        if (assignSender) {
+                                          const s = senders.find((s) => s.id === assignSender);
+                                          if (s) {
+                                            const spa = assignSendPerAcct > 0 ? assignSendPerAcct : s.sendPerAccount;
+                                            const d = assignDays > 0 ? assignDays : s.daysPerWeek;
+                                            const avail = getAvailableAccounts(w.id, assignSender);
+                                            const maxVol = avail * spa * d;
+                                            if (vol > maxVol && maxVol > 0) vol = maxVol;
+                                          }
+                                        }
+                                        setAssignVolume(vol);
+                                      }}
+                                        className={`cursor-pointer transition-colors ${assignBucket === b.id ? "bg-violet-500/10" : "hover:bg-zinc-200 dark:hover:bg-zinc-800/30"}`}>
+                                        <td className="px-3 py-1.5 text-zinc-800 dark:text-zinc-300 font-medium">{b.name}</td>
+                                        <td className="px-3 py-1.5 text-right font-mono text-zinc-600 dark:text-zinc-400">{b.total_contacts.toLocaleString()}</td>
+                                        <td className="px-3 py-1.5 text-right font-mono text-violet-400">{b.remaining_contacts.toLocaleString()}</td>
+                                        <td className="px-3 py-1.5">
+                                          <div className="flex gap-1">{b.countries.map((c) => <span key={c} className="px-1 py-0.5 text-[9px] bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 rounded">{c}</span>)}</div>
+                                        </td>
+                                        <td className="px-3 py-1.5 text-zinc-600 dark:text-zinc-400">{b.emp_range}</td>
+                                      </tr>
+                                    ))}
+                                    <tr className="bg-zinc-100 dark:bg-zinc-800/40 border-t border-zinc-300 dark:border-zinc-700/40">
+                                      <td className="px-3 py-1.5 text-zinc-600 dark:text-zinc-400 font-semibold">{availBuckets.length} buckets</td>
+                                      <td className="px-3 py-1.5 text-right font-mono text-zinc-600 dark:text-zinc-400 font-semibold">{totalSum.toLocaleString()}</td>
+                                      <td className="px-3 py-1.5 text-right font-mono text-violet-400 font-semibold">{remainSum.toLocaleString()}</td>
+                                      <td className="px-3 py-1.5 text-zinc-600 dark:text-zinc-400 font-semibold">{uniqueCountries.size} countries</td>
+                                      <td className="px-3 py-1.5 text-zinc-600 dark:text-zinc-400 font-semibold">{uniqueEmpRanges.size} ranges</td>
+                                    </tr>
+                                  </>);
+                                })()}
                               </tbody>
                             </table>
                           </div>
