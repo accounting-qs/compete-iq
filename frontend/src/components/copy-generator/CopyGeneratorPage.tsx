@@ -672,7 +672,7 @@ export function CopyGeneratorPage() {
   }, []);
 
   const setPrimaryVariant = useCallback(async (bucketId: string, type: "title" | "description", variantId: string) => {
-    // Optimistic update
+    // Optimistic update — variants
     setGeneratedCopies(prev => {
       const next = new Map(prev);
       const copies = (next.get(bucketId) || []).map(c => {
@@ -682,6 +682,13 @@ export function CopyGeneratorPage() {
       next.set(bucketId, copies);
       return next;
     });
+    // Optimistic update — bucket-level picked flag
+    setBuckets(prev => prev.map(b => {
+      if (b.id !== bucketId) return b;
+      return type === "title"
+        ? { ...b, title_primary_picked: true }
+        : { ...b, desc_primary_picked: true };
+    }));
     // Fire API call
     try {
       await apiUpdateCopy(variantId, { is_primary: true });
