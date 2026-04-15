@@ -111,42 +111,52 @@ async def upload_csv_file(
     headers = _parse_csv_line(prefix_lines[0])
     preview_rows = [_parse_csv_line(prefix_lines[i]) for i in range(1, min(6, len(prefix_lines)))]
 
-    # Stream full file to Supabase Storage in chunks — not buffered in memory
+    # Read full file, count newlines, then upload to storage
     await file.seek(0)
     storage_path = f"{LLOYD_USER_ID}/{int(datetime.now().timestamp())}_{file.filename}"
 
     import httpx
 
-    # Read file in chunks, count newlines for row estimate, stream to storage
-    chunks: list[bytes] = []
-    file_size = 0
-    newline_count = 0
-    while True:
-        chunk = await file.read(256 * 1024)  # 256KB chunks
-        if not chunk:
-            break
-        file_size += len(chunk)
-        if file_size > MAX_UPLOAD_SIZE:
-            raise HTTPException(413, f"File exceeds {MAX_UPLOAD_SIZE // (1024*1024)} MB limit")
-        newline_count += chunk.count(b"\n")
-        chunks.append(chunk)
+    # Read file into memory (we need the full content for the storage upload)
+    contents = await file.read()
+    file_size = len(contents)
+    if file_size > MAX_UPLOAD_SIZE:
+        raise HTTPException(413, f"File exceeds {MAX_UPLOAD_SIZE // (1024*1024)} MB limit")
 
-    total_rows = max(0, newline_count - 1)  # subtract header row
+    newline_count = contents.count(b"\n")
+    total_rows = max(0, newline_count - 1)
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{SUPABASE_URL}/storage/v1/object/{CSV_BUCKET}/{storage_path}",
-            headers={
-                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                "Content-Type": "text/csv",
-            },
-            content=b"".join(chunks),
-            timeout=300.0,
-        )
-        if resp.status_code not in (200, 201):
-            raise HTTPException(500, f"Failed to upload to Storage: {resp.text}")
+    # Upload to Supabase Storage with generous timeout and retries
+    upload_ok = False
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{SUPABASE_URL}/storage/v1/object/{CSV_BUCKET}/{storage_path}",
+                    headers={
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                        "Content-Type": "text/csv",
+                        "x-upsert": "true",
+                    },
+                    content=contents,
+                    timeout=httpx.Timeout(connect=30.0, read=300.0, write=300.0, pool=30.0),
+                )
+                if resp.status_code in (200, 201):
+                    upload_ok = True
+                    break
+                if attempt < 2:
+                    print(f"[UPLOAD] Storage attempt {attempt+1} failed ({resp.status_code}), retrying...")
+                    await asyncio.sleep(2)
+                else:
+                    raise HTTPException(500, f"Failed to upload to Storage: {resp.text}")
+        except httpx.TimeoutException:
+            if attempt < 2:
+                print(f"[UPLOAD] Storage timeout on attempt {attempt+1}, retrying...")
+                await asyncio.sleep(2)
+            else:
+                raise HTTPException(504, "Upload to storage timed out after 3 attempts")
 
-    del chunks  # free memory immediately
+    del contents  # free memory
 
     # Create upload record
     upload = UploadHistory(
@@ -598,22 +608,32 @@ async def _process_csv_import(
                 rows_to_insert = [rows_to_insert[i] for i in sorted(keep)]
 
             b_ins, b_skip, b_over = 0, dupes, 0
-            async with engine.begin() as conn:
-                stmt = pg_insert(Contact.__table__).values(rows_to_insert)
-                if duplicate_mode == "overwrite":
-                    set_cols = {
-                        c.name: getattr(stmt.excluded, c.name)
-                        for c in Contact.__table__.columns
-                        if c.name not in ("id", "user_id", "email", "created_at")
-                    }
-                    stmt = stmt.on_conflict_do_update(constraint="uq_contacts_user_email", set_=set_cols)
-                    result = await conn.execute(stmt)
-                    b_over = result.rowcount
-                else:
-                    stmt = stmt.on_conflict_do_nothing(constraint="uq_contacts_user_email")
-                    result = await conn.execute(stmt)
-                    b_ins = result.rowcount
-                    b_skip += len(rows_to_insert) - result.rowcount
+            # Retry up to 3 times on connection errors (Supabase pooler drops idle connections)
+            for attempt in range(3):
+                try:
+                    async with engine.begin() as conn:
+                        stmt = pg_insert(Contact.__table__).values(rows_to_insert)
+                        if duplicate_mode == "overwrite":
+                            set_cols = {
+                                c.name: getattr(stmt.excluded, c.name)
+                                for c in Contact.__table__.columns
+                                if c.name not in ("id", "user_id", "email", "created_at")
+                            }
+                            stmt = stmt.on_conflict_do_update(constraint="uq_contacts_user_email", set_=set_cols)
+                            result = await conn.execute(stmt)
+                            b_over = result.rowcount
+                        else:
+                            stmt = stmt.on_conflict_do_nothing(constraint="uq_contacts_user_email")
+                            result = await conn.execute(stmt)
+                            b_ins = result.rowcount
+                            b_skip += len(rows_to_insert) - result.rowcount
+                    break  # success
+                except Exception as e:
+                    if attempt < 2 and ("connection" in str(e).lower() or "timeout" in str(e).lower()):
+                        print(f"[IMPORT] DB retry {attempt+1}: {e}")
+                        await asyncio.sleep(1)
+                    else:
+                        raise
             return b_ins, b_skip, b_over
 
         # Single-pass: iterate rows, create buckets on the fly, batch insert
