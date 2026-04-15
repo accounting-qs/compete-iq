@@ -99,6 +99,7 @@ class AssignmentUpdate(BaseModel):
     volume: int | None = None
     remaining: int | None = None
     list_url: str | None = None
+    list_name: str | None = None
     gcal_invited: int | None = None
 
 

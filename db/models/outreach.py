@@ -126,6 +126,7 @@ class WebinarListAssignment(Base):
     emp_range_override: Mapped[Optional[str]] = mapped_column(Text)
     is_nonjoiners: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     is_no_list_data: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    list_name: Mapped[Optional[str]] = mapped_column(Text)
     display_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

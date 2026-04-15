@@ -86,6 +86,134 @@ async def list_uploads(
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# DIRECT-TO-SUPABASE UPLOAD (presign → upload → confirm)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.post("/uploads/presign", status_code=201)
+async def presign_upload(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """
+    Step 1: Get a signed URL for direct browser-to-Supabase upload.
+    Browser will PUT the file directly to Supabase Storage.
+    """
+    filename = body.get("filename", "upload.csv")
+    if not filename.endswith(".csv"):
+        raise HTTPException(400, "Only CSV files are accepted")
+
+    storage_path = f"{LLOYD_USER_ID}/{int(datetime.now().timestamp())}_{filename}"
+
+    # Create upload record first
+    upload = UploadHistory(
+        user_id=LLOYD_USER_ID,
+        file_name=filename,
+        storage_path=storage_path,
+        status="uploading",
+    )
+    db.add(upload)
+    await db.flush()
+
+    # Get signed upload URL from Supabase Storage
+    import httpx
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{SUPABASE_URL}/storage/v1/object/upload/sign/{CSV_BUCKET}/{storage_path}",
+            headers={
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={},
+            timeout=30.0,
+        )
+        if resp.status_code != 200:
+            raise HTTPException(500, f"Failed to get signed URL: {resp.text}")
+
+    signed_data = resp.json()
+    # Supabase returns a relative URL with token — construct the full upload URL
+    relative_url = signed_data.get("url", "")
+    signed_url = f"{SUPABASE_URL}/storage/v1{relative_url}"
+
+    return {
+        "upload_id": upload.id,
+        "signed_url": signed_url,
+        "storage_path": storage_path,
+    }
+
+
+@router.post("/uploads/{upload_id}/confirm", status_code=200)
+async def confirm_upload(
+    upload_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """
+    Step 2: Called after browser finishes uploading to Supabase Storage.
+    Reads headers + preview from Storage, estimates row count.
+    """
+    result = await db.execute(
+        select(UploadHistory).where(UploadHistory.id == upload_id)
+    )
+    upload = result.scalar_one_or_none()
+    if not upload:
+        raise HTTPException(404, "Upload not found")
+    if not upload.storage_path:
+        raise HTTPException(400, "No storage path")
+
+    file_size = body.get("file_size", 0)
+
+    # Read first 32KB from Storage for headers + preview
+    import httpx
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{SUPABASE_URL}/storage/v1/object/{CSV_BUCKET}/{upload.storage_path}",
+            headers={
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                "Range": "bytes=0-32767",
+            },
+            timeout=30.0,
+        )
+        if resp.status_code not in (200, 206):
+            raise HTTPException(500, f"Failed to read CSV from Storage: {resp.status_code}")
+
+    text = resp.text
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if not lines:
+        raise HTTPException(400, "CSV file appears empty")
+
+    headers = _parse_csv_line(lines[0])
+    preview_rows = [_parse_csv_line(lines[i]) for i in range(1, min(6, len(lines)))]
+
+    # Estimate total rows from file size and average row length
+    if len(lines) > 1 and file_size > 0:
+        sample_bytes = sum(len(l.encode("utf-8")) + 1 for l in lines[:min(20, len(lines))])
+        avg_row_bytes = sample_bytes / min(20, len(lines))
+        total_rows = max(1, int(file_size / avg_row_bytes) - 1)  # subtract header
+    else:
+        total_rows = max(0, len(lines) - 1)
+
+    # Update upload record
+    upload.total_contacts = total_rows
+    await db.flush()
+
+    return {
+        "id": upload.id,
+        "file_name": upload.file_name,
+        "storage_path": upload.storage_path,
+        "total_rows": total_rows,
+        "file_size": file_size,
+        "headers": headers,
+        "preview_rows": preview_rows,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# LEGACY UPLOAD (backend-proxied, kept for backward compatibility)
+# ═══════════════════════════════════════════════════════════════════════════
+
 @router.post("/uploads/file", status_code=201)
 async def upload_csv_file(
     file: UploadFile = File(...),

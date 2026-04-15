@@ -72,11 +72,12 @@ interface PlannedList {
   listRemain: number;
   title: string;
   accountsNeeded: number;
+  listName?: string;
   isNonjoiners?: boolean;
   isNoListData?: boolean;
   // Copy variants
-  titleVariants?: { id: string; text: string; selected: boolean }[];
-  descVariants?: { id: string; text: string; selected: boolean }[];
+  titleVariants?: { id: string; text: string; selected: boolean; variantIndex: number }[];
+  descVariants?: { id: string; text: string; selected: boolean; variantIndex: number }[];
   copiesGenerated?: boolean;
   bucketId?: string;
   senderId?: string;
@@ -164,6 +165,7 @@ function apiAssignmentToList(a: ApiAssignment): PlannedList {
     webinarId: a.webinar_id,
     bucket: a.bucket?.name || "—",
     description: a.description || "",
+    listName: a.list_name || undefined,
     listUrl: a.list_url || "",
     sender: a.sender?.name || "",
     senderId: a.sender?.id || undefined,
@@ -176,9 +178,36 @@ function apiAssignmentToList(a: ApiAssignment): PlannedList {
     isNoListData: a.is_no_list_data,
     copiesGenerated: !!a.title_copy,
     bucketId: a.bucket?.id,
-    titleVariants: a.title_copy ? [{ id: a.title_copy.id, text: a.title_copy.text, selected: true }] : undefined,
-    descVariants: a.desc_copy ? [{ id: a.desc_copy.id, text: a.desc_copy.text, selected: true }] : undefined,
+    titleVariants: a.title_copy ? [{ id: a.title_copy.id, text: a.title_copy.text, selected: true, variantIndex: a.title_copy.variant_index }] : undefined,
+    descVariants: a.desc_copy ? [{ id: a.desc_copy.id, text: a.desc_copy.text, selected: true, variantIndex: a.desc_copy.variant_index }] : undefined,
   };
+}
+
+/* ─── List Name suffix helper ─────────────────────────────────────────── */
+
+/**
+ * Generate a default list name from the description + a suffix (1a, 1b, 2c…)
+ * when the same bucket is assigned to different senders within a webinar.
+ * Suffix = bucket occurrence number + letter (a-z) per sender within that bucket.
+ */
+function generateListNameSuffix(lists: PlannedList[], currentList: PlannedList): string {
+  // Group lists by bucketId (skip special rows)
+  const normalLists = lists.filter((l) => !l.isNonjoiners && !l.isNoListData && l.bucketId);
+  // Find all lists with the same bucket
+  const sameBucket = normalLists.filter((l) => l.bucketId === currentList.bucketId);
+  if (sameBucket.length <= 1) return "";
+  // Assign a letter suffix based on order within the same bucket
+  const idx = sameBucket.findIndex((l) => l.id === currentList.id);
+  const letter = String.fromCharCode(97 + (idx >= 0 ? idx : 0)); // a, b, c…
+  // Find the bucket's occurrence number (1-based) among unique buckets
+  const uniqueBucketIds = [...new Set(normalLists.map((l) => l.bucketId))];
+  const bucketNum = uniqueBucketIds.indexOf(currentList.bucketId) + 1;
+  return ` ${bucketNum}${letter}`;
+}
+
+function getDefaultListName(lists: PlannedList[], list: PlannedList): string {
+  const suffix = generateListNameSuffix(lists, list);
+  return (list.description || "") + suffix;
 }
 
 /* ─── Custom Dropdown ──────────────────────────────────────────────────── */
@@ -322,10 +351,10 @@ export function PlanningPage() {
               ...l,
               copiesGenerated: copies.titles.length > 0 || copies.descriptions.length > 0,
               titleVariants: copies.titles.map((c) => ({
-                id: c.id, text: c.text, selected: c.id === selectedTitleId || (!selectedTitleId && c.is_primary),
+                id: c.id, text: c.text, selected: c.id === selectedTitleId || (!selectedTitleId && c.is_primary), variantIndex: c.variant_index,
               })),
               descVariants: copies.descriptions.map((c) => ({
-                id: c.id, text: c.text, selected: c.id === selectedDescId || (!selectedDescId && c.is_primary),
+                id: c.id, text: c.text, selected: c.id === selectedDescId || (!selectedDescId && c.is_primary), variantIndex: c.variant_index,
               })),
               title: (() => {
                 if (selectedTitleId) {
@@ -687,8 +716,8 @@ export function PlanningPage() {
           ...l,
           copiesGenerated: true,
           title: primaryTitle?.text || l.title,
-          titleVariants: copies.titles.map((c) => ({ id: c.id, text: c.text, selected: c.is_primary })),
-          descVariants: copies.descriptions.map((c) => ({ id: c.id, text: c.text, selected: c.is_primary })),
+          titleVariants: copies.titles.map((c) => ({ id: c.id, text: c.text, selected: c.is_primary, variantIndex: c.variant_index })),
+          descVariants: copies.descriptions.map((c) => ({ id: c.id, text: c.text, selected: c.is_primary, variantIndex: c.variant_index })),
         };
       };
 
@@ -1027,6 +1056,7 @@ export function PlanningPage() {
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Webinar #</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Status</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[320px]">Description of List</th>
+              <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[180px]">List Name</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Bucket</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Sender</th>
               <th className="text-right px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">List Size</th>
@@ -1098,7 +1128,7 @@ export function PlanningPage() {
                       </div>
                     </td>
                     <td className="px-2 py-2.5"><StatusBadge status={w.status} /></td>
-                    <td className="px-2 py-2.5" colSpan={3}>
+                    <td className="px-2 py-2.5" colSpan={4}>
                       <input
                         type="text"
                         defaultValue={w.mainTitle}
@@ -1137,7 +1167,7 @@ export function PlanningPage() {
                   {/* ── Assignment section (only for the active webinar) ── */}
                   {w.expanded && (assigningWebinarId === w.id || w.lists.length === 0) && (
                     <tr>
-                      <td colSpan={14} className="p-0">
+                      <td colSpan={15} className="p-0">
                         <div className="relative z-20 bg-zinc-50 dark:bg-zinc-900/40 border-y border-zinc-200 dark:border-zinc-800/30 px-6 py-4">
                           <div className="flex items-center justify-between mb-3">
                             <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">Assign Buckets to W{w.number}</span>
@@ -1403,6 +1433,25 @@ export function PlanningPage() {
                         </div>
                       </td>
                       <td className="px-2 py-1.5">
+                        {!l.isNonjoiners && !l.isNoListData ? (
+                          <input
+                            type="text"
+                            defaultValue={l.listName || getDefaultListName(w.lists, l)}
+                            onBlur={(e) => {
+                              const val = e.target.value.trim();
+                              const defaultName = getDefaultListName(w.lists, l);
+                              const newName = val === defaultName ? undefined : val || undefined;
+                              if (newName !== l.listName) {
+                                setWebinars((prev) => prev.map((ww) => ({ ...ww, lists: ww.lists.map((ll) => ll.id === l.id ? { ...ll, listName: newName } : ll) })));
+                                apiUpdateAssignment(l.id, { list_name: val || "" }).catch(console.error);
+                              }
+                            }}
+                            onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                            className="w-full bg-transparent text-zinc-700 dark:text-zinc-300 text-[11px] border-none focus:outline-none focus:ring-1 focus:ring-violet-500 rounded px-1 -ml-1 placeholder-zinc-500"
+                          />
+                        ) : <span className="text-zinc-600">—</span>}
+                      </td>
+                      <td className="px-2 py-1.5">
                         {l.bucket !== "—" ? (
                           <span className="text-zinc-600 dark:text-zinc-400 text-[10px] bg-zinc-100 dark:bg-zinc-800/60 px-1.5 py-0.5 rounded border border-zinc-300 dark:border-zinc-700/30 whitespace-nowrap">
                             {l.bucket.length > 25 ? l.bucket.substring(0, 25) + "…" : l.bucket}
@@ -1410,20 +1459,40 @@ export function PlanningPage() {
                         ) : <span className="text-zinc-600">—</span>}
                       </td>
                       <td className="px-2 py-1.5"><SenderBadge name={l.sender} color={l.senderColor} /></td>
-                      <td className="px-2 py-1.5 text-right font-mono text-zinc-800 dark:text-zinc-300">{l.listSize > 0 ? l.listSize.toLocaleString() : ""}</td>
+                      <td className="px-2 py-1.5 text-right font-mono">
+                        {l.listSize > 0 ? (
+                          <a
+                            href={`/contacts/${l.id}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="text-violet-500 hover:text-violet-400 underline underline-offset-2 decoration-violet-500/30 hover:decoration-violet-400/50 transition-colors"
+                          >
+                            {l.listSize.toLocaleString()}
+                          </a>
+                        ) : ""}
+                      </td>
                       <td className="px-2 py-1.5 text-right">
                         <span className="font-mono text-violet-400">{l.listRemain > 0 ? l.listRemain.toLocaleString() : l.listSize > 0 ? "0" : ""}</span>
                       </td>
                       <td className="px-2 py-1.5">
                         {l.title ? (
-                          <div className="max-w-[240px]">
-                            <span className="text-zinc-700 dark:text-zinc-300 text-[10px] leading-snug line-clamp-2 block" title={l.title}>{linkifyCopyText(l.title, w.registrationLink, w.unsubscribeLink)}</span>
-                            {l.titleVariants && l.titleVariants.length > 1 && (
-                              <button onClick={() => setPlanningCopyModal({ listId: l.id, webinarId: w.id, tab: "title" })}
-                                className="text-[9px] text-violet-500 hover:text-violet-400 font-medium mt-0.5 transition-colors">
-                                {l.titleVariants.length} variations →
-                              </button>
-                            )}
+                          <div
+                            className="max-w-[240px] cursor-pointer group/title"
+                            onClick={() => l.titleVariants && l.titleVariants.length > 0 && setPlanningCopyModal({ listId: l.id, webinarId: w.id, tab: "title" })}
+                          >
+                            {(() => {
+                              const selectedTitle = l.titleVariants?.find(v => v.selected);
+                              return selectedTitle && l.titleVariants && l.titleVariants.length > 1 ? (
+                                <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-violet-100 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400 inline-block mb-0.5">
+                                  V{selectedTitle.variantIndex + 1}
+                                </span>
+                              ) : null;
+                            })()}
+                            <span className="text-zinc-700 dark:text-zinc-300 text-[10px] leading-snug truncate block overflow-hidden group-hover/title:text-violet-600 dark:group-hover/title:text-violet-400 transition-colors" title={l.title}>{l.title}</span>
+                            <span className="text-[9px] text-violet-500 font-medium mt-0.5 block">
+                              {l.titleVariants && l.titleVariants.length > 1 ? `${l.titleVariants.length} variations` : "View →"}
+                            </span>
                           </div>
                         ) : <span className="text-zinc-600">—</span>}
                       </td>
@@ -1432,14 +1501,19 @@ export function PlanningPage() {
                           const selectedDesc = l.descVariants?.find(v => v.selected);
                           const descText = selectedDesc?.text || "";
                           return descText ? (
-                            <div className="max-w-[240px]">
-                              <span className="text-zinc-700 dark:text-zinc-300 text-[10px] leading-snug line-clamp-2 block" title={descText}>{linkifyCopyText(descText, w.registrationLink, w.unsubscribeLink)}</span>
-                              {l.descVariants && l.descVariants.length > 1 && (
-                                <button onClick={() => setPlanningCopyModal({ listId: l.id, webinarId: w.id, tab: "description" })}
-                                  className="text-[9px] text-blue-500 hover:text-blue-400 font-medium mt-0.5 transition-colors">
-                                  {l.descVariants.length} variations →
-                                </button>
+                            <div
+                              className="max-w-[240px] cursor-pointer group/desc"
+                              onClick={() => l.descVariants && l.descVariants.length > 0 && setPlanningCopyModal({ listId: l.id, webinarId: w.id, tab: "description" })}
+                            >
+                              {selectedDesc && l.descVariants && l.descVariants.length > 1 && (
+                                <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400 inline-block mb-0.5">
+                                  V{selectedDesc.variantIndex + 1}
+                                </span>
                               )}
+                              <span className="text-zinc-700 dark:text-zinc-300 text-[10px] leading-snug truncate block overflow-hidden group-hover/desc:text-blue-600 dark:group-hover/desc:text-blue-400 transition-colors" title={descText}>{descText.split("\n")[0]}</span>
+                              <span className="text-[9px] text-blue-500 font-medium mt-0.5 block">
+                                {l.descVariants && l.descVariants.length > 1 ? `${l.descVariants.length} variations` : "View →"}
+                              </span>
                             </div>
                           ) : <span className="text-zinc-600">—</span>;
                         })()}
@@ -1683,8 +1757,17 @@ export function PlanningPage() {
                       {v.selected && <div className="w-1.5 h-1.5 bg-white rounded-full" />}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <span className="text-[9px] text-zinc-500 font-semibold uppercase">Variant {i + 1}</span>
-                      <p className="text-xs text-zinc-800 dark:text-zinc-200 mt-0.5 leading-relaxed">{linkifyCopyText(v.text, regLink, unsubLink)}</p>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                          isTitle
+                            ? "bg-violet-100 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400"
+                            : "bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400"
+                        }`}>V{v.variantIndex + 1}</span>
+                        {v.selected && (
+                          <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">Selected</span>
+                        )}
+                      </div>
+                      <pre className="text-xs text-zinc-800 dark:text-zinc-200 mt-1 leading-relaxed whitespace-pre-wrap font-sans">{linkifyCopyText(v.text, regLink, unsubLink)}</pre>
                     </div>
                     {variants.length > 1 && (
                       <div onClick={(e) => { e.stopPropagation(); if (confirm(`Delete this ${isTitle ? "title" : "description"} variant?`)) deleteVariant(targetList.id, isTitle ? "title" : "desc", v.id); }}

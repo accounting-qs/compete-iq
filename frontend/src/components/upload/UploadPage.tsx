@@ -2,8 +2,9 @@
 
 import { useState, useCallback, useRef, useEffect, type DragEvent, type ChangeEvent } from "react";
 import {
-  uploadCsvFile, startImport, fetchUploads, fetchUploadStatus, fetchUploadHeaders,
+  startImport, fetchUploads, fetchUploadStatus, fetchUploadHeaders,
   deleteUpload, pauseImport, resumeImport, cancelImport,
+  requestSignedUploadUrl, uploadToStorage, confirmUpload,
   type ApiUpload, type UploadFileResponse, type UploadStatusResponse,
 } from "@/lib/api";
 
@@ -129,13 +130,14 @@ export function UploadPage() {
     setUploadError(null);
 
     try {
-      // Simulate progress for the upload (actual progress requires XHR)
-      const progressInterval = setInterval(() => {
-        setUploadProgress((prev) => Math.min(prev + 2, 90));
-      }, 200);
+      // Step 1: Get signed URL from backend
+      const { upload_id, signed_url } = await requestSignedUploadUrl(file.name);
 
-      const response = await uploadCsvFile(file);
-      clearInterval(progressInterval);
+      // Step 2: Upload directly to Supabase Storage with real progress
+      await uploadToStorage(signed_url, file, (pct) => setUploadProgress(pct));
+
+      // Step 3: Confirm upload — backend reads headers/preview from Storage
+      const response = await confirmUpload(upload_id, file.size);
       setUploadProgress(100);
       setUploadResponse(response);
 

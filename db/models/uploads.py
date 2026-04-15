@@ -66,6 +66,7 @@ class Contact(Base):
     assignment_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("webinar_list_assignments.id", ondelete="SET NULL"))
     outreach_status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="available")
     assigned_date: Mapped[Optional[datetime]] = mapped_column(Date)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     # Core identity
     contact_id: Mapped[Optional[str]] = mapped_column(Text)

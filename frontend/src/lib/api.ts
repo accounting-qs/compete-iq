@@ -128,6 +128,7 @@ export interface ApiAssignment {
   emp_range_override: string | null;
   is_nonjoiners: boolean;
   is_no_list_data: boolean;
+  list_name: string | null;
   display_order: number;
   bucket_remaining?: number;
 }
@@ -395,7 +396,7 @@ export async function assignBucketToWebinar(
 
 export async function updateAssignment(
   assignmentId: string,
-  data: Partial<{ title_copy_id: string; desc_copy_id: string; accounts_used: number; volume: number; remaining: number; list_url: string; gcal_invited: number }>
+  data: Partial<{ title_copy_id: string; desc_copy_id: string; accounts_used: number; volume: number; remaining: number; list_url: string; list_name: string; gcal_invited: number }>
 ): Promise<ApiAssignment> {
   const res = await fetch(`${API_URL}/outreach/assignments/${assignmentId}`, {
     method: "PUT",
@@ -434,6 +435,74 @@ export async function uploadCsvFile(file: File): Promise<UploadFileResponse> {
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Failed to upload CSV: ${text}`);
+  }
+  return res.json();
+}
+
+/* ── Direct-to-Supabase Upload ────────────────────────────────────────── */
+
+export async function requestSignedUploadUrl(filename: string): Promise<{
+  upload_id: string;
+  signed_url: string;
+  storage_path: string;
+}> {
+  const res = await fetch(`${API_URL}/outreach/uploads/presign`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ filename }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to get signed URL: ${text}`);
+  }
+  return res.json();
+}
+
+export function uploadToStorage(
+  signedUrl: string,
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", signedUrl, true);
+    xhr.setRequestHeader("Content-Type", "text/csv");
+    xhr.setRequestHeader("x-upsert", "true");
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+      } else {
+        reject(new Error(`Storage upload failed: ${xhr.status} ${xhr.statusText}`));
+      }
+    };
+
+    xhr.onerror = () => reject(new Error("Storage upload network error"));
+    xhr.ontimeout = () => reject(new Error("Storage upload timed out"));
+    xhr.timeout = 600000; // 10 minutes for large files
+
+    xhr.send(file);
+  });
+}
+
+export async function confirmUpload(
+  uploadId: string,
+  fileSize: number,
+): Promise<UploadFileResponse> {
+  const res = await fetch(`${API_URL}/outreach/uploads/${uploadId}/confirm`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ file_size: fileSize }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to confirm upload: ${text}`);
   }
   return res.json();
 }
@@ -663,5 +732,53 @@ export async function updateFormatBrain(brain_content: string): Promise<{ brain_
     method: "PUT", headers: jsonHeaders(), body: JSON.stringify({ brain_content }),
   });
   if (!res.ok) throw new Error("Failed to update format brain");
+  return res.json();
+}
+
+
+/* ── Assignment Contacts ──────────────────────────────────────────────────── */
+
+export interface ApiContact {
+  id: string;
+  email: string;
+  first_name: string | null;
+  outreach_status: "assigned" | "used";
+  used_at: string | null;
+}
+
+export interface AssignmentContactsResponse {
+  assignment: {
+    id: string;
+    bucket_name: string | null;
+    list_name: string | null;
+    webinar_number: number | null;
+    webinar_date: string | null;
+    volume: number;
+  };
+  contacts: ApiContact[];
+  counts: { assigned: number; used: number; total: number };
+}
+
+export async function fetchAssignmentContacts(
+  assignmentId: string,
+  status: "assigned" | "used" | "all" = "assigned"
+): Promise<AssignmentContactsResponse> {
+  const res = await fetch(`${API_URL}/outreach/assignments/${assignmentId}/contacts?status=${status}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to fetch contacts");
+  return res.json();
+}
+
+export async function markContactsUsed(
+  assignmentId: string,
+  contactIds: string[]
+): Promise<{ marked: number }> {
+  const res = await fetch(`${API_URL}/outreach/assignments/${assignmentId}/contacts/mark-used`, {
+    method: "PUT",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ contact_ids: contactIds }),
+  });
+  if (!res.ok) throw new Error("Failed to mark contacts as used");
   return res.json();
 }

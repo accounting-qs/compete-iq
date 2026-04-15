@@ -1,5 +1,8 @@
 """Outreach sub-router: Webinars + Assignments CRUD + Account tracking."""
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import select, func as sa_func, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -432,3 +435,108 @@ async def get_webinar_accounts(
             for s in senders
         ]
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ASSIGNMENT CONTACTS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.get("/assignments/{assignment_id}/contacts")
+async def get_assignment_contacts(
+    assignment_id: str,
+    status: str = Query("assigned", regex="^(assigned|used|all)$"),
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    # Verify assignment belongs to user
+    asgn_result = await db.execute(
+        select(WebinarListAssignment)
+        .where(WebinarListAssignment.id == assignment_id, WebinarListAssignment.user_id == LLOYD_USER_ID)
+        .options(selectinload(WebinarListAssignment.bucket), selectinload(WebinarListAssignment.webinar))
+    )
+    assignment = asgn_result.scalar_one_or_none()
+    if not assignment:
+        raise HTTPException(404, "Assignment not found")
+
+    q = select(Contact).where(
+        Contact.assignment_id == assignment_id,
+        Contact.user_id == LLOYD_USER_ID,
+    )
+    if status != "all":
+        q = q.where(Contact.outreach_status == status)
+    q = q.order_by(Contact.first_name, Contact.email)
+
+    result = await db.execute(q)
+    contacts = result.scalars().all()
+
+    # Count by status for the filter badges
+    count_result = await db.execute(
+        select(Contact.outreach_status, sa_func.count()).where(
+            Contact.assignment_id == assignment_id,
+            Contact.user_id == LLOYD_USER_ID,
+        ).group_by(Contact.outreach_status)
+    )
+    counts = {row[0]: row[1] for row in count_result}
+
+    return {
+        "assignment": {
+            "id": assignment.id,
+            "bucket_name": assignment.bucket.name if assignment.bucket else None,
+            "list_name": assignment.list_name,
+            "webinar_number": assignment.webinar.number if assignment.webinar else None,
+            "webinar_date": assignment.webinar.date.isoformat() if assignment.webinar and assignment.webinar.date else None,
+            "volume": assignment.volume,
+        },
+        "contacts": [
+            {
+                "id": c.id,
+                "email": c.email,
+                "first_name": c.first_name,
+                "outreach_status": c.outreach_status,
+                "used_at": c.used_at.isoformat() if c.used_at else None,
+            }
+            for c in contacts
+        ],
+        "counts": {
+            "assigned": counts.get("assigned", 0),
+            "used": counts.get("used", 0),
+            "total": sum(counts.values()),
+        },
+    }
+
+
+class MarkUsedRequest(BaseModel):
+    contact_ids: list[str]
+
+
+@router.put("/assignments/{assignment_id}/contacts/mark-used")
+async def mark_contacts_used(
+    assignment_id: str,
+    body: MarkUsedRequest,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    # Verify assignment belongs to user
+    asgn_result = await db.execute(
+        select(WebinarListAssignment).where(
+            WebinarListAssignment.id == assignment_id,
+            WebinarListAssignment.user_id == LLOYD_USER_ID,
+        )
+    )
+    if not asgn_result.scalar_one_or_none():
+        raise HTTPException(404, "Assignment not found")
+
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        update(Contact)
+        .where(
+            Contact.id.in_(body.contact_ids),
+            Contact.assignment_id == assignment_id,
+            Contact.user_id == LLOYD_USER_ID,
+            Contact.outreach_status == "assigned",
+        )
+        .values(outreach_status="used", used_at=now)
+    )
+    await db.flush()
+
+    return {"marked": result.rowcount}
