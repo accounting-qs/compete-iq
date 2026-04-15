@@ -36,3 +36,4 @@ node_modules/
 
 # Alembic
 migrations/versions/__pycache__/
+.dummydata/
