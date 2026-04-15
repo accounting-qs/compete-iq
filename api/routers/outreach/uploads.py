@@ -475,47 +475,31 @@ async def _process_csv_import(
 
     try:
         import httpx
+        import time as _time
 
-        # Stream CSV download — don't buffer entire file in memory
-        csv_text_io = io.StringIO()
+        start_time = _time.monotonic()
+        print(f"[IMPORT] Starting: {upload_id} — downloading CSV...")
+
+        # Download CSV from storage
         async with httpx.AsyncClient() as client:
-            async with client.stream(
-                "GET",
+            resp = await client.get(
                 f"{SUPABASE_URL}/storage/v1/object/{CSV_BUCKET}/{storage_path}",
                 headers={"Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
                 timeout=300.0,
-            ) as resp:
-                if resp.status_code != 200:
-                    raise Exception(f"Failed to download CSV: {resp.status_code}")
-                async for chunk in resp.aiter_text():
-                    csv_text_io.write(chunk)
+            )
+            if resp.status_code != 200:
+                raise Exception(f"Failed to download CSV: {resp.status_code}")
 
-        csv_text_io.seek(0)
-        reader = csv.reader(csv_text_io)
+        dl_time = _time.monotonic() - start_time
+        print(f"[IMPORT] Downloaded in {dl_time:.1f}s — parsing...")
 
-        # Read header row
+        reader = csv.reader(io.StringIO(resp.text))
         try:
             csv_headers = [h.strip() for h in next(reader)]
         except StopIteration:
             raise Exception("CSV file is empty")
 
-        # Stream rows into batches — don't materialize entire file
-        # First pass: collect all rows but filter empty ones immediately
-        data_rows: list[list[str]] = []
-        for row in reader:
-            if any(cell.strip() for cell in row):
-                data_rows.append(row)
-        total_rows = len(data_rows)
-
-        del csv_text_io  # free the StringIO buffer
-
-        async with engine.begin() as conn:
-            await conn.execute(
-                update(UploadHistory.__table__)
-                .where(UploadHistory.__table__.c.id == upload_id)
-                .values(total_contacts=total_rows, status="processing")
-            )
-
+        # Build column mapping
         col_map: dict[int, str] = {}
         for csv_header, target in field_mappings.items():
             if target == "skip" or not target:
@@ -533,69 +517,144 @@ async def _process_csv_import(
             "industry", "employee_range", "country", "database_provider", "scraper",
         }
         FLOAT_FIELDS = {"confidence", "cost"}
-
-        bucket_names: set[str] = set()
         bucket_target_idx = next((idx for idx, t in col_map.items() if t == "bucket"), None)
-        if bucket_target_idx is not None:
-            for parsed in data_rows:
-                val = parsed[bucket_target_idx].strip() if bucket_target_idx < len(parsed) else ""
-                if val:
-                    bucket_names.add(val)
 
+        # Load existing buckets
         bucket_cache: dict[str, str] = {}
-        if bucket_names:
-            async with engine.begin() as conn:
-                result = await conn.execute(
-                    select(OutreachBucket.__table__.c.id, OutreachBucket.__table__.c.name).where(
-                        OutreachBucket.__table__.c.user_id == LLOYD_USER_ID,
-                        OutreachBucket.__table__.c.name.in_(bucket_names),
-                        OutreachBucket.__table__.c.deleted_at.is_(None),
-                    )
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                select(OutreachBucket.__table__.c.id, OutreachBucket.__table__.c.name).where(
+                    OutreachBucket.__table__.c.user_id == LLOYD_USER_ID,
+                    OutreachBucket.__table__.c.deleted_at.is_(None),
                 )
-                for row in result:
-                    bucket_cache[row.name] = row.id
+            )
+            for row in result:
+                bucket_cache[row.name] = row.id
 
-                missing = bucket_names - set(bucket_cache.keys())
-                if missing:
-                    new_buckets = [
-                        {"id": str(uuid.uuid4()), "user_id": LLOYD_USER_ID,
-                         "name": bname, "total_contacts": 0, "remaining_contacts": 0}
-                        for bname in missing
-                    ]
-                    await conn.execute(OutreachBucket.__table__.insert().values(new_buckets))
-                    for b in new_buckets:
-                        bucket_cache[b["name"]] = b["id"]
+        # Use total_rows from the upload step (newline count) — no need for a counting pass
+        # The upload handler already set total_contacts
+        total_rows_estimate = 0
+        async with engine.begin() as conn:
+            r = await conn.execute(
+                select(UploadHistory.__table__.c.total_contacts).where(
+                    UploadHistory.__table__.c.id == upload_id
+                )
+            )
+            total_rows_estimate = r.scalar() or 84000  # fallback
 
-        BATCH_SIZE = 2000
-        PROGRESS_INTERVAL = 2000
+        async with engine.begin() as conn:
+            await conn.execute(
+                update(UploadHistory.__table__)
+                .where(UploadHistory.__table__.c.id == upload_id)
+                .values(status="processing")
+            )
+
+        def _build_contact(parsed: list[str]) -> dict:
+            contact: dict = {
+                "id": str(uuid.uuid4()),
+                "user_id": LLOYD_USER_ID,
+                "upload_id": upload_id,
+                "bucket_id": None,
+                "outreach_status": "available",
+                "custom_data": {},
+            }
+            for f in STANDARD_FIELDS:
+                contact[f] = None
+            custom_data: dict = {}
+            for col_idx, target in col_map.items():
+                value = parsed[col_idx].strip() if col_idx < len(parsed) else ""
+                if not value:
+                    continue
+                if target == "bucket":
+                    contact["bucket_name"] = value
+                    contact["bucket_id"] = bucket_cache.get(value)
+                elif target in FLOAT_FIELDS:
+                    try:
+                        contact[target] = float(value)
+                    except (ValueError, TypeError):
+                        contact[target] = None
+                elif target.startswith("custom:"):
+                    custom_data[target[7:]] = value
+                else:
+                    contact[target] = value
+            if custom_data:
+                contact["custom_data"] = custom_data
+            if contact.get("email"):
+                contact["email"] = contact["email"].lower().strip()
+            return contact
+
+        async def _flush_batch(rows_to_insert: list[dict]) -> tuple[int, int, int]:
+            """Deduplicate within batch, insert, return (inserted, skipped, overwritten)."""
+            seen: dict[str, int] = {}
+            dupes = 0
+            for i, r in enumerate(rows_to_insert):
+                email = r.get("email")
+                if email:
+                    if email in seen:
+                        dupes += 1
+                    seen[email] = i
+            if dupes > 0:
+                keep = set(seen.values()) | {i for i, r in enumerate(rows_to_insert) if not r.get("email")}
+                rows_to_insert = [rows_to_insert[i] for i in sorted(keep)]
+
+            b_ins, b_skip, b_over = 0, dupes, 0
+            async with engine.begin() as conn:
+                stmt = pg_insert(Contact.__table__).values(rows_to_insert)
+                if duplicate_mode == "overwrite":
+                    set_cols = {
+                        c.name: getattr(stmt.excluded, c.name)
+                        for c in Contact.__table__.columns
+                        if c.name not in ("id", "user_id", "email", "created_at")
+                    }
+                    stmt = stmt.on_conflict_do_update(constraint="uq_contacts_user_email", set_=set_cols)
+                    result = await conn.execute(stmt)
+                    b_over = result.rowcount
+                else:
+                    stmt = stmt.on_conflict_do_nothing(constraint="uq_contacts_user_email")
+                    result = await conn.execute(stmt)
+                    b_ins = result.rowcount
+                    b_skip += len(rows_to_insert) - result.rowcount
+            return b_ins, b_skip, b_over
+
+        # Single-pass: iterate rows, create buckets on the fly, batch insert
+        # asyncpg limit: 32767 params per query. Each contact has ~29 columns.
+        # 32767 / 29 ≈ 1130, so 1000 rows per batch is safe.
+        BATCH_SIZE = 1000
         inserted = 0
         skipped = 0
         overwritten = 0
         processed = 0
-        last_progress_at = 0
+        batch_rows: list[list[str]] = []
+        new_bucket_names: set[str] = set()
 
-        for batch_start in range(0, total_rows, BATCH_SIZE):
-            # Check for cancel
-            if _import_cancel_flags.get(upload_id, False):
-                print(f"[IMPORT] Cancelled: {upload_id} at row {batch_start}")
-                async with engine.begin() as conn:
-                    await conn.execute(
-                        update(UploadHistory.__table__)
-                        .where(UploadHistory.__table__.c.id == upload_id)
-                        .values(status="cancelled", processed_rows=processed,
-                                inserted_count=inserted, skipped_count=skipped,
-                                overwritten_count=overwritten)
-                    )
-                return
+        for row in reader:
+            if not any(cell.strip() for cell in row):
+                continue
+            # Discover new bucket names on the fly
+            if bucket_target_idx is not None:
+                val = row[bucket_target_idx].strip() if bucket_target_idx < len(row) else ""
+                if val and val not in bucket_cache:
+                    new_bucket_names.add(val)
 
-            # Check for pause — wait until resumed
-            pause_event = _import_pause_events.get(upload_id)
-            if pause_event and not pause_event.is_set():
-                print(f"[IMPORT] Paused: {upload_id} at row {batch_start}")
-                await pause_event.wait()
-                # Re-check cancel after resume
+            batch_rows.append(row)
+
+            if len(batch_rows) >= BATCH_SIZE:
+                # Create any new buckets discovered in this batch
+                if new_bucket_names:
+                    async with engine.begin() as conn:
+                        new_buckets = [
+                            {"id": str(uuid.uuid4()), "user_id": LLOYD_USER_ID,
+                             "name": bname, "total_contacts": 0, "remaining_contacts": 0}
+                            for bname in new_bucket_names
+                        ]
+                        await conn.execute(OutreachBucket.__table__.insert().values(new_buckets))
+                        for b in new_buckets:
+                            bucket_cache[b["name"]] = b["id"]
+                    new_bucket_names.clear()
+
+                # Check cancel/pause
                 if _import_cancel_flags.get(upload_id, False):
-                    print(f"[IMPORT] Cancelled after pause: {upload_id}")
+                    print(f"[IMPORT] Cancelled: {upload_id} at row {processed}")
                     async with engine.begin() as conn:
                         await conn.execute(
                             update(UploadHistory.__table__)
@@ -605,97 +664,42 @@ async def _process_csv_import(
                                     overwritten_count=overwritten)
                         )
                     return
-                print(f"[IMPORT] Resumed: {upload_id}")
 
-            batch_rows = data_rows[batch_start:batch_start + BATCH_SIZE]
-            rows_to_insert = []
+                pause_event = _import_pause_events.get(upload_id)
+                if pause_event and not pause_event.is_set():
+                    await pause_event.wait()
+                    if _import_cancel_flags.get(upload_id, False):
+                        async with engine.begin() as conn:
+                            await conn.execute(
+                                update(UploadHistory.__table__)
+                                .where(UploadHistory.__table__.c.id == upload_id)
+                                .values(status="cancelled", processed_rows=processed,
+                                        inserted_count=inserted, skipped_count=skipped,
+                                        overwritten_count=overwritten)
+                            )
+                        return
 
-            for parsed in batch_rows:
-                contact: dict = {
-                    "id": str(uuid.uuid4()),
-                    "user_id": LLOYD_USER_ID,
-                    "upload_id": upload_id,
-                    "bucket_id": None,
-                    "outreach_status": "available",
-                    "custom_data": {},
-                }
-                for f in STANDARD_FIELDS:
-                    contact[f] = None
-
-                custom_data: dict = {}
-                for col_idx, target in col_map.items():
-                    value = parsed[col_idx].strip() if col_idx < len(parsed) else ""
-                    if not value:
-                        continue
-                    if target == "bucket":
-                        contact["bucket_name"] = value
-                        contact["bucket_id"] = bucket_cache.get(value)
-                    elif target in FLOAT_FIELDS:
-                        try:
-                            contact[target] = float(value)
-                        except (ValueError, TypeError):
-                            contact[target] = None
-                    elif target.startswith("custom:"):
-                        custom_data[target[7:]] = value
-                    else:
-                        contact[target] = value
-
-                if custom_data:
-                    contact["custom_data"] = custom_data
-                # Normalize email to lowercase for consistent deduplication
-                if contact.get("email"):
-                    contact["email"] = contact["email"].lower().strip()
-                rows_to_insert.append(contact)
-
-            if not rows_to_insert:
-                processed += len(batch_rows)
-                continue
-
-            # Deduplicate within batch — keep last occurrence per email
-            # This prevents intra-batch conflicts that inflate "skipped" counts
-            seen_emails: dict[str, int] = {}
-            batch_dupes = 0
-            for i, row in enumerate(rows_to_insert):
-                email = row.get("email")
-                if email:
-                    email_lower = email.lower().strip()
-                    if email_lower in seen_emails:
-                        batch_dupes += 1
-                    seen_emails[email_lower] = i
-                # rows with no email are always kept (no uniqueness conflict)
-            if batch_dupes > 0:
-                keep_indices = set(seen_emails.values()) | {i for i, r in enumerate(rows_to_insert) if not r.get("email")}
-                rows_to_insert = [rows_to_insert[i] for i in sorted(keep_indices)]
-                skipped += batch_dupes
-
-            async with engine.begin() as conn:
+                # Build contacts and flush
+                contacts = [_build_contact(r) for r in batch_rows]
                 try:
-                    stmt = pg_insert(Contact.__table__).values(rows_to_insert)
-                    if duplicate_mode == "overwrite":
-                        set_cols = {
-                            c.name: getattr(stmt.excluded, c.name)
-                            for c in Contact.__table__.columns
-                            if c.name not in ("id", "user_id", "email", "created_at")
-                        }
-                        stmt = stmt.on_conflict_do_update(constraint="uq_contacts_user_email", set_=set_cols)
-                        result = await conn.execute(stmt)
-                        overwritten += result.rowcount
-                    else:
-                        stmt = stmt.on_conflict_do_nothing(constraint="uq_contacts_user_email")
-                        result = await conn.execute(stmt)
-                        batch_inserted = result.rowcount
-                        inserted += batch_inserted
-                        skipped += len(rows_to_insert) - batch_inserted
+                    b_ins, b_skip, b_over = await _flush_batch(contacts)
+                    inserted += b_ins
+                    skipped += b_skip
+                    overwritten += b_over
                 except Exception as e:
-                    print(f"[IMPORT] Batch error at row {batch_start}: {e}")
+                    print(f"[IMPORT] Batch error at row {processed}: {e}")
                     traceback.print_exc()
-                    skipped += len(rows_to_insert)
+                    skipped += len(batch_rows)
 
-            processed += len(batch_rows)
+                processed += len(batch_rows)
+                batch_rows = []
 
-            if processed - last_progress_at >= PROGRESS_INTERVAL or processed >= total_rows:
-                last_progress_at = processed
+                # Update progress
+                total_rows = max(total_rows_estimate, processed)
                 progress_pct = min(99, int((processed / total_rows) * 100))
+                elapsed = _time.monotonic() - start_time
+                rate = processed / elapsed if elapsed > 0 else 0
+                print(f"[IMPORT] {processed}/{total_rows} ({progress_pct}%) — {rate:.0f} rows/s — {inserted} ins, {skipped} skip")
                 async with engine.begin() as conn:
                     await conn.execute(
                         update(UploadHistory.__table__)
@@ -704,7 +708,34 @@ async def _process_csv_import(
                                 inserted_count=inserted, skipped_count=skipped,
                                 overwritten_count=overwritten)
                     )
-            await asyncio.sleep(0)
+                await asyncio.sleep(0)
+
+        # Flush remaining rows
+        if batch_rows:
+            if new_bucket_names:
+                async with engine.begin() as conn:
+                    new_buckets = [
+                        {"id": str(uuid.uuid4()), "user_id": LLOYD_USER_ID,
+                         "name": bname, "total_contacts": 0, "remaining_contacts": 0}
+                        for bname in new_bucket_names
+                    ]
+                    await conn.execute(OutreachBucket.__table__.insert().values(new_buckets))
+                    for b in new_buckets:
+                        bucket_cache[b["name"]] = b["id"]
+
+            contacts = [_build_contact(r) for r in batch_rows]
+            try:
+                b_ins, b_skip, b_over = await _flush_batch(contacts)
+                inserted += b_ins
+                skipped += b_skip
+                overwritten += b_over
+            except Exception as e:
+                print(f"[IMPORT] Final batch error: {e}")
+                traceback.print_exc()
+                skipped += len(batch_rows)
+            processed += len(batch_rows)
+
+        total_rows = processed  # actual count after full iteration
 
         # Recalculate bucket counts
         async with engine.begin() as conn:
