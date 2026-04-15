@@ -1082,7 +1082,7 @@ export function PlanningPage() {
             <tr className="bg-zinc-50 dark:bg-zinc-900/90 border-b border-zinc-200 dark:border-zinc-800/40">
               <th className="w-8 px-2 py-2"></th>
               <th className="w-8 px-1 py-2"></th>
-              <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Webinar #</th>
+              <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[130px]">Webinar #</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Status</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[320px]">Description of List</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[180px]">List Name</th>
@@ -1155,6 +1155,19 @@ export function PlanningPage() {
                           </div>
                         )}
                       </div>
+                      {w.expanded && w.lists.length > 0 && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); toggleAssignForm(w.id); }}
+                          className={`mt-1.5 px-2.5 py-1 text-[10px] font-semibold rounded-md transition-colors flex items-center gap-1 ${
+                            assigningWebinarId === w.id
+                              ? "bg-violet-600 text-white"
+                              : "bg-zinc-200 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-violet-500/20 hover:text-violet-500"
+                          }`}
+                        >
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                          Assign Lists
+                        </button>
+                      )}
                     </td>
                     <td className="px-2 py-2.5"><StatusBadge status={w.status} /></td>
                     <td className="px-2 py-2.5" colSpan={4}>
@@ -1173,21 +1186,7 @@ export function PlanningPage() {
                     </td>
                     <td className="px-2 py-2.5 text-right font-mono text-zinc-800 dark:text-zinc-200 font-bold">{wTotal > 0 ? wTotal.toLocaleString() : ""}</td>
                     <td className="px-2 py-2.5 text-right font-mono text-violet-400 font-bold">{wRemain > 0 ? wRemain.toLocaleString() : ""}</td>
-                    <td className="px-2 py-2.5" colSpan={2}>
-                      {w.expanded && w.lists.length > 0 && (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); toggleAssignForm(w.id); }}
-                          className={`px-2.5 py-1 text-[10px] font-semibold rounded-md transition-colors flex items-center gap-1 ${
-                            assigningWebinarId === w.id
-                              ? "bg-violet-600 text-white"
-                              : "bg-zinc-200 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-violet-500/20 hover:text-violet-500"
-                          }`}
-                        >
-                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14"/></svg>
-                          Assign Lists
-                        </button>
-                      )}
-                    </td>
+                    <td className="px-2 py-2.5" colSpan={2}></td>
                     <td className="px-2 py-2.5 text-right font-mono text-emerald-400 font-bold">{wAccounts > 0 ? wAccounts : ""}</td>
                     <td className="px-2 py-2.5"></td>
                     <td className="px-2 py-2.5"></td>
