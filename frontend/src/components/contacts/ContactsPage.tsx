@@ -103,6 +103,27 @@ export function ContactsPage({ assignmentId }: { assignmentId: string }) {
     }
   }, [assignmentId, selectedIds, filter, load]);
 
+  /* ── Export all contacts as CSV ──────────────────────────────────────── */
+
+  const exportCsv = useCallback(() => {
+    if (!data || data.contacts.length === 0) return;
+    const rows = [["email", "first_name", "status"]];
+    for (const c of data.contacts) {
+      rows.push([c.email, c.first_name || "", c.outreach_status]);
+    }
+    const csv = rows.map((r) => r.map((v) => `"${v.replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const safeName = (data.assignment.list_name || data.assignment.bucket_name || "contacts").replace(/[^a-zA-Z0-9_-]/g, "_");
+    a.download = `${safeName}_${filter}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [data, filter]);
+
   /* ── Toggle single row ──────────────────────────────────────────────── */
 
   const toggleContact = (id: string) => {
@@ -215,6 +236,14 @@ export function ContactsPage({ assignmentId }: { assignmentId: string }) {
           </span>
 
           <div className="flex-1" />
+
+          <button
+            onClick={exportCsv}
+            disabled={contacts.length === 0}
+            className="px-4 py-1.5 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Export CSV
+          </button>
 
           <button
             onClick={copyToClipboard}
