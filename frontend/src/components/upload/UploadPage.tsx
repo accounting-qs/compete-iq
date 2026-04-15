@@ -5,6 +5,7 @@ import {
   startImport, fetchUploads, fetchUploadStatus, fetchUploadHeaders,
   deleteUpload, pauseImport, resumeImport, cancelImport,
   requestSignedUploadUrl, uploadToStorage, confirmUpload,
+  fetchCustomFields,
   type ApiUpload, type UploadFileResponse, type UploadStatusResponse,
 } from "@/lib/api";
 
@@ -107,18 +108,31 @@ export function UploadPage() {
 
   useEffect(() => {
     loadHistory();
+    // Load existing custom fields from DB
+    fetchCustomFields().then(({ fields }) => {
+      setCustomFields(fields.map((f) => f.field_name));
+    }).catch(() => {});
   }, [loadHistory]);
 
-  // Poll for active imports (include paused to keep status fresh)
+  // Poll only active imports by their individual status endpoint
   useEffect(() => {
-    const hasActive = uploadHistory.some(
-      (u) => u.status === "pending" || u.status === "processing" || u.status === "uploading" || u.status === "paused"
+    const activeUploads = uploadHistory.filter(
+      (u) => u.status === "processing" || u.status === "paused"
     );
-    if (!hasActive) return;
+    if (activeUploads.length === 0) return;
 
-    const interval = setInterval(loadHistory, 3000);
+    const interval = setInterval(async () => {
+      for (const u of activeUploads) {
+        try {
+          const status = await fetchUploadStatus(u.id);
+          setUploadHistory((prev) =>
+            prev.map((h) => h.id === u.id ? { ...h, ...status, status: status.status, progress: status.progress, processed_rows: status.processed_rows, inserted_count: status.inserted_count, skipped_count: status.skipped_count, overwritten_count: status.overwritten_count, error_message: status.error_message } : h)
+          );
+        } catch { /* ignore poll errors */ }
+      }
+    }, 3000);
     return () => clearInterval(interval);
-  }, [uploadHistory, loadHistory]);
+  }, [uploadHistory]);
 
   /* ── File handling ───────────────────────────────────────────────── */
 

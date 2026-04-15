@@ -424,21 +424,6 @@ export async function fetchUploads(): Promise<{ uploads: ApiUpload[] }> {
   return res.json();
 }
 
-export async function uploadCsvFile(file: File): Promise<UploadFileResponse> {
-  const formData = new FormData();
-  formData.append("file", file);
-  const res = await fetch(`${API_URL}/outreach/uploads/file`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: formData,
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to upload CSV: ${text}`);
-  }
-  return res.json();
-}
-
 /* ── Direct-to-Supabase Upload ────────────────────────────────────────── */
 
 export async function requestSignedUploadUrl(filename: string, fileSize: number): Promise<{
@@ -485,7 +470,8 @@ export function uploadToStorage(
 
     xhr.onerror = () => reject(new Error("Storage upload network error"));
     xhr.ontimeout = () => reject(new Error("Storage upload timed out"));
-    xhr.timeout = 600000; // 10 minutes for large files
+    // Dynamic timeout: 3s per MB, minimum 10 minutes
+    xhr.timeout = Math.max(600000, (file.size / (1024 * 1024)) * 3000);
 
     xhr.send(file);
   });

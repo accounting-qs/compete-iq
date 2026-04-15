@@ -7,7 +7,7 @@ import traceback
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func as sa_func, update, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -206,104 +206,6 @@ async def confirm_upload(
         "id": upload.id,
         "file_name": upload.file_name,
         "storage_path": upload.storage_path,
-        "total_rows": total_rows,
-        "file_size": file_size,
-        "headers": headers,
-        "preview_rows": preview_rows,
-    }
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# LEGACY UPLOAD (backend-proxied, kept for backward compatibility)
-# ═══════════════════════════════════════════════════════════════════════════
-
-@router.post("/uploads/file", status_code=201)
-async def upload_csv_file(
-    file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
-    _: str = Depends(require_auth),
-):
-    """
-    Step 1: Upload CSV to Supabase Storage via streaming.
-    Only reads a small prefix for headers/preview — does not buffer full file.
-    """
-    if not file.filename or not file.filename.endswith(".csv"):
-        raise HTTPException(400, "Only CSV files are accepted")
-
-    # Read a small prefix for headers + preview (first 32KB is plenty)
-    PREVIEW_SIZE = 32 * 1024
-    prefix = await file.read(PREVIEW_SIZE)
-    prefix_text = prefix.decode("utf-8", errors="replace")
-    prefix_lines = [l.strip() for l in prefix_text.split("\n") if l.strip()]
-
-    if not prefix_lines:
-        raise HTTPException(400, "CSV file appears empty")
-
-    headers = _parse_csv_line(prefix_lines[0])
-    preview_rows = [_parse_csv_line(prefix_lines[i]) for i in range(1, min(6, len(prefix_lines)))]
-
-    # Read full file, count newlines, then upload to storage
-    await file.seek(0)
-    storage_path = f"{LLOYD_USER_ID}/{int(datetime.now().timestamp())}_{file.filename}"
-
-    import httpx
-
-    # Read file into memory (we need the full content for the storage upload)
-    contents = await file.read()
-    file_size = len(contents)
-    if file_size > MAX_UPLOAD_SIZE:
-        raise HTTPException(413, f"File exceeds {MAX_UPLOAD_SIZE // (1024*1024)} MB limit")
-
-    newline_count = contents.count(b"\n")
-    total_rows = max(0, newline_count - 1)
-
-    # Upload to Supabase Storage with generous timeout and retries
-    upload_ok = False
-    for attempt in range(3):
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{SUPABASE_URL}/storage/v1/object/{CSV_BUCKET}/{storage_path}",
-                    headers={
-                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                        "Content-Type": "text/csv",
-                        "x-upsert": "true",
-                    },
-                    content=contents,
-                    timeout=httpx.Timeout(connect=30.0, read=300.0, write=300.0, pool=30.0),
-                )
-                if resp.status_code in (200, 201):
-                    upload_ok = True
-                    break
-                if attempt < 2:
-                    print(f"[UPLOAD] Storage attempt {attempt+1} failed ({resp.status_code}), retrying...")
-                    await asyncio.sleep(2)
-                else:
-                    raise HTTPException(500, f"Failed to upload to Storage: {resp.text}")
-        except httpx.TimeoutException:
-            if attempt < 2:
-                print(f"[UPLOAD] Storage timeout on attempt {attempt+1}, retrying...")
-                await asyncio.sleep(2)
-            else:
-                raise HTTPException(504, "Upload to storage timed out after 3 attempts")
-
-    del contents  # free memory
-
-    # Create upload record
-    upload = UploadHistory(
-        user_id=LLOYD_USER_ID,
-        file_name=file.filename,
-        storage_path=storage_path,
-        total_contacts=total_rows,
-        status="uploading",
-    )
-    db.add(upload)
-    await db.flush()
-
-    return {
-        "id": upload.id,
-        "file_name": file.filename,
-        "storage_path": storage_path,
         "total_rows": total_rows,
         "file_size": file_size,
         "headers": headers,
@@ -601,6 +503,32 @@ async def delete_upload(
     }
 
 
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+async def _ensure_buckets(engine, new_names: set, bucket_cache: dict):
+    """Create missing buckets (race-safe) and update bucket_cache with their IDs."""
+    if not new_names:
+        return
+    async with engine.begin() as conn:
+        new_buckets = [
+            {"id": str(uuid.uuid4()), "user_id": LLOYD_USER_ID,
+             "name": bname, "total_contacts": 0, "remaining_contacts": 0}
+            for bname in new_names
+        ]
+        stmt = pg_insert(OutreachBucket.__table__).values(new_buckets)
+        stmt = stmt.on_conflict_do_nothing(constraint="uq_outreach_buckets_user_name")
+        await conn.execute(stmt)
+        # Re-fetch IDs (some may have existed already from concurrent imports)
+        result = await conn.execute(
+            select(OutreachBucket.__table__.c.id, OutreachBucket.__table__.c.name).where(
+                OutreachBucket.__table__.c.user_id == LLOYD_USER_ID,
+                OutreachBucket.__table__.c.name.in_(new_names),
+            )
+        )
+        for row in result:
+            bucket_cache[row.name] = row.id
+
+
 # ── Background import task ────────────────────────────────────────────────
 
 async def _process_csv_import(
@@ -625,22 +553,43 @@ async def _process_csv_import(
         start_time = _time.monotonic()
         print(f"[IMPORT] Starting: {upload_id} — downloading CSV to temp file...")
 
-        # Download CSV to a temp file — never hold full file in memory
+        # Look up expected file size for dynamic timeout
+        async with engine.begin() as conn:
+            sz_result = await conn.execute(
+                select(UploadHistory.__table__.c.total_contacts).where(
+                    UploadHistory.__table__.c.id == upload_id
+                )
+            )
+            # Estimate: ~600 bytes per row average for enriched CSVs
+            est_rows = sz_result.scalar() or 0
+            est_size_mb = max(1, (est_rows * 600) / (1024 * 1024))
+            read_timeout = max(120.0, est_size_mb * 2.0)  # 2s per MB, min 120s
+
+        # Download CSV to a temp file with retry — never hold full file in memory
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".csv", prefix="import_")
         os.close(tmp_fd)
 
-        async with httpx.AsyncClient() as client:
-            async with client.stream(
-                "GET",
-                f"{SUPABASE_URL}/storage/v1/object/{CSV_BUCKET}/{storage_path}",
-                headers={"Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
-                timeout=httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0),
-            ) as resp:
-                if resp.status_code != 200:
-                    raise Exception(f"Failed to download CSV: {resp.status_code}")
-                with open(tmp_path, "wb") as f:
-                    async for chunk in resp.aiter_bytes():
-                        f.write(chunk)
+        for dl_attempt in range(3):
+            try:
+                async with httpx.AsyncClient() as client:
+                    async with client.stream(
+                        "GET",
+                        f"{SUPABASE_URL}/storage/v1/object/{CSV_BUCKET}/{storage_path}",
+                        headers={"Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                        timeout=httpx.Timeout(connect=30.0, read=read_timeout, write=30.0, pool=30.0),
+                    ) as resp:
+                        if resp.status_code != 200:
+                            raise Exception(f"Failed to download CSV: {resp.status_code}")
+                        with open(tmp_path, "wb") as f:
+                            async for chunk in resp.aiter_bytes():
+                                f.write(chunk)
+                break  # success
+            except Exception as dl_err:
+                if dl_attempt < 2:
+                    print(f"[IMPORT] Download retry {dl_attempt+1}: {dl_err}")
+                    await asyncio.sleep(2)
+                else:
+                    raise
 
         dl_time = _time.monotonic() - start_time
         file_size = os.path.getsize(tmp_path)
@@ -696,7 +645,7 @@ async def _process_csv_import(
                     UploadHistory.__table__.c.id == upload_id
                 )
             )
-            total_rows_estimate = r.scalar() or 84000  # fallback
+            total_rows_estimate = r.scalar() or 0
 
         async with engine.begin() as conn:
             await conn.execute(
@@ -807,24 +756,7 @@ async def _process_csv_import(
             if len(batch_rows) >= BATCH_SIZE:
                 # Create any new buckets discovered in this batch
                 if new_bucket_names:
-                    async with engine.begin() as conn:
-                        new_buckets = [
-                            {"id": str(uuid.uuid4()), "user_id": LLOYD_USER_ID,
-                             "name": bname, "total_contacts": 0, "remaining_contacts": 0}
-                            for bname in new_bucket_names
-                        ]
-                        stmt = pg_insert(OutreachBucket.__table__).values(new_buckets)
-                        stmt = stmt.on_conflict_do_nothing(constraint="uq_outreach_buckets_user_name")
-                        await conn.execute(stmt)
-                        # Re-fetch IDs (some may have existed already)
-                        result = await conn.execute(
-                            select(OutreachBucket.__table__.c.id, OutreachBucket.__table__.c.name).where(
-                                OutreachBucket.__table__.c.user_id == LLOYD_USER_ID,
-                                OutreachBucket.__table__.c.name.in_(new_bucket_names),
-                            )
-                        )
-                        for row in result:
-                            bucket_cache[row.name] = row.id
+                    await _ensure_buckets(engine, new_bucket_names, bucket_cache)
                     new_bucket_names.clear()
 
                 # Check cancel/pause
@@ -888,15 +820,7 @@ async def _process_csv_import(
         # Flush remaining rows
         if batch_rows:
             if new_bucket_names:
-                async with engine.begin() as conn:
-                    new_buckets = [
-                        {"id": str(uuid.uuid4()), "user_id": LLOYD_USER_ID,
-                         "name": bname, "total_contacts": 0, "remaining_contacts": 0}
-                        for bname in new_bucket_names
-                    ]
-                    await conn.execute(OutreachBucket.__table__.insert().values(new_buckets))
-                    for b in new_buckets:
-                        bucket_cache[b["name"]] = b["id"]
+                await _ensure_buckets(engine, new_bucket_names, bucket_cache)
 
             contacts = [_build_contact(r) for r in batch_rows]
             try:
@@ -933,6 +857,26 @@ async def _process_csv_import(
             else:
                 count_map = {}
 
+            # Batch update all bucket counts in one query per bucket
+            # (can't do a single UPDATE with varying values without raw SQL,
+            #  but we can batch them efficiently)
+            if count_map:
+                from sqlalchemy import case, literal_column
+                bucket_ids_to_update = list(count_map.keys())
+                total_cases = case(
+                    *[(OutreachBucket.__table__.c.id == bid, count_map[bid]["total"]) for bid in bucket_ids_to_update],
+                    else_=OutreachBucket.__table__.c.total_contacts,
+                )
+                remaining_cases = case(
+                    *[(OutreachBucket.__table__.c.id == bid, count_map[bid]["available"]) for bid in bucket_ids_to_update],
+                    else_=OutreachBucket.__table__.c.remaining_contacts,
+                )
+                await conn.execute(
+                    update(OutreachBucket.__table__)
+                    .where(OutreachBucket.__table__.c.id.in_(bucket_ids_to_update))
+                    .values(total_contacts=total_cases, remaining_contacts=remaining_cases)
+                )
+
             buckets_result = await conn.execute(
                 select(OutreachBucket.__table__.c.id, OutreachBucket.__table__.c.name,
                        OutreachBucket.__table__.c.countries, OutreachBucket.__table__.c.emp_range)
@@ -941,15 +885,6 @@ async def _process_csv_import(
             )
             bucket_summary = []
             for b in buckets_result:
-                if b.id in count_map:
-                    await conn.execute(
-                        update(OutreachBucket.__table__)
-                        .where(OutreachBucket.__table__.c.id == b.id)
-                        .values(
-                            total_contacts=count_map[b.id]["total"],
-                            remaining_contacts=count_map[b.id]["available"],
-                        )
-                    )
                 real_count = count_map.get(b.id, {"total": 0})["total"]
                 bucket_summary.append({"name": b.name, "count": real_count,
                     "countries": b.countries or [], "empRanges": [b.emp_range] if b.emp_range else [],
@@ -980,14 +915,23 @@ async def _process_csv_import(
         print(f"[IMPORT] Done: {upload_id} — {inserted} inserted, {skipped} skipped, {overwritten} overwritten")
 
     except Exception as e:
-        print(f"[IMPORT] FAILED: {upload_id} — {e}")
+        print(f"[IMPORT] FAILED: {upload_id} at row {processed} — {e}")
         traceback.print_exc()
+        # Write partial success info so user can see what was imported before the crash
+        error_detail = f"Import stopped at row {processed:,}. {inserted:,} contacts were successfully imported. Error: {str(e)[:300]}"
         try:
             async with engine.begin() as conn:
                 await conn.execute(
                     update(UploadHistory.__table__)
                     .where(UploadHistory.__table__.c.id == upload_id)
-                    .values(status="failed", error_message=str(e)[:500])
+                    .values(
+                        status="failed",
+                        error_message=error_detail,
+                        processed_rows=processed,
+                        inserted_count=inserted,
+                        skipped_count=skipped,
+                        overwritten_count=overwritten,
+                    )
                 )
         except Exception:
             pass

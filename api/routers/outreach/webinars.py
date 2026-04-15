@@ -335,6 +335,18 @@ async def update_assignment(
     for field, val in body.model_dump(exclude_unset=True).items():
         setattr(assignment, field, val)
     await db.flush()
+
+    # Reload with relationships so assignment_dict can serialize them
+    result = await db.execute(
+        select(WebinarListAssignment).where(WebinarListAssignment.id == assignment_id)
+        .options(
+            selectinload(WebinarListAssignment.bucket),
+            selectinload(WebinarListAssignment.sender),
+            selectinload(WebinarListAssignment.title_copy),
+            selectinload(WebinarListAssignment.desc_copy),
+        )
+    )
+    assignment = result.scalar_one()
     return assignment_dict(assignment)
 
 

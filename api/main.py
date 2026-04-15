@@ -15,6 +15,26 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("Webinar Studio starting up")
     # Tables are managed by Alembic migrations — do not create_all here
+
+    # Recover stale imports stuck in "processing" from a previous crash/restart
+    try:
+        from sqlalchemy import select, update
+        from sqlalchemy.ext.asyncio import AsyncSession
+        from db.models import UploadHistory
+        async with AsyncSession(engine) as db:
+            result = await db.execute(
+                select(UploadHistory).where(UploadHistory.status.in_(["processing", "paused"]))
+            )
+            stale = result.scalars().all()
+            if stale:
+                for u in stale:
+                    u.status = "failed"
+                    u.error_message = "Server restarted during import. Please retry."
+                    logger.warning(f"Marked stale import {u.id} ({u.file_name}) as failed")
+                await db.commit()
+    except Exception as e:
+        logger.error(f"Startup recovery failed: {e}")
+
     yield
     await engine.dispose()
     logger.info("Webinar Studio shut down")

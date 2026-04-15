@@ -56,6 +56,35 @@ function linkifyCopyText(
   });
 }
 
+/**
+ * Produces an HTML string version of copy text with hyperlinks preserved,
+ * so pasting into rich-text editors (email clients, docs) keeps the links.
+ */
+function linkifyToHtml(
+  text: string,
+  registrationLink: string,
+  unsubscribeLink: string,
+): string {
+  if (!registrationLink && !unsubscribeLink) return text;
+
+  const patterns: string[] = [];
+  if (registrationLink) patterns.push("register");
+  if (unsubscribeLink) patterns.push("unsubscribe");
+  if (patterns.length === 0) return text;
+
+  const regex = new RegExp(`(${patterns.join("|")})`, "gi");
+  return text.replace(regex, (match) => {
+    const lower = match.toLowerCase();
+    if (lower === "register" && registrationLink) {
+      return `<a href="${registrationLink}">${match}</a>`;
+    }
+    if (lower === "unsubscribe" && unsubscribeLink) {
+      return `<a href="${unsubscribeLink}">${match}</a>`;
+    }
+    return match;
+  });
+}
+
 /* ─── Types ──────────────��──────────────────────────────��──────────────── */
 
 // AvailableBucket now uses ApiBucket from API
@@ -1813,7 +1842,12 @@ export function PlanningPage() {
                       <div
                         onClick={(e) => {
                           e.stopPropagation();
-                          navigator.clipboard.writeText(v.text);
+                          const html = linkifyToHtml(v.text, regLink, unsubLink);
+                          const item = new ClipboardItem({
+                            "text/plain": new Blob([v.text], { type: "text/plain" }),
+                            "text/html": new Blob([html], { type: "text/html" }),
+                          });
+                          navigator.clipboard.write([item]);
                           setCopiedVariantId(v.id);
                           setTimeout(() => setCopiedVariantId(prev => prev === v.id ? null : prev), 1500);
                         }}

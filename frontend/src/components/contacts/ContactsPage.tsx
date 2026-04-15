@@ -21,7 +21,7 @@ export function ContactsPage({ assignmentId }: { assignmentId: string }) {
   const [selectCount, setSelectCount] = useState<number>(0);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [copying, setCopying] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [copiedBtn, setCopiedBtn] = useState<"emails" | "names" | null>(null);
   const [marking, setMarking] = useState(false);
 
   /* ── Fetch contacts ─────────────────────────────────────────────────── */
@@ -57,33 +57,36 @@ export function ContactsPage({ assignmentId }: { assignmentId: string }) {
     setSelectedIds(ids);
   }, [data, filter]);
 
-  /* ── Copy emails to clipboard ───────────────────────────────────────── */
+  /* ── Copy to clipboard helper ────────────────────────────────────────── */
 
-  const copyToClipboard = useCallback(async () => {
-    if (!data || selectedIds.size === 0) return;
+  const copyText = useCallback(async (text: string, btn: "emails" | "names") => {
     setCopying(true);
-    const emails = data.contacts
-      .filter((c) => selectedIds.has(c.id))
-      .map((c) => c.email)
-      .join("\n");
     try {
-      await navigator.clipboard.writeText(emails);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      await navigator.clipboard.writeText(text);
     } catch {
-      // Fallback
       const ta = document.createElement("textarea");
-      ta.value = emails;
+      ta.value = text;
       document.body.appendChild(ta);
       ta.select();
       document.execCommand("copy");
       document.body.removeChild(ta);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } finally {
-      setCopying(false);
     }
-  }, [data, selectedIds]);
+    setCopiedBtn(btn);
+    setTimeout(() => setCopiedBtn((prev) => (prev === btn ? null : prev)), 2000);
+    setCopying(false);
+  }, []);
+
+  const copyEmails = useCallback(() => {
+    if (!data || selectedIds.size === 0) return;
+    const text = data.contacts.filter((c) => selectedIds.has(c.id)).map((c) => c.email).join("\n");
+    copyText(text, "emails");
+  }, [data, selectedIds, copyText]);
+
+  const copyEmailsAndNames = useCallback(() => {
+    if (!data || selectedIds.size === 0) return;
+    const text = data.contacts.filter((c) => selectedIds.has(c.id)).map((c) => `${c.email}\t${c.first_name || ""}`).join("\n");
+    copyText(text, "names");
+  }, [data, selectedIds, copyText]);
 
   /* ── Mark selected as used ──────────────────────────────────────────── */
 
@@ -103,13 +106,14 @@ export function ContactsPage({ assignmentId }: { assignmentId: string }) {
     }
   }, [assignmentId, selectedIds, filter, load]);
 
-  /* ── Export all contacts as CSV ──────────────────────────────────────── */
+  /* ── Export selected contacts as CSV ─────────────────────────────────── */
 
   const exportCsv = useCallback(() => {
-    if (!data || data.contacts.length === 0) return;
-    const rows = [["email", "first_name", "status"]];
-    for (const c of data.contacts) {
-      rows.push([c.email, c.first_name || "", c.outreach_status]);
+    if (!data || selectedIds.size === 0) return;
+    const selected = data.contacts.filter((c) => selectedIds.has(c.id));
+    const rows = [["email", "first_name"]];
+    for (const c of selected) {
+      rows.push([c.email, c.first_name || ""]);
     }
     const csv = rows.map((r) => r.map((v) => `"${v.replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -122,7 +126,7 @@ export function ContactsPage({ assignmentId }: { assignmentId: string }) {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [data, filter]);
+  }, [data, filter, selectedIds]);
 
   /* ── Toggle single row ──────────────────────────────────────────────── */
 
@@ -227,6 +231,12 @@ export function ContactsPage({ assignmentId }: { assignmentId: string }) {
               className="w-20 bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-md px-2 py-1.5 text-sm text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500"
             />
             <span className="text-xs text-zinc-400">of {contacts.length}</span>
+            <button
+              onClick={() => { setSelectCount(Math.min(300, contacts.length)); applySelectCount(Math.min(300, contacts.length)); }}
+              className="px-2.5 py-1.5 text-xs font-semibold rounded-md bg-violet-100 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400 border border-violet-200 dark:border-violet-500/25 hover:bg-violet-200 dark:hover:bg-violet-500/25 transition-colors"
+            >
+              300
+            </button>
           </div>
 
           <div className="w-px h-5 bg-zinc-200 dark:bg-zinc-700" />
@@ -238,23 +248,35 @@ export function ContactsPage({ assignmentId }: { assignmentId: string }) {
           <div className="flex-1" />
 
           <button
-            onClick={exportCsv}
-            disabled={contacts.length === 0}
-            className="px-4 py-1.5 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            Export CSV
-          </button>
-
-          <button
-            onClick={copyToClipboard}
+            onClick={copyEmails}
             disabled={selectedIds.size === 0 || copying}
             className={`px-4 py-1.5 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 ${
-              copied
+              copiedBtn === "emails"
                 ? "bg-emerald-100 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/25"
                 : "bg-zinc-900 dark:bg-zinc-100 hover:bg-zinc-800 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 disabled:opacity-40 disabled:cursor-not-allowed"
             }`}
           >
-            {copied ? "Copied!" : "Copy Emails"}
+            {copiedBtn === "emails" ? "Copied!" : "Copy Emails"}
+          </button>
+
+          <button
+            onClick={copyEmailsAndNames}
+            disabled={selectedIds.size === 0 || copying}
+            className={`px-4 py-1.5 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 ${
+              copiedBtn === "names"
+                ? "bg-emerald-100 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/25"
+                : "bg-zinc-900 dark:bg-zinc-100 hover:bg-zinc-800 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 disabled:opacity-40 disabled:cursor-not-allowed"
+            }`}
+          >
+            {copiedBtn === "names" ? "Copied!" : "Copy Emails + Names"}
+          </button>
+
+          <button
+            onClick={exportCsv}
+            disabled={selectedIds.size === 0}
+            className="px-4 py-1.5 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Export CSV
           </button>
 
           {hasAssignedSelected && (
