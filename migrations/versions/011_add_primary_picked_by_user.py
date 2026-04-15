@@ -7,7 +7,6 @@ Revision ID: 011
 Revises: 010
 """
 from alembic import op
-import sqlalchemy as sa
 
 revision = "011"
 down_revision = "010"
@@ -16,10 +15,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "bucket_copies",
-        sa.Column("primary_picked_by_user", sa.Boolean(), nullable=False, server_default="false"),
-    )
+    op.execute("ALTER TABLE bucket_copies ADD COLUMN IF NOT EXISTS primary_picked_by_user BOOLEAN NOT NULL DEFAULT false")
 
 
 def downgrade() -> None:
