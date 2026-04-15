@@ -124,6 +124,10 @@ export function UploadPage() {
 
   const handleFile = useCallback(async (file: File) => {
     if (!file.name.endsWith(".csv")) return;
+    if (file.size > 500 * 1024 * 1024) {
+      setUploadError("File exceeds 500 MB limit");
+      return;
+    }
 
     setStep("uploading");
     setUploadProgress(0);
@@ -131,7 +135,7 @@ export function UploadPage() {
 
     try {
       // Step 1: Get signed URL from backend
-      const { upload_id, signed_url } = await requestSignedUploadUrl(file.name);
+      const { upload_id, signed_url } = await requestSignedUploadUrl(file.name, file.size);
 
       // Step 2: Upload directly to Supabase Storage with real progress
       await uploadToStorage(signed_url, file, (pct) => setUploadProgress(pct));
@@ -408,7 +412,7 @@ export function UploadPage() {
             Drop your CSV here or click to browse
           </p>
           <p style={{ color: "var(--muted-foreground)", fontSize: 13, marginTop: 4 }}>
-            Supports files up to 300 MB • CSV format only
+            Supports files up to 500 MB • CSV format only
           </p>
           <input ref={fileRef} type="file" accept=".csv" hidden onChange={onFileSelect} />
         </div>

@@ -101,8 +101,11 @@ async def presign_upload(
     Browser will PUT the file directly to Supabase Storage.
     """
     filename = body.get("filename", "upload.csv")
+    file_size = body.get("file_size", 0)
     if not filename.endswith(".csv"):
         raise HTTPException(400, "Only CSV files are accepted")
+    if file_size > MAX_UPLOAD_SIZE:
+        raise HTTPException(413, f"File exceeds {MAX_UPLOAD_SIZE // (1024*1024)} MB limit")
 
     storage_path = f"{LLOYD_USER_ID}/{int(datetime.now().timestamp())}_{filename}"
 
@@ -325,6 +328,8 @@ async def start_import(
     upload = result.scalar_one_or_none()
     if not upload:
         raise HTTPException(404, "Upload not found")
+    if upload.status not in ("uploading",):
+        raise HTTPException(409, f"Cannot start import: upload status is '{upload.status}', expected 'uploading'")
 
     upload.field_mappings = body.field_mappings
     upload.duplicate_mode = body.duplicate_mode
@@ -555,7 +560,6 @@ async def delete_upload(
                     task.cancel()
 
         # Re-query upload status — it may have changed during cancellation
-        await db.expire(upload)
         refreshed = await db.execute(
             select(UploadHistory).where(UploadHistory.id == upload_id)
         )
@@ -611,30 +615,44 @@ async def _process_csv_import(
         print(f"[IMPORT] FAILED: no DATABASE_URL configured")
         return
 
+    import tempfile
+    tmp_path = None
+
     try:
         import httpx
         import time as _time
 
         start_time = _time.monotonic()
-        print(f"[IMPORT] Starting: {upload_id} — downloading CSV...")
+        print(f"[IMPORT] Starting: {upload_id} — downloading CSV to temp file...")
 
-        # Download CSV from storage
+        # Download CSV to a temp file — never hold full file in memory
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".csv", prefix="import_")
+        os.close(tmp_fd)
+
         async with httpx.AsyncClient() as client:
-            resp = await client.get(
+            async with client.stream(
+                "GET",
                 f"{SUPABASE_URL}/storage/v1/object/{CSV_BUCKET}/{storage_path}",
                 headers={"Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
-                timeout=300.0,
-            )
-            if resp.status_code != 200:
-                raise Exception(f"Failed to download CSV: {resp.status_code}")
+                timeout=httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0),
+            ) as resp:
+                if resp.status_code != 200:
+                    raise Exception(f"Failed to download CSV: {resp.status_code}")
+                with open(tmp_path, "wb") as f:
+                    async for chunk in resp.aiter_bytes():
+                        f.write(chunk)
 
         dl_time = _time.monotonic() - start_time
-        print(f"[IMPORT] Downloaded in {dl_time:.1f}s — parsing...")
+        file_size = os.path.getsize(tmp_path)
+        print(f"[IMPORT] Downloaded {file_size/1024/1024:.1f}MB in {dl_time:.1f}s — parsing...")
 
-        reader = csv.reader(io.StringIO(resp.text))
+        # Parse from disk — no full file in memory
+        csv_file = open(tmp_path, "r", encoding="utf-8", errors="replace")
+        reader = csv.reader(csv_file)
         try:
             csv_headers = [h.strip() for h in next(reader)]
         except StopIteration:
+            csv_file.close()
             raise Exception("CSV file is empty")
 
         # Build column mapping
@@ -795,9 +813,18 @@ async def _process_csv_import(
                              "name": bname, "total_contacts": 0, "remaining_contacts": 0}
                             for bname in new_bucket_names
                         ]
-                        await conn.execute(OutreachBucket.__table__.insert().values(new_buckets))
-                        for b in new_buckets:
-                            bucket_cache[b["name"]] = b["id"]
+                        stmt = pg_insert(OutreachBucket.__table__).values(new_buckets)
+                        stmt = stmt.on_conflict_do_nothing(constraint="uq_outreach_buckets_user_name")
+                        await conn.execute(stmt)
+                        # Re-fetch IDs (some may have existed already)
+                        result = await conn.execute(
+                            select(OutreachBucket.__table__.c.id, OutreachBucket.__table__.c.name).where(
+                                OutreachBucket.__table__.c.user_id == LLOYD_USER_ID,
+                                OutreachBucket.__table__.c.name.in_(new_bucket_names),
+                            )
+                        )
+                        for row in result:
+                            bucket_cache[row.name] = row.id
                     new_bucket_names.clear()
 
                 # Check cancel/pause
@@ -884,6 +911,7 @@ async def _process_csv_import(
             processed += len(batch_rows)
 
         total_rows = processed  # actual count after full iteration
+        csv_file.close()
 
         # Recalculate bucket counts
         async with engine.begin() as conn:
@@ -930,7 +958,8 @@ async def _process_csv_import(
             await conn.execute(
                 update(UploadHistory.__table__)
                 .where(UploadHistory.__table__.c.id == upload_id)
-                .values(status="complete", progress=100, processed_rows=total_rows,
+                .values(status="complete", progress=100,
+                        total_contacts=total_rows, processed_rows=total_rows,
                         inserted_count=inserted, skipped_count=skipped, overwritten_count=overwritten,
                         total_buckets=len(bucket_summary),
                         bucket_summary=sorted(bucket_summary, key=lambda x: x["count"], reverse=True))
@@ -962,3 +991,10 @@ async def _process_csv_import(
                 )
         except Exception:
             pass
+    finally:
+        # Clean up temp file
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass

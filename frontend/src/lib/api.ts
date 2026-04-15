@@ -441,7 +441,7 @@ export async function uploadCsvFile(file: File): Promise<UploadFileResponse> {
 
 /* ── Direct-to-Supabase Upload ────────────────────────────────────────── */
 
-export async function requestSignedUploadUrl(filename: string): Promise<{
+export async function requestSignedUploadUrl(filename: string, fileSize: number): Promise<{
   upload_id: string;
   signed_url: string;
   storage_path: string;
@@ -449,7 +449,7 @@ export async function requestSignedUploadUrl(filename: string): Promise<{
   const res = await fetch(`${API_URL}/outreach/uploads/presign`, {
     method: "POST",
     headers: jsonHeaders(),
-    body: JSON.stringify({ filename }),
+    body: JSON.stringify({ filename, file_size: fileSize }),
   });
   if (!res.ok) {
     const text = await res.text();
