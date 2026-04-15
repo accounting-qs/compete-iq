@@ -1371,23 +1371,25 @@ export function PlanningPage() {
                           <div className="rounded-lg border border-zinc-200 dark:border-zinc-800/40 overflow-hidden max-h-[200px] overflow-y-auto">
                             <table className="w-full text-xs">
                               <thead>
-                                <tr className="bg-zinc-100 dark:bg-zinc-800/40">
-                                  <th className="text-left px-3 py-1.5 text-zinc-500 font-medium">Bucket</th>
-                                  <th className="text-right px-3 py-1.5 text-zinc-500 font-medium">Total</th>
-                                  <th className="text-right px-3 py-1.5 text-zinc-500 font-medium">Remaining</th>
-                                  <th className="text-left px-3 py-1.5 text-zinc-500 font-medium">Countries</th>
-                                  <th className="text-left px-3 py-1.5 text-zinc-500 font-medium">Emp Range</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-zinc-800/20">
                                 {(() => {
                                   const availBuckets = buckets.filter((b) => b.remaining_contacts > 0);
                                   const totalSum = availBuckets.reduce((s, b) => s + b.total_contacts, 0);
                                   const remainSum = availBuckets.reduce((s, b) => s + b.remaining_contacts, 0);
                                   const uniqueCountries = new Set(availBuckets.flatMap((b) => b.countries));
                                   const uniqueEmpRanges = new Set(availBuckets.map((b) => b.emp_range).filter(Boolean));
-                                  return (<>
-                                    {availBuckets.map((b) => (
+                                  return (
+                                    <tr className="bg-zinc-100 dark:bg-zinc-800/40">
+                                      <th className="text-left px-3 py-1.5 text-zinc-500 font-medium">Bucket <span className="text-zinc-400 font-normal">{availBuckets.length}</span></th>
+                                      <th className="text-right px-3 py-1.5 text-zinc-500 font-medium">Total <span className="text-zinc-400 font-normal">{totalSum.toLocaleString()}</span></th>
+                                      <th className="text-right px-3 py-1.5 text-zinc-500 font-medium">Remaining <span className="text-violet-400/70 font-normal">{remainSum.toLocaleString()}</span></th>
+                                      <th className="text-left px-3 py-1.5 text-zinc-500 font-medium">Countries <span className="text-zinc-400 font-normal">{uniqueCountries.size}</span></th>
+                                      <th className="text-left px-3 py-1.5 text-zinc-500 font-medium">Emp Range <span className="text-zinc-400 font-normal">{uniqueEmpRanges.size}</span></th>
+                                    </tr>
+                                  );
+                                })()}
+                              </thead>
+                              <tbody className="divide-y divide-zinc-800/20">
+                                {buckets.filter((b) => b.remaining_contacts > 0).map((b) => (
                                       <tr key={b.id} onClick={() => {
                                         setAssignBucket(b.id);
                                         setAssignCountries((b.countries || []).join(", "));
@@ -1416,15 +1418,6 @@ export function PlanningPage() {
                                         <td className="px-3 py-1.5 text-zinc-600 dark:text-zinc-400">{b.emp_range}</td>
                                       </tr>
                                     ))}
-                                    <tr className="bg-zinc-100 dark:bg-zinc-800/40 border-t border-zinc-300 dark:border-zinc-700/40">
-                                      <td className="px-3 py-1.5 text-zinc-600 dark:text-zinc-400 font-semibold">{availBuckets.length} buckets</td>
-                                      <td className="px-3 py-1.5 text-right font-mono text-zinc-600 dark:text-zinc-400 font-semibold">{totalSum.toLocaleString()}</td>
-                                      <td className="px-3 py-1.5 text-right font-mono text-violet-400 font-semibold">{remainSum.toLocaleString()}</td>
-                                      <td className="px-3 py-1.5 text-zinc-600 dark:text-zinc-400 font-semibold">{uniqueCountries.size} countries</td>
-                                      <td className="px-3 py-1.5 text-zinc-600 dark:text-zinc-400 font-semibold">{uniqueEmpRanges.size} ranges</td>
-                                    </tr>
-                                  </>);
-                                })()}
                               </tbody>
                             </table>
                           </div>
