@@ -65,24 +65,32 @@ function linkifyToHtml(
   registrationLink: string,
   unsubscribeLink: string,
 ): string {
-  if (!registrationLink && !unsubscribeLink) return text;
+  // Escape HTML entities first
+  let html = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
+  // Convert newlines to <br> so formatting is preserved in rich-text paste
+  html = html.replace(/\n/g, "<br>");
+
+  // Linkify keywords
   const patterns: string[] = [];
   if (registrationLink) patterns.push("register");
   if (unsubscribeLink) patterns.push("unsubscribe");
-  if (patterns.length === 0) return text;
 
-  const regex = new RegExp(`(${patterns.join("|")})`, "gi");
-  return text.replace(regex, (match) => {
-    const lower = match.toLowerCase();
-    if (lower === "register" && registrationLink) {
-      return `<a href="${registrationLink}">${match}</a>`;
-    }
-    if (lower === "unsubscribe" && unsubscribeLink) {
-      return `<a href="${unsubscribeLink}">${match}</a>`;
-    }
-    return match;
-  });
+  if (patterns.length > 0) {
+    const regex = new RegExp(`(${patterns.join("|")})`, "gi");
+    html = html.replace(regex, (match) => {
+      const lower = match.toLowerCase();
+      if (lower === "register" && registrationLink) {
+        return `<a href="${registrationLink}">${match}</a>`;
+      }
+      if (lower === "unsubscribe" && unsubscribeLink) {
+        return `<a href="${unsubscribeLink}">${match}</a>`;
+      }
+      return match;
+    });
+  }
+
+  return html;
 }
 
 /* ─── Types ──────────────��──────────────────────────────��──────────────── */

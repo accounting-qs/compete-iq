@@ -239,6 +239,15 @@ async def generate_copies(
         for old in old_copies.scalars().all():
             old.is_primary = False
 
+        # Get max variant_index so new copies continue the sequence
+        max_idx_result = await db.execute(
+            select(sa_func.max(BucketCopy.variant_index)).where(
+                BucketCopy.bucket_id == bucket_id,
+                BucketCopy.copy_type == copy_type,
+            )
+        )
+        max_idx = max_idx_result.scalar() or -1
+
         # Generate copies via AI brain
         try:
             texts = await generate_bucket_copies(
@@ -260,7 +269,7 @@ async def generate_copies(
                 user_id=LLOYD_USER_ID,
                 bucket_id=bucket_id,
                 copy_type=copy_type,
-                variant_index=i,
+                variant_index=max_idx + 1 + i,
                 text=text,
                 is_primary=(i == 0),
                 generation_batch_id=batch_id,
