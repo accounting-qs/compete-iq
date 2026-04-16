@@ -472,6 +472,20 @@ export async function fetchUploads(): Promise<{ uploads: ApiUpload[] }> {
 
 /* ── Direct-to-Supabase Upload ────────────────────────────────────────── */
 
+async function readErrorDetail(res: Response, fallback: string): Promise<string> {
+  const text = await res.text();
+  if (!text) return fallback;
+  try {
+    const parsed = JSON.parse(text) as { detail?: unknown };
+    if (typeof parsed.detail === "string" && parsed.detail.trim()) {
+      return parsed.detail;
+    }
+  } catch {
+    /* non-JSON error body */
+  }
+  return text;
+}
+
 export async function requestSignedUploadUrl(filename: string, fileSize: number): Promise<{
   upload_id: string;
   signed_url: string;
@@ -483,8 +497,7 @@ export async function requestSignedUploadUrl(filename: string, fileSize: number)
     body: JSON.stringify({ filename, file_size: fileSize }),
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to get signed URL: ${text}`);
+    throw new Error(await readErrorDetail(res, "Failed to get signed URL"));
   }
   return res.json();
 }
@@ -533,8 +546,7 @@ export async function confirmUpload(
     body: JSON.stringify({ file_size: fileSize }),
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to confirm upload: ${text}`);
+    throw new Error(await readErrorDetail(res, "Failed to confirm upload"));
   }
   return res.json();
 }
@@ -549,7 +561,7 @@ export async function startImport(
     headers: jsonHeaders(),
     body: JSON.stringify({ field_mappings: fieldMappings, duplicate_mode: duplicateMode }),
   });
-  if (!res.ok) throw new Error("Failed to start import");
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to start import"));
   return res.json();
 }
 

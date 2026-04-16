@@ -43,6 +43,32 @@ _import_pause_events: dict[str, asyncio.Event] = {}   # set=running, clear=pause
 _import_cancel_flags: dict[str, bool] = {}
 
 
+def _get_supabase_base_url() -> str:
+    base_url = SUPABASE_URL.strip()
+    if not base_url:
+        raise HTTPException(500, "Supabase storage is not configured: missing SUPABASE_URL")
+    if not base_url.startswith(("http://", "https://")):
+        base_url = f"https://{base_url}"
+    return base_url.rstrip("/")
+
+
+def _get_supabase_service_key() -> str:
+    service_key = SUPABASE_SERVICE_KEY.strip()
+    if not service_key:
+        raise HTTPException(500, "Supabase storage is not configured: missing SUPABASE_SERVICE_KEY")
+    return service_key
+
+
+def _supabase_headers(**extra_headers: str) -> dict[str, str]:
+    headers = {"Authorization": f"Bearer {_get_supabase_service_key()}"}
+    headers.update(extra_headers)
+    return headers
+
+
+def _storage_api_url(path: str) -> str:
+    return f"{_get_supabase_base_url()}{path}"
+
+
 def _parse_csv_line(line: str) -> list[str]:
     """Parse a single CSV line handling quoted fields and escaped quotes ("")."""
     reader = csv.reader(io.StringIO(line))
@@ -109,7 +135,32 @@ async def presign_upload(
 
     storage_path = f"{LLOYD_USER_ID}/{int(datetime.now().timestamp())}_{filename}"
 
-    # Create upload record first
+    # Get signed upload URL from Supabase Storage
+    import httpx
+    signed_endpoint = _storage_api_url(f"/storage/v1/object/upload/sign/{CSV_BUCKET}/{storage_path}")
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                signed_endpoint,
+                headers=_supabase_headers(**{"Content-Type": "application/json"}),
+                json={},
+                timeout=30.0,
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Failed to reach Supabase Storage: {exc}") from exc
+    if resp.status_code != 200:
+        raise HTTPException(502, f"Failed to get signed URL from Supabase ({resp.status_code}): {resp.text[:300]}")
+    try:
+        signed_data = resp.json()
+    except ValueError as exc:
+        raise HTTPException(502, "Supabase returned an invalid signed upload response") from exc
+
+    # Supabase returns a relative URL with token — construct the full upload URL
+    relative_url = signed_data.get("url", "")
+    if not relative_url.startswith("/"):
+        raise HTTPException(502, "Supabase signed upload response is missing a valid URL")
+    signed_url = _storage_api_url(f"/storage/v1{relative_url}")
+
     upload = UploadHistory(
         user_id=LLOYD_USER_ID,
         file_name=filename,
@@ -118,26 +169,6 @@ async def presign_upload(
     )
     db.add(upload)
     await db.flush()
-
-    # Get signed upload URL from Supabase Storage
-    import httpx
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{SUPABASE_URL}/storage/v1/object/upload/sign/{CSV_BUCKET}/{storage_path}",
-            headers={
-                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={},
-            timeout=30.0,
-        )
-        if resp.status_code != 200:
-            raise HTTPException(500, f"Failed to get signed URL: {resp.text}")
-
-    signed_data = resp.json()
-    # Supabase returns a relative URL with token — construct the full upload URL
-    relative_url = signed_data.get("url", "")
-    signed_url = f"{SUPABASE_URL}/storage/v1{relative_url}"
 
     return {
         "upload_id": upload.id,
@@ -172,11 +203,8 @@ async def confirm_upload(
     import httpx
     async with httpx.AsyncClient() as client:
         resp = await client.get(
-            f"{SUPABASE_URL}/storage/v1/object/{CSV_BUCKET}/{upload.storage_path}",
-            headers={
-                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                "Range": "bytes=0-32767",
-            },
+            _storage_api_url(f"/storage/v1/object/{CSV_BUCKET}/{upload.storage_path}"),
+            headers=_supabase_headers(Range="bytes=0-32767"),
             timeout=30.0,
         )
         if resp.status_code not in (200, 206):
@@ -400,11 +428,8 @@ async def get_upload_headers(
     import httpx
     async with httpx.AsyncClient() as client:
         resp = await client.get(
-            f"{SUPABASE_URL}/storage/v1/object/{CSV_BUCKET}/{upload.storage_path}",
-            headers={
-                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                "Range": "bytes=0-8191",
-            },
+            _storage_api_url(f"/storage/v1/object/{CSV_BUCKET}/{upload.storage_path}"),
+            headers=_supabase_headers(Range="bytes=0-8191"),
             timeout=30.0,
         )
         if resp.status_code not in (200, 206):
@@ -485,8 +510,8 @@ async def delete_upload(
             import httpx
             async with httpx.AsyncClient() as client:
                 await client.delete(
-                    f"{SUPABASE_URL}/storage/v1/object/{CSV_BUCKET}/{upload.storage_path}",
-                    headers={"Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                    _storage_api_url(f"/storage/v1/object/{CSV_BUCKET}/{upload.storage_path}"),
+                    headers=_supabase_headers(),
                     timeout=30.0,
                 )
         except Exception:
@@ -545,6 +570,10 @@ async def _process_csv_import(
 
     import tempfile
     tmp_path = None
+    processed = 0
+    inserted = 0
+    skipped = 0
+    overwritten = 0
 
     try:
         import httpx
@@ -574,8 +603,8 @@ async def _process_csv_import(
                 async with httpx.AsyncClient() as client:
                     async with client.stream(
                         "GET",
-                        f"{SUPABASE_URL}/storage/v1/object/{CSV_BUCKET}/{storage_path}",
-                        headers={"Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                        _storage_api_url(f"/storage/v1/object/{CSV_BUCKET}/{storage_path}"),
+                        headers=_supabase_headers(),
                         timeout=httpx.Timeout(connect=30.0, read=read_timeout, write=30.0, pool=30.0),
                     ) as resp:
                         if resp.status_code != 200:
@@ -904,8 +933,8 @@ async def _process_csv_import(
         try:
             async with httpx.AsyncClient() as client:
                 await client.delete(
-                    f"{SUPABASE_URL}/storage/v1/object/{CSV_BUCKET}/{storage_path}",
-                    headers={"Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                    _storage_api_url(f"/storage/v1/object/{CSV_BUCKET}/{storage_path}"),
+                    headers=_supabase_headers(),
                     timeout=30.0,
                 )
             print(f"[IMPORT] Cleaned up: {storage_path}")
