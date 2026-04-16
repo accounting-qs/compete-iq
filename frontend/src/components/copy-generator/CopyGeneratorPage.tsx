@@ -10,9 +10,12 @@ import {
   updateCopy as apiUpdateCopy,
   regenerateCopy as apiRegenerateCopy,
   deleteCopy as apiDeleteCopy,
+  mergeBuckets as apiMergeBuckets,
+  MergeBlockedError,
   type ApiBucket,
   type ApiCopy,
   type ApiCopyGenJob,
+  type MergeBlockingBucket,
 } from "@/lib/api";
 import { BrainPanel } from "./BrainPanel";
 
@@ -503,6 +506,183 @@ function VariationsModal({
   );
 }
 
+/* ─── Merge Modal ──────────────────────────────────────────────────────── */
+
+function MergeBucketsModal({
+  candidates,
+  onClose,
+  onConfirm,
+}: {
+  candidates: ApiBucket[];
+  onClose: () => void;
+  onConfirm: (keeperId: string) => Promise<void>;
+}) {
+  const [keeperId, setKeeperId] = useState<string>(candidates[0]?.id ?? "");
+  const [submitting, setSubmitting] = useState(false);
+  const [blockingBuckets, setBlockingBuckets] = useState<MergeBlockingBucket[]>([]);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const backdropRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const keeper = candidates.find(b => b.id === keeperId);
+  const sources = candidates.filter(b => b.id !== keeperId);
+  const totalContactsToMove = sources.reduce((s, b) => s + (b.total_contacts || 0), 0);
+
+  const handleConfirm = async () => {
+    if (!keeperId) return;
+    setSubmitting(true);
+    setBlockingBuckets([]);
+    setErrorMsg(null);
+    try {
+      await onConfirm(keeperId);
+      onClose();
+    } catch (err) {
+      if (err instanceof MergeBlockedError) {
+        setBlockingBuckets(err.blocking);
+        setErrorMsg(err.message);
+      } else {
+        setErrorMsg(err instanceof Error ? err.message : "Merge failed");
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      ref={backdropRef}
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+      onClick={(e) => { if (e.target === backdropRef.current && !submitting) onClose(); }}
+    >
+      <div className="bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800/60 shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+        {/* Header */}
+        <div className="flex items-center gap-3 px-6 py-4 border-b border-zinc-200 dark:border-zinc-800/40 shrink-0">
+          <div className="flex-1 min-w-0">
+            <h2 className="text-base font-bold text-zinc-900 dark:text-zinc-100">Merge buckets</h2>
+            <p className="text-xs text-zinc-500 mt-0.5">
+              Choose which bucket to keep. All other contacts will move into it, and the other buckets will be deleted.
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            disabled={submitting}
+            className="p-1.5 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors disabled:opacity-50"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+          </button>
+        </div>
+
+        {/* Blocking error */}
+        {blockingBuckets.length > 0 && (
+          <div className="mx-6 mt-4 rounded-lg border border-red-300 dark:border-red-500/40 bg-red-50 dark:bg-red-500/10 px-4 py-3">
+            <p className="text-xs font-semibold text-red-700 dark:text-red-400 mb-2">
+              Can&apos;t merge — these buckets have webinar assignments:
+            </p>
+            <ul className="text-xs text-red-700 dark:text-red-300 space-y-1">
+              {blockingBuckets.map(b => (
+                <li key={b.id}>
+                  <span className="font-semibold">{b.name}</span>
+                  <span className="text-red-600 dark:text-red-400"> — {b.assignment_count} assignment{b.assignment_count !== 1 ? "s" : ""}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="text-[11px] text-red-600 dark:text-red-400 mt-2">
+              Either remove those assignments first, or select one of those buckets as the keeper.
+            </p>
+          </div>
+        )}
+
+        {errorMsg && blockingBuckets.length === 0 && (
+          <div className="mx-6 mt-4 rounded-lg border border-red-300 dark:border-red-500/40 bg-red-50 dark:bg-red-500/10 px-4 py-2.5">
+            <p className="text-xs text-red-700 dark:text-red-400">{errorMsg}</p>
+          </div>
+        )}
+
+        {/* Candidate list */}
+        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-2">
+            Pick keeper ({candidates.length} buckets selected)
+          </p>
+          {candidates.map(b => {
+            const isKeeper = b.id === keeperId;
+            return (
+              <label
+                key={b.id}
+                className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 cursor-pointer transition-all ${
+                  isKeeper
+                    ? "border-violet-400 dark:border-violet-500/50 bg-violet-50/50 dark:bg-violet-500/10"
+                    : "border-zinc-200 dark:border-zinc-800/40 bg-white dark:bg-zinc-900/60 hover:border-zinc-300 dark:hover:border-zinc-700"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="keeper"
+                  checked={isKeeper}
+                  onChange={() => setKeeperId(b.id)}
+                  className="accent-violet-600"
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-200 truncate">{b.name}</span>
+                    {isKeeper && (
+                      <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-violet-200/60 dark:bg-violet-500/20 text-violet-600 dark:text-violet-400">
+                        Keep
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3 mt-0.5 text-[11px] text-zinc-500">
+                    <span>{b.industry || "—"}</span>
+                    <span>·</span>
+                    <span className="font-mono">{(b.total_contacts || 0).toLocaleString()} contacts</span>
+                    <span>·</span>
+                    <span className="font-mono">{b.copies_count.titles}T / {b.copies_count.descriptions}D variants</span>
+                  </div>
+                </div>
+              </label>
+            );
+          })}
+        </div>
+
+        {/* Summary + actions */}
+        <div className="shrink-0 border-t border-zinc-200 dark:border-zinc-800/40 px-6 py-4 bg-zinc-50/50 dark:bg-zinc-800/20">
+          {keeper ? (
+            <p className="text-xs text-zinc-600 dark:text-zinc-400 mb-3">
+              Move <span className="font-semibold text-zinc-800 dark:text-zinc-200">{totalContactsToMove.toLocaleString()}</span> contacts
+              from <span className="font-semibold text-zinc-800 dark:text-zinc-200">{sources.length}</span> bucket{sources.length !== 1 ? "s" : ""}
+              into <span className="font-semibold text-violet-600 dark:text-violet-400">{keeper.name}</span>.
+              The other bucket{sources.length !== 1 ? "s" : ""} will be deleted.
+            </p>
+          ) : (
+            <p className="text-xs text-zinc-500 mb-3">Select a keeper above.</p>
+          )}
+          <div className="flex items-center justify-end gap-2">
+            <button
+              onClick={onClose}
+              disabled={submitting}
+              className="px-4 py-2 text-xs font-medium text-zinc-600 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200 transition-colors disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleConfirm}
+              disabled={!keeperId || submitting || sources.length === 0}
+              className="px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5"
+            >
+              {submitting && <LoadingSpinner />}
+              {submitting ? "Merging…" : "Merge buckets"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ─── Main Component ───────────────────────────────────────────────────── */
 
 export function CopyGeneratorPage() {
@@ -516,9 +696,14 @@ export function CopyGeneratorPage() {
   const [jobMap, setJobMap] = useState<Map<string, JobMeta>>(new Map());
   const [activeAction, setActiveAction] = useState<"title" | "description" | "both" | null>(null);
   const [modalState, setModalState] = useState<{ bucketId: string; tab: "title" | "description" } | null>(null);
+  const [mergeModalOpen, setMergeModalOpen] = useState(false);
   const [editingCell, setEditingCell] = useState<{ bucketId: string; type: "title" | "description" } | null>(null);
   const [editCellText, setEditCellText] = useState("");
   const editRef = useRef<HTMLTextAreaElement>(null);
+
+  // Filters
+  const [genFilter, setGenFilter] = useState<"all" | "missing_title" | "missing_desc" | "missing_any" | "complete">("all");
+  const [primaryFilter, setPrimaryFilter] = useState<"all" | "picked" | "not_picked">("all");
 
   /* ── Load buckets with copies from API on mount ─────────────────────── */
   useEffect(() => {
@@ -579,9 +764,25 @@ export function CopyGeneratorPage() {
     return () => { cancelled = true; };
   }, []);
 
+  /* ── Filtering ───────────────────────────────────────────────────────── */
+
+  const filteredBuckets = buckets.filter(b => {
+    const hasTitle = b.copies_count.titles > 0;
+    const hasDesc = b.copies_count.descriptions > 0;
+    if (genFilter === "missing_title" && hasTitle) return false;
+    if (genFilter === "missing_desc" && hasDesc) return false;
+    if (genFilter === "missing_any" && hasTitle && hasDesc) return false;
+    if (genFilter === "complete" && (!hasTitle || !hasDesc)) return false;
+
+    const bothPicked = b.title_primary_picked && b.desc_primary_picked;
+    if (primaryFilter === "picked" && !bothPicked) return false;
+    if (primaryFilter === "not_picked" && bothPicked) return false;
+    return true;
+  });
+
   /* ── Selection ───────────────────────────────────────────────────────── */
 
-  const allSelected = buckets.length > 0 && selectedIds.size === buckets.length;
+  const allSelected = filteredBuckets.length > 0 && filteredBuckets.every(b => selectedIds.has(b.id));
   const someSelected = selectedIds.size > 0;
 
   const toggleSelect = (id: string) => {
@@ -593,7 +794,16 @@ export function CopyGeneratorPage() {
   };
 
   const toggleAll = () => {
-    setSelectedIds(allSelected ? new Set() : new Set(buckets.map(b => b.id)));
+    setSelectedIds(prev => {
+      if (allSelected) {
+        const next = new Set(prev);
+        filteredBuckets.forEach(b => next.delete(b.id));
+        return next;
+      }
+      const next = new Set(prev);
+      filteredBuckets.forEach(b => next.add(b.id));
+      return next;
+    });
   };
 
   /* ── Generation (background, poll-based) ────────────────────────────── */
@@ -660,6 +870,41 @@ export function CopyGeneratorPage() {
         return next;
       });
     }
+  };
+
+  /* ── Merge buckets ──────────────────────────────────────────────────── */
+
+  const doMergeBuckets = async (keeperId: string) => {
+    const sourceIds = Array.from(selectedIds).filter(id => id !== keeperId);
+    await apiMergeBuckets({
+      keeper_bucket_id: keeperId,
+      source_bucket_ids: sourceIds,
+    });
+    // Refresh buckets + drop merged ones from state
+    const { buckets: refreshed } = await fetchBuckets(true);
+    setBuckets(refreshed);
+    setGeneratedCopies(prev => {
+      const next = new Map(prev);
+      for (const id of sourceIds) next.delete(id);
+      return next;
+    });
+    setStatusMap(prev => {
+      const next = new Map(prev);
+      for (const id of sourceIds) {
+        next.delete(`${id}-title`);
+        next.delete(`${id}-description`);
+      }
+      return next;
+    });
+    setJobMap(prev => {
+      const next = new Map(prev);
+      for (const id of sourceIds) {
+        next.delete(`${id}-title`);
+        next.delete(`${id}-description`);
+      }
+      return next;
+    });
+    setSelectedIds(new Set([keeperId]));
   };
 
   /* ── Poll job status while any are in-flight ────────────────────────── */
@@ -936,7 +1181,9 @@ export function CopyGeneratorPage() {
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800/40 rounded-lg px-3 py-1.5">
               <span className="text-[11px] text-zinc-500 uppercase tracking-wider font-medium">Buckets</span>
-              <span className="text-sm font-bold text-zinc-800 dark:text-zinc-200 font-mono">{buckets.length}</span>
+              <span className="text-sm font-bold text-zinc-800 dark:text-zinc-200 font-mono">
+                {filteredBuckets.length !== buckets.length ? `${filteredBuckets.length}/${buckets.length}` : buckets.length}
+              </span>
             </div>
             {totalGenerated > 0 && (
               <div className="flex items-center gap-2 bg-violet-50 dark:bg-violet-500/10 border border-violet-200 dark:border-violet-500/20 rounded-lg px-3 py-1.5">
@@ -980,8 +1227,60 @@ export function CopyGeneratorPage() {
               className="px-4 py-1.5 bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-500 hover:to-blue-500 disabled:opacity-50 disabled:cursor-wait text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5">
               {activeAction === "both" && <LoadingSpinner />} Generate Both
             </button>
+            {selectedIds.size >= 2 && (
+              <>
+                <div className="w-px h-5 bg-zinc-200 dark:bg-zinc-700" />
+                <button
+                  onClick={() => setMergeModalOpen(true)}
+                  disabled={activeAction !== null}
+                  className="px-4 py-1.5 border border-zinc-300 dark:border-zinc-700/60 hover:border-violet-400 dark:hover:border-violet-500/50 hover:bg-violet-50 dark:hover:bg-violet-500/10 hover:text-violet-600 dark:hover:text-violet-400 disabled:opacity-50 disabled:cursor-wait text-zinc-700 dark:text-zinc-300 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5"
+                  title="Merge selected buckets into one"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" /></svg>
+                  Merge
+                </button>
+              </>
+            )}
           </div>
         )}
+
+        {/* ── Filter Bar ──────────────────────────────────────────────── */}
+        <div className="mb-3 flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-2">
+            <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-medium">Generation</label>
+            <select
+              value={genFilter}
+              onChange={(e) => setGenFilter(e.target.value as typeof genFilter)}
+              className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800/40 rounded-lg px-2.5 py-1.5 text-xs text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-violet-500 cursor-pointer"
+            >
+              <option value="all">All</option>
+              <option value="missing_title">Missing titles</option>
+              <option value="missing_desc">Missing descriptions</option>
+              <option value="missing_any">Missing either</option>
+              <option value="complete">Fully generated</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-medium">Primary</label>
+            <select
+              value={primaryFilter}
+              onChange={(e) => setPrimaryFilter(e.target.value as typeof primaryFilter)}
+              className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800/40 rounded-lg px-2.5 py-1.5 text-xs text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-violet-500 cursor-pointer"
+            >
+              <option value="all">All</option>
+              <option value="picked">Picked by user</option>
+              <option value="not_picked">Not picked</option>
+            </select>
+          </div>
+          {(genFilter !== "all" || primaryFilter !== "all") && (
+            <button
+              onClick={() => { setGenFilter("all"); setPrimaryFilter("all"); }}
+              className="text-[11px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 underline underline-offset-2 decoration-zinc-400/40 hover:decoration-zinc-600 transition-colors"
+            >
+              Clear filters
+            </button>
+          )}
+        </div>
 
         {/* ── Buckets Table ────────────────────────────────────────────── */}
         <div className="rounded-xl border border-zinc-200 dark:border-zinc-800/40 bg-white dark:bg-zinc-900 overflow-hidden shadow-sm">
@@ -1003,7 +1302,14 @@ export function CopyGeneratorPage() {
               </tr>
             </thead>
             <tbody>
-              {buckets.map((bucket) => {
+              {filteredBuckets.length === 0 && buckets.length > 0 && (
+                <tr>
+                  <td colSpan={9} className="px-3 py-10 text-center text-xs text-zinc-500">
+                    No buckets match the current filters.
+                  </td>
+                </tr>
+              )}
+              {filteredBuckets.map((bucket) => {
                 const isSelected = selectedIds.has(bucket.id);
                 const titleStatus = getStatus(bucket.id, "title");
                 const descStatus = getStatus(bucket.id, "description");
@@ -1226,6 +1532,15 @@ export function CopyGeneratorPage() {
           onRegenerate={handleRegenerate}
           onAddVariant={handleAddVariant}
           onDeleteVariant={handleDeleteVariant}
+        />
+      )}
+
+      {/* ── Merge Modal ────────────────────────────────────────────────── */}
+      {mergeModalOpen && (
+        <MergeBucketsModal
+          candidates={buckets.filter(b => selectedIds.has(b.id))}
+          onClose={() => setMergeModalOpen(false)}
+          onConfirm={doMergeBuckets}
         />
       )}
     </main>

@@ -14,8 +14,8 @@ from sqlalchemy.orm import selectinload
 from api.auth import require_auth
 from api.routers.outreach._helpers import LLOYD_USER_ID, bucket_dict, copy_dict
 from api.schemas import (
-    BucketCreate, BucketUpdate, CopyBulkGenerateRequest, CopyCreate,
-    CopyGenerateRequest, CopyRegenerateRequest, CopyUpdate,
+    BucketCreate, BucketMergeRequest, BucketUpdate, CopyBulkGenerateRequest,
+    CopyCreate, CopyGenerateRequest, CopyRegenerateRequest, CopyUpdate,
 )
 from db.models import (
     BucketCopy, BucketCopyGenerationJob, Contact, OutreachBucket,
@@ -701,4 +701,121 @@ async def retry_copy_generation_job(
         "bucket_id": new_job.bucket_id,
         "copy_type": new_job.copy_type,
         "status": new_job.status,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# BUCKET MERGE
+# Move all contacts from N source buckets into a single keeper bucket.
+# Refuses if any source has webinar assignments (would orphan copy refs).
+# Future imports with a source bucket's name redirect to the keeper via
+# `merged_into_bucket_id`.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@router.post("/buckets/merge", status_code=200)
+async def merge_buckets(
+    body: BucketMergeRequest,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    if not body.source_bucket_ids:
+        raise HTTPException(400, "source_bucket_ids is required")
+    if body.keeper_bucket_id in body.source_bucket_ids:
+        raise HTTPException(400, "keeper_bucket_id cannot also be a source")
+
+    # Validate keeper
+    keeper_result = await db.execute(
+        select(OutreachBucket).where(
+            OutreachBucket.id == body.keeper_bucket_id,
+            OutreachBucket.user_id == LLOYD_USER_ID,
+            OutreachBucket.deleted_at.is_(None),
+        )
+    )
+    keeper = keeper_result.scalar_one_or_none()
+    if not keeper:
+        raise HTTPException(404, "Keeper bucket not found")
+
+    # Validate all sources
+    src_result = await db.execute(
+        select(OutreachBucket).where(
+            OutreachBucket.id.in_(body.source_bucket_ids),
+            OutreachBucket.user_id == LLOYD_USER_ID,
+            OutreachBucket.deleted_at.is_(None),
+        )
+    )
+    sources = src_result.scalars().all()
+    if len(sources) != len(set(body.source_bucket_ids)):
+        raise HTTPException(404, "One or more source buckets not found")
+
+    # Refuse if any source has webinar assignments
+    src_ids = [s.id for s in sources]
+    assign_result = await db.execute(
+        select(
+            WebinarListAssignment.bucket_id,
+            sa_func.count().label("n"),
+        )
+        .where(WebinarListAssignment.bucket_id.in_(src_ids))
+        .group_by(WebinarListAssignment.bucket_id)
+    )
+    blocking = {row.bucket_id: row.n for row in assign_result}
+    if blocking:
+        name_by_id = {s.id: s.name for s in sources}
+        raise HTTPException(
+            409,
+            detail={
+                "message": "One or more buckets have webinar assignments and cannot be merged.",
+                "blocking_buckets": [
+                    {"id": bid, "name": name_by_id.get(bid, "Unknown"), "assignment_count": n}
+                    for bid, n in blocking.items()
+                ],
+            },
+        )
+
+    now = datetime.utcnow()
+
+    # Move contacts to the keeper
+    contacts_moved_result = await db.execute(
+        update(Contact)
+        .where(Contact.bucket_id.in_(src_ids), Contact.user_id == LLOYD_USER_ID)
+        .values(bucket_id=keeper.id)
+    )
+    contacts_moved = contacts_moved_result.rowcount or 0
+
+    # Soft-delete source copies
+    await db.execute(
+        update(BucketCopy)
+        .where(BucketCopy.bucket_id.in_(src_ids), BucketCopy.deleted_at.is_(None))
+        .values(deleted_at=now, is_primary=False)
+    )
+
+    # Point sources at the keeper and soft-delete them
+    await db.execute(
+        update(OutreachBucket)
+        .where(OutreachBucket.id.in_(src_ids))
+        .values(merged_into_bucket_id=keeper.id, deleted_at=now)
+    )
+
+    await db.flush()
+
+    # Recompute keeper's counts from contacts table
+    count_result = await db.execute(
+        select(
+            sa_func.count().label("total"),
+            sa_func.count().filter(Contact.outreach_status == "available").label("available"),
+        ).where(Contact.bucket_id == keeper.id)
+    )
+    row = count_result.one()
+    keeper.total_contacts = row.total or 0
+    keeper.remaining_contacts = row.available or 0
+    await db.flush()
+
+    return {
+        "keeper_bucket_id": keeper.id,
+        "keeper_name": keeper.name,
+        "contacts_moved": contacts_moved,
+        "merged_bucket_ids": src_ids,
+        "merged_bucket_count": len(src_ids),
+        "keeper_total_contacts": keeper.total_contacts,
+        "keeper_remaining_contacts": keeper.remaining_contacts,
     }

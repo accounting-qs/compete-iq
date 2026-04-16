@@ -19,6 +19,9 @@ class OutreachBucket(Base):
     countries: Mapped[Optional[dict]] = mapped_column(JSONB, server_default="[]")
     emp_range: Mapped[Optional[str]] = mapped_column(Text)
     source_file: Mapped[Optional[str]] = mapped_column(Text)
+    merged_into_bucket_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False), ForeignKey("outreach_buckets.id", ondelete="SET NULL")
+    )
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

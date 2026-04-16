@@ -52,6 +52,11 @@ class CopyBulkGenerateRequest(BaseModel):
     variant_count: int = Field(3, ge=1, le=10)
 
 
+class BucketMergeRequest(BaseModel):
+    keeper_bucket_id: str
+    source_bucket_ids: list[str]
+
+
 # ── Senders ────────────────────────────────────────────────────────────────
 
 class SenderCreate(BaseModel):

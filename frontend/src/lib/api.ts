@@ -280,6 +280,54 @@ export async function retryCopyGenerationJob(jobId: string): Promise<ApiCopyGenJ
   return res.json();
 }
 
+/* ── Bucket merge ──────────────────────────────────────────────────────── */
+
+export interface MergeBlockingBucket {
+  id: string;
+  name: string;
+  assignment_count: number;
+}
+
+export interface MergeBucketsResult {
+  keeper_bucket_id: string;
+  keeper_name: string;
+  contacts_moved: number;
+  merged_bucket_ids: string[];
+  merged_bucket_count: number;
+  keeper_total_contacts: number;
+  keeper_remaining_contacts: number;
+}
+
+export class MergeBlockedError extends Error {
+  blocking: MergeBlockingBucket[];
+  constructor(message: string, blocking: MergeBlockingBucket[]) {
+    super(message);
+    this.blocking = blocking;
+    this.name = "MergeBlockedError";
+  }
+}
+
+export async function mergeBuckets(data: {
+  keeper_bucket_id: string;
+  source_bucket_ids: string[];
+}): Promise<MergeBucketsResult> {
+  const res = await fetch(`${API_URL}/outreach/buckets/merge`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(data),
+  });
+  if (res.status === 409) {
+    const body = await res.json().catch(() => null);
+    const detail = body?.detail ?? {};
+    throw new MergeBlockedError(
+      detail.message || "Merge blocked by existing assignments",
+      Array.isArray(detail.blocking_buckets) ? detail.blocking_buckets : []
+    );
+  }
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to merge buckets"));
+  return res.json();
+}
+
 export async function updateCopy(
   copyId: string,
   data: { text?: string; is_primary?: boolean }

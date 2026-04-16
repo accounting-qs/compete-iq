@@ -530,8 +530,47 @@ async def delete_upload(
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
+async def _resolve_merge_chain(conn, start_id: str, preloaded: dict | None = None) -> str | None:
+    """Follow merged_into_bucket_id until we hit a non-deleted bucket.
+
+    Returns the final active bucket's id, or None if the chain is orphaned.
+    `preloaded` is an optional id→row dict to avoid extra queries.
+    """
+    seen: set[str] = set()
+    cache = dict(preloaded or {})
+
+    async def load(bid: str):
+        if bid in cache:
+            return cache[bid]
+        r = await conn.execute(
+            select(
+                OutreachBucket.__table__.c.id,
+                OutreachBucket.__table__.c.merged_into_bucket_id,
+                OutreachBucket.__table__.c.deleted_at,
+            ).where(OutreachBucket.__table__.c.id == bid)
+        )
+        row = r.first()
+        cache[bid] = row
+        return row
+
+    current = await load(start_id)
+    while current and current.deleted_at and current.merged_into_bucket_id:
+        if current.id in seen:
+            return None  # cycle guard
+        seen.add(current.id)
+        current = await load(current.merged_into_bucket_id)
+    if current and current.deleted_at is None:
+        return current.id
+    return None
+
+
 async def _ensure_buckets(engine, new_names: set, bucket_cache: dict):
-    """Create missing buckets (race-safe) and update bucket_cache with their IDs."""
+    """Create missing buckets (race-safe) and update bucket_cache with their IDs.
+
+    Names that match a soft-deleted bucket with `merged_into_bucket_id` are
+    resolved to the keeper so new contacts automatically land in the merged
+    target instead of the orphaned source.
+    """
     if not new_names:
         return
     async with engine.begin() as conn:
@@ -543,15 +582,34 @@ async def _ensure_buckets(engine, new_names: set, bucket_cache: dict):
         stmt = pg_insert(OutreachBucket.__table__).values(new_buckets)
         stmt = stmt.on_conflict_do_nothing(constraint="uq_outreach_buckets_user_name")
         await conn.execute(stmt)
-        # Re-fetch IDs (some may have existed already from concurrent imports)
+        # Re-fetch all rows for these names — including soft-deleted merged ones
         result = await conn.execute(
-            select(OutreachBucket.__table__.c.id, OutreachBucket.__table__.c.name).where(
+            select(
+                OutreachBucket.__table__.c.id,
+                OutreachBucket.__table__.c.name,
+                OutreachBucket.__table__.c.merged_into_bucket_id,
+                OutreachBucket.__table__.c.deleted_at,
+            ).where(
                 OutreachBucket.__table__.c.user_id == LLOYD_USER_ID,
                 OutreachBucket.__table__.c.name.in_(new_names),
             )
         )
-        for row in result:
-            bucket_cache[row.name] = row.id
+        rows = list(result)
+        preload = {r.id: r for r in rows}
+
+        # First pass: active buckets take precedence
+        for row in rows:
+            if row.deleted_at is None:
+                bucket_cache[row.name] = row.id
+
+        # Second pass: resolve merged sources — don't overwrite active entries
+        for row in rows:
+            if row.name in bucket_cache:
+                continue
+            if row.deleted_at and row.merged_into_bucket_id:
+                target = await _resolve_merge_chain(conn, row.id, preloaded=preload)
+                if target:
+                    bucket_cache[row.name] = target
 
 
 # ── Background import task ────────────────────────────────────────────────
@@ -653,17 +711,34 @@ async def _process_csv_import(
         FLOAT_FIELDS = {"confidence", "cost"}
         bucket_target_idx = next((idx for idx, t in col_map.items() if t == "bucket"), None)
 
-        # Load existing buckets
+        # Load existing buckets — include soft-deleted merged buckets so their
+        # names redirect new contacts to the keeper.
         bucket_cache: dict[str, str] = {}
         async with engine.begin() as conn:
             result = await conn.execute(
-                select(OutreachBucket.__table__.c.id, OutreachBucket.__table__.c.name).where(
-                    OutreachBucket.__table__.c.user_id == LLOYD_USER_ID,
-                    OutreachBucket.__table__.c.deleted_at.is_(None),
-                )
+                select(
+                    OutreachBucket.__table__.c.id,
+                    OutreachBucket.__table__.c.name,
+                    OutreachBucket.__table__.c.merged_into_bucket_id,
+                    OutreachBucket.__table__.c.deleted_at,
+                ).where(OutreachBucket.__table__.c.user_id == LLOYD_USER_ID)
             )
-            for row in result:
-                bucket_cache[row.name] = row.id
+            all_rows = list(result)
+            preload = {r.id: r for r in all_rows}
+
+            # Active buckets first — canonical name → id mapping
+            for row in all_rows:
+                if row.deleted_at is None:
+                    bucket_cache[row.name] = row.id
+
+            # Merged sources — resolve to keeper, don't overwrite active
+            for row in all_rows:
+                if row.name in bucket_cache:
+                    continue
+                if row.deleted_at and row.merged_into_bucket_id:
+                    target = await _resolve_merge_chain(conn, row.id, preloaded=preload)
+                    if target:
+                        bucket_cache[row.name] = target
 
         # Use total_rows from the upload step (newline count) — no need for a counting pass
         # The upload handler already set total_contacts
