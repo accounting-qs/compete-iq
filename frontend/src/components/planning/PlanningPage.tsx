@@ -685,6 +685,16 @@ export function PlanningPage() {
     });
   };
 
+  const selectAllInUniqueGroup = (listIds: string[]) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      const allSelected = listIds.every((id) => next.has(id));
+      if (allSelected) listIds.forEach((id) => next.delete(id));
+      else listIds.forEach((id) => next.add(id));
+      return next;
+    });
+  };
+
   const handleAssign = useCallback(async (webinarIdOverride?: string) => {
     const targetId = webinarIdOverride || assigningWebinarId;
     if (!assignBucket || !assignSender || assignVolume <= 0 || !targetId) return;
@@ -1910,9 +1920,11 @@ export function PlanningPage() {
                     </tr>
                     );
 
-                    const nodes: ReactNode[] = [];
-                    for (const g of groups) {
-                      if (g.lists.length >= 2) {
+                    // Split: bucket groups with multiple lists vs. single-list buckets
+                    const multiListGroups = groups.filter((g) => g.lists.length >= 2);
+                    const singleListLists = groups.filter((g) => g.lists.length === 1).map((g) => g.lists[0]);
+
+                    const renderBucketGroup = (g: Group) => {
                         const groupKey = `${w.id}::${g.bucketId}`;
                         const collapsed = collapsedBuckets.has(groupKey);
                         const sumSize = g.lists.reduce((s, l) => s + l.listSize, 0);
@@ -1927,8 +1939,9 @@ export function PlanningPage() {
                         const uniqSenders = [...senderMap.values()];
                         const groupListIds = g.lists.map((l) => l.id);
                         const allGroupSelected = groupListIds.length > 0 && groupListIds.every((id) => selectedIds.has(id));
+                        const allSetup = g.lists.every((l) => l.isSetup);
 
-                        nodes.push(
+                        const header = (
                           <tr
                             key={`bucket-${g.bucketId}`}
                             onClick={() => toggleBucketGroup(w.id, g.bucketId)}
@@ -1953,18 +1966,19 @@ export function PlanningPage() {
                             <td className="px-2 py-2"></td>
                             <td className="px-2 py-2"></td>
                             <td className="px-2 py-2" colSpan={2}>
-                              <span className="text-[10px] text-zinc-500 dark:text-zinc-400 uppercase tracking-wider font-semibold">
-                                {g.lists.length} lists grouped · {collapsed ? "collapsed" : "expanded"}
-                              </span>
+                              <div className="flex items-center gap-2">
+                                <span
+                                  title={g.bucketName}
+                                  className="text-zinc-800 dark:text-zinc-100 text-xs font-bold truncate max-w-[280px]"
+                                >
+                                  {g.bucketName}
+                                </span>
+                                <span className="text-[10px] font-semibold text-zinc-500 dark:text-zinc-400 px-1.5 py-0.5 rounded bg-zinc-200 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/40">
+                                  {g.lists.length}
+                                </span>
+                              </div>
                             </td>
-                            <td className="px-2 py-2 w-[130px] max-w-[130px]">
-                              <span
-                                title={g.bucketName}
-                                className="text-zinc-700 dark:text-zinc-200 text-[10px] font-semibold bg-zinc-200 dark:bg-zinc-800 px-1.5 py-0.5 rounded border border-zinc-300 dark:border-zinc-700/50 inline-block max-w-full truncate align-middle"
-                              >
-                                {g.bucketName}
-                              </span>
-                            </td>
+                            <td className="px-2 py-2"></td>
                             <td className="px-2 py-2">
                               <div className="flex items-center gap-1 flex-wrap">
                                 {uniqSenders.map((s) => <SenderBadge key={s.name} name={s.name} color={s.color} />)}
@@ -1982,15 +1996,111 @@ export function PlanningPage() {
                               {sumAccts > 0 ? sumAccts : ""}
                             </td>
                             <td className="px-2 py-2"></td>
-                            <td className="px-2 py-2"></td>
+                            <td className="px-2 py-2 text-center">
+                              {allSetup && (
+                                <span className="text-[9px] font-semibold text-emerald-500">✓</span>
+                              )}
+                            </td>
                             <td className="px-2 py-2"></td>
                           </tr>
                         );
-                        if (!collapsed) g.lists.forEach((l) => nodes.push(renderRow(l)));
-                      } else {
-                        nodes.push(renderRow(g.lists[0]));
-                      }
+                        return { header, collapsed, lists: g.lists };
+                    };
+
+                    const nodes: ReactNode[] = [];
+
+                    // 1) Multi-list bucket groups (bucket-name as header)
+                    for (const g of multiListGroups) {
+                      const { header, collapsed, lists } = renderBucketGroup(g);
+                      nodes.push(header);
+                      if (!collapsed) lists.forEach((l) => nodes.push(renderRow(l)));
                     }
+
+                    // 2) "Unique Buckets" synthetic group — all buckets that appear only once in this webinar
+                    if (singleListLists.length > 0) {
+                      const groupKey = `${w.id}::__unique__`;
+                      const collapsed = collapsedBuckets.has(groupKey);
+                      const sumSize = singleListLists.reduce((s, l) => s + l.listSize, 0);
+                      const sumRemain = singleListLists.reduce((s, l) => s + l.listRemain, 0);
+                      const sumAccts = Math.round(singleListLists.reduce((s, l) => s + l.accountsNeeded, 0));
+                      const senderMap = new Map<string, { name: string; color?: string }>();
+                      for (const cl of singleListLists) {
+                        if (cl.senderId && !senderMap.has(cl.senderId)) {
+                          senderMap.set(cl.senderId, { name: cl.sender, color: cl.senderColor });
+                        }
+                      }
+                      const uniqSenders = [...senderMap.values()];
+                      const uniqListIds = singleListLists.map((l) => l.id);
+                      const allGroupSelected = uniqListIds.length > 0 && uniqListIds.every((id) => selectedIds.has(id));
+
+                      nodes.push(
+                        <tr
+                          key={`unique-${w.id}`}
+                          onClick={() => {
+                            setCollapsedBuckets((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(groupKey)) next.delete(groupKey); else next.add(groupKey);
+                              return next;
+                            });
+                          }}
+                          className="bg-zinc-100/70 dark:bg-zinc-800/25 hover:bg-zinc-200/70 dark:hover:bg-zinc-800/45 cursor-pointer border-b border-zinc-200 dark:border-zinc-800/30 transition-colors"
+                        >
+                          <td className="px-2 py-2 text-center">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                              className={`text-zinc-500 dark:text-zinc-400 transition-transform duration-200 ${collapsed ? "" : "rotate-90"}`}>
+                              <path d="M9 18l6-6-6-6"/>
+                            </svg>
+                          </td>
+                          <td className="px-1 py-2">
+                            <div
+                              onClick={(e) => { e.stopPropagation(); selectAllInUniqueGroup(uniqListIds); }}
+                              className={`w-3.5 h-3.5 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${
+                                allGroupSelected ? "bg-violet-600 border-violet-600" : "border-zinc-500 hover:border-zinc-400"
+                              }`}
+                            >
+                              {allGroupSelected && <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3"><path d="M20 6L9 17l-5-5"/></svg>}
+                            </div>
+                          </td>
+                          <td className="px-2 py-2"></td>
+                          <td className="px-2 py-2"></td>
+                          <td className="px-2 py-2" colSpan={2}>
+                            <div className="flex items-center gap-2">
+                              <span className="text-zinc-800 dark:text-zinc-100 text-xs font-bold italic">
+                                Unique Buckets
+                              </span>
+                              <span className="text-[10px] font-semibold text-zinc-500 dark:text-zinc-400 px-1.5 py-0.5 rounded bg-zinc-200 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/40">
+                                {singleListLists.length}
+                              </span>
+                              <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
+                                · one assignment per bucket
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-2 py-2"></td>
+                          <td className="px-2 py-2">
+                            <div className="flex items-center gap-1 flex-wrap">
+                              {uniqSenders.map((s) => <SenderBadge key={s.name} name={s.name} color={s.color} />)}
+                            </div>
+                          </td>
+                          <td className="px-2 py-2 text-right font-mono font-bold text-zinc-800 dark:text-zinc-100">
+                            {sumSize > 0 ? sumSize.toLocaleString() : ""}
+                          </td>
+                          <td className="px-2 py-2 text-right font-mono font-bold text-violet-400">
+                            {sumRemain > 0 ? sumRemain.toLocaleString() : ""}
+                          </td>
+                          <td className="px-2 py-2"></td>
+                          <td className="px-2 py-2"></td>
+                          <td className="px-2 py-2 text-right font-mono font-bold text-emerald-400">
+                            {sumAccts > 0 ? sumAccts : ""}
+                          </td>
+                          <td className="px-2 py-2"></td>
+                          <td className="px-2 py-2"></td>
+                          <td className="px-2 py-2"></td>
+                        </tr>
+                      );
+                      if (!collapsed) singleListLists.forEach((l) => nodes.push(renderRow(l)));
+                    }
+
                     for (const l of unbucketedLists) nodes.push(renderRow(l));
                     for (const l of specialLists) nodes.push(renderRow(l));
                     return nodes;
