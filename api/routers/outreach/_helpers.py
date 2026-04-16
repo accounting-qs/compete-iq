@@ -106,6 +106,7 @@ def assignment_dict(a: WebinarListAssignment) -> dict:
         "emp_range_override": a.emp_range_override,
         "is_nonjoiners": a.is_nonjoiners,
         "is_no_list_data": a.is_no_list_data,
+        "is_setup": a.is_setup,
         "list_name": a.list_name,
         "display_order": a.display_order,
     }

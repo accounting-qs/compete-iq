@@ -112,6 +112,7 @@ class AssignmentUpdate(BaseModel):
     list_url: str | None = None
     list_name: str | None = None
     gcal_invited: int | None = None
+    is_setup: bool | None = None
 
 
 # ── Uploads ────────────────────────────────────────────────────────────────

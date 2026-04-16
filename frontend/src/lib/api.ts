@@ -128,6 +128,7 @@ export interface ApiAssignment {
   emp_range_override: string | null;
   is_nonjoiners: boolean;
   is_no_list_data: boolean;
+  is_setup: boolean;
   list_name: string | null;
   display_order: number;
   bucket_remaining?: number;
@@ -490,7 +491,7 @@ export async function assignBucketToWebinar(
 
 export async function updateAssignment(
   assignmentId: string,
-  data: Partial<{ title_copy_id: string; desc_copy_id: string; accounts_used: number; volume: number; remaining: number; list_url: string; list_name: string; gcal_invited: number }>
+  data: Partial<{ title_copy_id: string; desc_copy_id: string; accounts_used: number; volume: number; remaining: number; list_url: string; list_name: string; gcal_invited: number; is_setup: boolean }>
 ): Promise<ApiAssignment> {
   const res = await fetch(`${API_URL}/outreach/assignments/${assignmentId}`, {
     method: "PUT",
