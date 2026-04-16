@@ -46,6 +46,12 @@ class CopyRegenerateRequest(BaseModel):
     feedback: str
 
 
+class CopyBulkGenerateRequest(BaseModel):
+    bucket_ids: list[str]
+    copy_type: str = Field(..., pattern="^(title|description|both)$")
+    variant_count: int = Field(3, ge=1, le=10)
+
+
 # ── Senders ────────────────────────────────────────────────────────────────
 
 class SenderCreate(BaseModel):

@@ -18,6 +18,7 @@ from db.models.brain import (  # noqa: F401
 from db.models.outreach import (  # noqa: F401
     OutreachBucket, BucketCopy, OutreachSender,
     Webinar, WebinarListAssignment, CopyUsageLog,
+    BucketCopyGenerationJob,
 )
 from db.models.uploads import (  # noqa: F401
     UploadHistory, ContactCustomField, Contact,

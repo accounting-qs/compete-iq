@@ -234,6 +234,52 @@ export async function generateCopies(
   return res.json();
 }
 
+/* ── Bulk (background) copy generation ─────────────────────────────────── */
+
+export type CopyGenJobStatus = "pending" | "generating" | "done" | "failed";
+
+export interface ApiCopyGenJob {
+  id: string;
+  bucket_id: string;
+  copy_type: "title" | "description";
+  status: CopyGenJobStatus;
+  error_message?: string | null;
+  variant_count?: number;
+  created_at?: string | null;
+  completed_at?: string | null;
+}
+
+export async function generateCopiesBulk(data: {
+  bucket_ids: string[];
+  copy_type: "title" | "description" | "both";
+  variant_count?: number;
+}): Promise<{ jobs: ApiCopyGenJob[] }> {
+  const res = await fetch(`${API_URL}/outreach/buckets/copies/generate-bulk`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error("Failed to start bulk generation");
+  return res.json();
+}
+
+export async function fetchCopyGenerationStatus(): Promise<{ jobs: ApiCopyGenJob[] }> {
+  const res = await fetch(`${API_URL}/outreach/buckets/copies/generation-status`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to fetch generation status");
+  return res.json();
+}
+
+export async function retryCopyGenerationJob(jobId: string): Promise<ApiCopyGenJob> {
+  const res = await fetch(`${API_URL}/outreach/buckets/copies/generation-jobs/${jobId}/retry`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to retry generation job");
+  return res.json();
+}
+
 export async function updateCopy(
   copyId: string,
   data: { text?: string; is_primary?: boolean }

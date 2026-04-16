@@ -3,13 +3,16 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import {
   fetchBuckets,
-  generateCopies as apiGenerateCopies,
+  generateCopiesBulk as apiGenerateCopiesBulk,
+  fetchCopyGenerationStatus as apiFetchCopyGenStatus,
+  retryCopyGenerationJob as apiRetryCopyGenJob,
   createCopy as apiCreateCopy,
   updateCopy as apiUpdateCopy,
   regenerateCopy as apiRegenerateCopy,
   deleteCopy as apiDeleteCopy,
   type ApiBucket,
   type ApiCopy,
+  type ApiCopyGenJob,
 } from "@/lib/api";
 import { BrainPanel } from "./BrainPanel";
 
@@ -29,7 +32,12 @@ interface GeneratedCopy {
   generatedAt: string;
 }
 
-type GenerationStatus = "idle" | "generating" | "done";
+type GenerationStatus = "idle" | "pending" | "generating" | "done" | "failed";
+
+interface JobMeta {
+  jobId: string;
+  errorMessage?: string | null;
+}
 
 /* ─── Helpers: Convert API types to local types ────────────────────────── */
 
@@ -504,6 +512,8 @@ export function CopyGeneratorPage() {
   const [variantCount, setVariantCount] = useState(3);
   const [generatedCopies, setGeneratedCopies] = useState<Map<string, GeneratedCopy[]>>(new Map());
   const [statusMap, setStatusMap] = useState<Map<string, GenerationStatus>>(new Map());
+  // Maps `${bucketId}-${type}` → latest job info (for retry + error display)
+  const [jobMap, setJobMap] = useState<Map<string, JobMeta>>(new Map());
   const [activeAction, setActiveAction] = useState<"title" | "description" | "both" | null>(null);
   const [modalState, setModalState] = useState<{ bucketId: string; tab: "title" | "description" } | null>(null);
   const [editingCell, setEditingCell] = useState<{ bucketId: string; type: "title" | "description" } | null>(null);
@@ -515,7 +525,10 @@ export function CopyGeneratorPage() {
     let cancelled = false;
     async function load() {
       try {
-        const { buckets: apiBuckets } = await fetchBuckets(true);
+        const [{ buckets: apiBuckets }, jobResp] = await Promise.all([
+          fetchBuckets(true),
+          apiFetchCopyGenStatus().catch(() => ({ jobs: [] as ApiCopyGenJob[] })),
+        ]);
         if (cancelled) return;
         setBuckets(apiBuckets);
 
@@ -542,8 +555,20 @@ export function CopyGeneratorPage() {
           }
           if (copies.length > 0) restored.set(b.id, copies);
         }
+
+        // Overlay job status (pending/generating/failed override "done")
+        const restoredJobs = new Map<string, JobMeta>();
+        for (const j of jobResp.jobs) {
+          const key = `${j.bucket_id}-${j.copy_type}`;
+          restoredJobs.set(key, { jobId: j.id, errorMessage: j.error_message });
+          if (j.status === "pending" || j.status === "generating" || j.status === "failed") {
+            restoredStatus.set(key, j.status);
+          }
+        }
+
         setGeneratedCopies(restored);
         setStatusMap(restoredStatus);
+        setJobMap(restoredJobs);
       } catch (err) {
         console.error("Failed to load buckets:", err);
       } finally {
@@ -571,76 +596,156 @@ export function CopyGeneratorPage() {
     setSelectedIds(allSelected ? new Set() : new Set(buckets.map(b => b.id)));
   };
 
-  /* ── Generation (calls API) ─────────────────────────────────────────── */
+  /* ── Generation (background, poll-based) ────────────────────────────── */
 
   const doGenerateCopies = async (type: "title" | "description" | "both") => {
     if (selectedIds.size === 0) return;
     setActiveAction(type);
 
-    const newStatusMap = new Map(statusMap);
-    selectedIds.forEach(id => {
-      if (type === "title" || type === "both") newStatusMap.set(`${id}-title`, "generating");
-      if (type === "description" || type === "both") newStatusMap.set(`${id}-description`, "generating");
+    const ids = Array.from(selectedIds);
+    // Optimistic: mark selected as pending immediately
+    setStatusMap(prev => {
+      const next = new Map(prev);
+      ids.forEach(id => {
+        if (type === "title" || type === "both") next.set(`${id}-title`, "pending");
+        if (type === "description" || type === "both") next.set(`${id}-description`, "pending");
+      });
+      return next;
     });
-    setStatusMap(newStatusMap);
 
-    const selectedBuckets = buckets.filter(b => selectedIds.has(b.id));
-    for (const bucket of selectedBuckets) {
-      try {
-        const result = await apiGenerateCopies(bucket.id, {
-          copy_type: type,
-          variant_count: variantCount,
+    try {
+      await apiGenerateCopiesBulk({
+        bucket_ids: ids,
+        copy_type: type,
+        variant_count: variantCount,
+      });
+    } catch (err) {
+      console.error("Failed to start bulk generation:", err);
+      // Roll back optimistic state
+      setStatusMap(prev => {
+        const next = new Map(prev);
+        ids.forEach(id => {
+          if (type === "title" || type === "both") next.set(`${id}-title`, "idle");
+          if (type === "description" || type === "both") next.set(`${id}-description`, "idle");
         });
-
-        setGeneratedCopies(prev => {
-          const next = new Map(prev);
-          const existing = next.get(bucket.id) || [];
-
-          if ((type === "title" || type === "both") && result.titles.length > 0) {
-            const titleCopy: GeneratedCopy = {
-              bucketId: bucket.id, type: "title",
-              variants: result.titles.map(apiCopyToVariant),
-              generatedAt: new Date().toLocaleTimeString(),
-            };
-            const filtered = existing.filter(c => c.type !== "title");
-            filtered.push(titleCopy);
-            next.set(bucket.id, filtered);
-          }
-
-          if ((type === "description" || type === "both") && result.descriptions.length > 0) {
-            const current = next.get(bucket.id) || [];
-            const descCopy: GeneratedCopy = {
-              bucketId: bucket.id, type: "description",
-              variants: result.descriptions.map(apiCopyToVariant),
-              generatedAt: new Date().toLocaleTimeString(),
-            };
-            const filtered = current.filter(c => c.type !== "description");
-            filtered.push(descCopy);
-            next.set(bucket.id, filtered);
-          }
-
-          return next;
-        });
-
-        setStatusMap(prev => {
-          const next = new Map(prev);
-          if (type === "title" || type === "both") next.set(`${bucket.id}-title`, "done");
-          if (type === "description" || type === "both") next.set(`${bucket.id}-description`, "done");
-          return next;
-        });
-      } catch (err) {
-        console.error(`Failed to generate copies for ${bucket.name}:`, err);
-        setStatusMap(prev => {
-          const next = new Map(prev);
-          if (type === "title" || type === "both") next.set(`${bucket.id}-title`, "idle");
-          if (type === "description" || type === "both") next.set(`${bucket.id}-description`, "idle");
-          return next;
-        });
-      }
+        return next;
+      });
+    } finally {
+      setActiveAction(null);
     }
-
-    setActiveAction(null);
   };
+
+  const doRetryGeneration = async (bucketId: string, type: "title" | "description") => {
+    const key = `${bucketId}-${type}`;
+    const meta = jobMap.get(key);
+    if (!meta) return;
+    // Optimistic
+    setStatusMap(prev => {
+      const next = new Map(prev);
+      next.set(key, "pending");
+      return next;
+    });
+    try {
+      const newJob = await apiRetryCopyGenJob(meta.jobId);
+      setJobMap(prev => {
+        const next = new Map(prev);
+        next.set(key, { jobId: newJob.id, errorMessage: null });
+        return next;
+      });
+    } catch (err) {
+      console.error("Retry failed:", err);
+      setStatusMap(prev => {
+        const next = new Map(prev);
+        next.set(key, "failed");
+        return next;
+      });
+    }
+  };
+
+  /* ── Poll job status while any are in-flight ────────────────────────── */
+
+  useEffect(() => {
+    const hasActive = Array.from(statusMap.values()).some(
+      s => s === "pending" || s === "generating"
+    );
+    if (!hasActive) return;
+
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      if (cancelled) return;
+      try {
+        const { jobs } = await apiFetchCopyGenStatus();
+        if (cancelled) return;
+
+        // Which (bucket, type) keys just transitioned from non-done to done?
+        const newlyDone: Array<{ bucketId: string; type: "title" | "description" }> = [];
+
+        setStatusMap(prev => {
+          const next = new Map(prev);
+          for (const j of jobs) {
+            const key = `${j.bucket_id}-${j.copy_type}`;
+            const prevStatus = prev.get(key);
+            if (prevStatus !== "done" && j.status === "done") {
+              newlyDone.push({ bucketId: j.bucket_id, type: j.copy_type });
+            }
+            // Only reflect jobs we care about (active or terminal)
+            if (j.status === "pending" || j.status === "generating" || j.status === "failed") {
+              next.set(key, j.status);
+            } else if (j.status === "done") {
+              next.set(key, "done");
+            }
+          }
+          return next;
+        });
+
+        setJobMap(prev => {
+          const next = new Map(prev);
+          for (const j of jobs) {
+            next.set(`${j.bucket_id}-${j.copy_type}`, {
+              jobId: j.id,
+              errorMessage: j.error_message,
+            });
+          }
+          return next;
+        });
+
+        // For freshly-completed jobs, re-fetch bucket copies so variants appear
+        if (newlyDone.length > 0) {
+          const { buckets: refreshed } = await fetchBuckets(true);
+          if (cancelled) return;
+          setBuckets(refreshed);
+          setGeneratedCopies(prev => {
+            const next = new Map(prev);
+            const touched = new Set(newlyDone.map(d => d.bucketId));
+            for (const b of refreshed) {
+              if (!touched.has(b.id)) continue;
+              const copies: GeneratedCopy[] = [];
+              if (b.titles && b.titles.length > 0) {
+                copies.push({
+                  bucketId: b.id, type: "title",
+                  variants: b.titles.map(apiCopyToVariant),
+                  generatedAt: b.titles[0]?.created_at || "",
+                });
+              }
+              if (b.descriptions && b.descriptions.length > 0) {
+                copies.push({
+                  bucketId: b.id, type: "description",
+                  variants: b.descriptions.map(apiCopyToVariant),
+                  generatedAt: b.descriptions[0]?.created_at || "",
+                });
+              }
+              next.set(b.id, copies);
+            }
+            return next;
+          });
+        }
+      } catch (err) {
+        console.error("Polling failed:", err);
+      }
+    }, 2500);
+
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [statusMap]);
 
   /* ── Helpers ─────────────────────────────────────────────────────────── */
 
@@ -933,10 +1038,30 @@ export function CopyGeneratorPage() {
 
                     {/* ── Title Cell ───────────────────────────────── */}
                     <td className="px-3 py-2">
-                      {titleStatus === "generating" ? (
+                      {titleStatus === "pending" ? (
+                        <span className="inline-flex items-center gap-1.5 text-[10px] text-zinc-500 font-medium">
+                          <LoadingSpinner /> Queued…
+                        </span>
+                      ) : titleStatus === "generating" ? (
                         <span className="inline-flex items-center gap-1.5 text-[10px] text-amber-500 font-medium">
                           <LoadingSpinner /> Generating…
                         </span>
+                      ) : titleStatus === "failed" ? (
+                        <div className="flex flex-col gap-1">
+                          <span
+                            className="inline-flex items-center gap-1 text-[10px] text-red-500 font-medium"
+                            title={jobMap.get(`${bucket.id}-title`)?.errorMessage || "Generation failed"}
+                          >
+                            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                            Failed
+                          </span>
+                          <button
+                            onClick={() => doRetryGeneration(bucket.id, "title")}
+                            className="text-[10px] font-medium text-violet-500 hover:text-violet-400 self-start"
+                          >
+                            Retry
+                          </button>
+                        </div>
                       ) : primaryTitle ? (
                         <div className="max-w-[280px]">
                           {isTitleEditing ? (
@@ -998,10 +1123,30 @@ export function CopyGeneratorPage() {
 
                     {/* ── Description Cell ─────────────────────────── */}
                     <td className="px-3 py-2">
-                      {descStatus === "generating" ? (
+                      {descStatus === "pending" ? (
+                        <span className="inline-flex items-center gap-1.5 text-[10px] text-zinc-500 font-medium">
+                          <LoadingSpinner /> Queued…
+                        </span>
+                      ) : descStatus === "generating" ? (
                         <span className="inline-flex items-center gap-1.5 text-[10px] text-amber-500 font-medium">
                           <LoadingSpinner /> Generating…
                         </span>
+                      ) : descStatus === "failed" ? (
+                        <div className="flex flex-col gap-1">
+                          <span
+                            className="inline-flex items-center gap-1 text-[10px] text-red-500 font-medium"
+                            title={jobMap.get(`${bucket.id}-description`)?.errorMessage || "Generation failed"}
+                          >
+                            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                            Failed
+                          </span>
+                          <button
+                            onClick={() => doRetryGeneration(bucket.id, "description")}
+                            className="text-[10px] font-medium text-blue-500 hover:text-blue-400 self-start"
+                          >
+                            Retry
+                          </button>
+                        </div>
                       ) : primaryDesc ? (
                         <div className="max-w-[320px]">
                           {isDescEditing ? (

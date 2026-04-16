@@ -1,6 +1,7 @@
 """Outreach sub-router: Buckets + Bucket Copies CRUD."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime
@@ -12,14 +13,23 @@ from sqlalchemy.orm import selectinload
 
 from api.auth import require_auth
 from api.routers.outreach._helpers import LLOYD_USER_ID, bucket_dict, copy_dict
-from api.schemas import BucketCreate, BucketUpdate, CopyCreate, CopyGenerateRequest, CopyUpdate, CopyRegenerateRequest
-from db.models import OutreachBucket, BucketCopy, Contact, WebinarListAssignment
-from db.session import get_db
+from api.schemas import (
+    BucketCreate, BucketUpdate, CopyBulkGenerateRequest, CopyCreate,
+    CopyGenerateRequest, CopyRegenerateRequest, CopyUpdate,
+)
+from db.models import (
+    BucketCopy, BucketCopyGenerationJob, Contact, OutreachBucket,
+    WebinarListAssignment,
+)
+from db.session import AsyncSessionLocal, get_db
 from services.generation import generate_bucket_copies, regenerate_bucket_copy
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Keep references so tasks aren't garbage-collected mid-flight
+_active_copy_gen_tasks: dict[str, asyncio.Task] = {}
 
 
 
@@ -175,7 +185,9 @@ async def create_copy(
     _: str = Depends(require_auth),
 ):
     result = await db.execute(
-        select(OutreachBucket).where(OutreachBucket.id == bucket_id, OutreachBucket.user_id == LLOYD_USER_ID)
+        select(OutreachBucket)
+        .where(OutreachBucket.id == bucket_id, OutreachBucket.user_id == LLOYD_USER_ID)
+        .with_for_update()
     )
     bucket = result.scalar_one_or_none()
     if not bucket:
@@ -211,7 +223,9 @@ async def generate_copies(
     _: str = Depends(require_auth),
 ):
     result = await db.execute(
-        select(OutreachBucket).where(OutreachBucket.id == bucket_id, OutreachBucket.user_id == LLOYD_USER_ID)
+        select(OutreachBucket)
+        .where(OutreachBucket.id == bucket_id, OutreachBucket.user_id == LLOYD_USER_ID)
+        .with_for_update()
     )
     bucket = result.scalar_one_or_none()
     if not bucket:
@@ -246,7 +260,8 @@ async def generate_copies(
                 BucketCopy.copy_type == copy_type,
             )
         )
-        max_idx = max_idx_result.scalar() or -1
+        max_idx = max_idx_result.scalar()
+        next_start = (max_idx + 1) if max_idx is not None else 0
 
         # Generate copies via AI brain
         try:
@@ -269,7 +284,7 @@ async def generate_copies(
                 user_id=LLOYD_USER_ID,
                 bucket_id=bucket_id,
                 copy_type=copy_type,
-                variant_index=max_idx + 1 + i,
+                variant_index=next_start + i,
                 text=text,
                 is_primary=(i == 0),
                 generation_batch_id=batch_id,
@@ -339,7 +354,9 @@ async def regenerate_copy(
 
     original.ai_feedback = body.feedback
 
-    bucket_result = await db.execute(select(OutreachBucket).where(OutreachBucket.id == original.bucket_id))
+    bucket_result = await db.execute(
+        select(OutreachBucket).where(OutreachBucket.id == original.bucket_id).with_for_update()
+    )
     bucket = bucket_result.scalar_one_or_none()
 
     max_idx_result = await db.execute(
@@ -348,7 +365,8 @@ async def regenerate_copy(
             BucketCopy.copy_type == original.copy_type,
         )
     )
-    max_idx = max_idx_result.scalar() or 0
+    max_idx = max_idx_result.scalar()
+    next_idx = (max_idx + 1) if max_idx is not None else 0
 
     # Regenerate via AI brain with feedback
     try:
@@ -369,7 +387,7 @@ async def regenerate_copy(
         user_id=LLOYD_USER_ID,
         bucket_id=original.bucket_id,
         copy_type=original.copy_type,
-        variant_index=max_idx + 1,
+        variant_index=next_idx,
         text=text,
         is_primary=False,
         ai_feedback=body.feedback,
@@ -411,3 +429,276 @@ async def delete_copy(
             next_copy.is_primary = True
 
     await db.flush()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# BACKGROUND COPY GENERATION
+# Survives browser navigation — work continues server-side after the HTTP
+# response is returned. Frontend polls status instead of awaiting.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+async def _run_single_copy_generation_job(job_id: str) -> None:
+    """Execute one copy-generation job. Uses its own DB session."""
+    async with AsyncSessionLocal() as db:
+        try:
+            job_result = await db.execute(
+                select(BucketCopyGenerationJob).where(BucketCopyGenerationJob.id == job_id)
+            )
+            job = job_result.scalar_one_or_none()
+            if not job:
+                logger.warning("Copy generation job %s not found", job_id)
+                return
+
+            # Mark generating
+            job.status = "generating"
+            job.started_at = datetime.utcnow()
+            job.error_message = None
+            await db.commit()
+
+            bucket_result = await db.execute(
+                select(OutreachBucket).where(
+                    OutreachBucket.id == job.bucket_id,
+                    OutreachBucket.user_id == job.user_id,
+                ).with_for_update()
+            )
+            bucket = bucket_result.scalar_one_or_none()
+            if not bucket:
+                job.status = "failed"
+                job.error_message = "Bucket not found"
+                job.completed_at = datetime.utcnow()
+                await db.commit()
+                return
+
+            # Un-primary old copies of this type
+            old_copies = await db.execute(
+                select(BucketCopy).where(
+                    BucketCopy.bucket_id == job.bucket_id,
+                    BucketCopy.copy_type == job.copy_type,
+                    BucketCopy.deleted_at.is_(None),
+                )
+            )
+            for old in old_copies.scalars().all():
+                old.is_primary = False
+
+            # Continue variant_index sequence (avoid duplicate V-numbers)
+            max_idx_result = await db.execute(
+                select(sa_func.max(BucketCopy.variant_index)).where(
+                    BucketCopy.bucket_id == job.bucket_id,
+                    BucketCopy.copy_type == job.copy_type,
+                )
+            )
+            max_idx = max_idx_result.scalar()
+            next_start = (max_idx + 1) if max_idx is not None else 0
+            is_first_ever = max_idx is None
+
+            texts = await generate_bucket_copies(
+                db=db,
+                user_id=job.user_id,
+                bucket_name=bucket.name,
+                industry=bucket.industry,
+                countries=bucket.countries,
+                emp_range=bucket.emp_range,
+                copy_type=job.copy_type,
+                count=job.variant_count,
+            )
+
+            batch_id = str(uuid.uuid4())
+            for i, text in enumerate(texts):
+                db.add(BucketCopy(
+                    user_id=job.user_id,
+                    bucket_id=job.bucket_id,
+                    copy_type=job.copy_type,
+                    variant_index=next_start + i,
+                    text=text,
+                    is_primary=(is_first_ever and i == 0),
+                    generation_batch_id=batch_id,
+                ))
+
+            job.status = "done"
+            job.completed_at = datetime.utcnow()
+            await db.commit()
+        except Exception as exc:
+            logger.exception("Copy generation job %s failed", job_id)
+            try:
+                await db.rollback()
+                fail_result = await db.execute(
+                    select(BucketCopyGenerationJob).where(BucketCopyGenerationJob.id == job_id)
+                )
+                job = fail_result.scalar_one_or_none()
+                if job:
+                    job.status = "failed"
+                    job.error_message = str(exc)[:500]
+                    job.completed_at = datetime.utcnow()
+                    await db.commit()
+            except Exception:
+                logger.exception("Failed to mark job %s as failed", job_id)
+        finally:
+            _active_copy_gen_tasks.pop(job_id, None)
+
+
+def _spawn_copy_generation_job(job_id: str) -> None:
+    """Fire-and-forget: runs the job in a detached task."""
+    task = asyncio.create_task(_run_single_copy_generation_job(job_id))
+    _active_copy_gen_tasks[job_id] = task
+
+
+@router.post("/buckets/copies/generate-bulk", status_code=202)
+async def generate_copies_bulk(
+    body: CopyBulkGenerateRequest,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Kick off background copy generation for one or more buckets.
+
+    Returns immediately with created job IDs. Poll /generation-status to
+    track progress. Work continues server-side regardless of client.
+    """
+    if not body.bucket_ids:
+        raise HTTPException(400, "bucket_ids is required")
+
+    # Validate buckets belong to user
+    b_result = await db.execute(
+        select(OutreachBucket.id).where(
+            OutreachBucket.id.in_(body.bucket_ids),
+            OutreachBucket.user_id == LLOYD_USER_ID,
+            OutreachBucket.deleted_at.is_(None),
+        )
+    )
+    valid_bucket_ids = {row[0] for row in b_result.all()}
+    if not valid_bucket_ids:
+        raise HTTPException(404, "No valid buckets found")
+
+    types_to_gen = []
+    if body.copy_type in ("title", "both"):
+        types_to_gen.append("title")
+    if body.copy_type in ("description", "both"):
+        types_to_gen.append("description")
+
+    created_jobs: list[BucketCopyGenerationJob] = []
+    for bucket_id in valid_bucket_ids:
+        for ctype in types_to_gen:
+            # If there's already a live job for this (bucket, type), skip
+            existing = await db.execute(
+                select(BucketCopyGenerationJob).where(
+                    BucketCopyGenerationJob.bucket_id == bucket_id,
+                    BucketCopyGenerationJob.copy_type == ctype,
+                    BucketCopyGenerationJob.status.in_(("pending", "generating")),
+                )
+            )
+            if existing.scalar_one_or_none():
+                continue
+
+            job = BucketCopyGenerationJob(
+                user_id=LLOYD_USER_ID,
+                bucket_id=bucket_id,
+                copy_type=ctype,
+                variant_count=body.variant_count,
+                status="pending",
+            )
+            db.add(job)
+            created_jobs.append(job)
+
+    await db.flush()
+    # Commit now so the background task can see the job rows on its own session
+    await db.commit()
+
+    for job in created_jobs:
+        _spawn_copy_generation_job(job.id)
+
+    return {
+        "jobs": [
+            {
+                "id": j.id,
+                "bucket_id": j.bucket_id,
+                "copy_type": j.copy_type,
+                "status": j.status,
+            } for j in created_jobs
+        ],
+    }
+
+
+@router.get("/buckets/copies/generation-status")
+async def get_copy_generation_status(
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Return the latest generation job per (bucket, copy_type).
+
+    Used by the frontend to restore status badges after navigation and to
+    poll progress during active generation.
+    """
+    # Latest job per (bucket_id, copy_type) via window function — but
+    # simpler: fetch all recent and dedupe in Python.
+    result = await db.execute(
+        select(BucketCopyGenerationJob)
+        .where(BucketCopyGenerationJob.user_id == LLOYD_USER_ID)
+        .order_by(BucketCopyGenerationJob.created_at.desc())
+    )
+    rows = result.scalars().all()
+
+    latest: dict[tuple[str, str], BucketCopyGenerationJob] = {}
+    for j in rows:
+        key = (j.bucket_id, j.copy_type)
+        if key not in latest:
+            latest[key] = j
+
+    return {
+        "jobs": [
+            {
+                "id": j.id,
+                "bucket_id": j.bucket_id,
+                "copy_type": j.copy_type,
+                "status": j.status,
+                "error_message": j.error_message,
+                "variant_count": j.variant_count,
+                "created_at": j.created_at.isoformat() if j.created_at else None,
+                "completed_at": j.completed_at.isoformat() if j.completed_at else None,
+            }
+            for j in latest.values()
+        ],
+    }
+
+
+@router.post("/buckets/copies/generation-jobs/{job_id}/retry", status_code=202)
+async def retry_copy_generation_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Retry a failed generation job.
+
+    Creates a new job row with the same (bucket, copy_type, variant_count)
+    and kicks off the background task. Keeps the old row for audit.
+    """
+    result = await db.execute(
+        select(BucketCopyGenerationJob).where(
+            BucketCopyGenerationJob.id == job_id,
+            BucketCopyGenerationJob.user_id == LLOYD_USER_ID,
+        )
+    )
+    old_job = result.scalar_one_or_none()
+    if not old_job:
+        raise HTTPException(404, "Job not found")
+    if old_job.status in ("pending", "generating"):
+        raise HTTPException(409, "Job is still running")
+
+    new_job = BucketCopyGenerationJob(
+        user_id=LLOYD_USER_ID,
+        bucket_id=old_job.bucket_id,
+        copy_type=old_job.copy_type,
+        variant_count=old_job.variant_count,
+        status="pending",
+    )
+    db.add(new_job)
+    await db.flush()
+    await db.commit()
+
+    _spawn_copy_generation_job(new_job.id)
+
+    return {
+        "id": new_job.id,
+        "bucket_id": new_job.bucket_id,
+        "copy_type": new_job.copy_type,
+        "status": new_job.status,
+    }

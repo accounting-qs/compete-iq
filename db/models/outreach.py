@@ -158,3 +158,32 @@ class CopyUsageLog(Base):
         Index("ix_copy_usage_log_copy", "bucket_copy_id"),
         Index("ix_copy_usage_log_assignment", "assignment_id"),
     )
+
+
+class BucketCopyGenerationJob(Base):
+    """Tracks async copy-generation work so it survives browser navigation.
+
+    One job row per (bucket, copy_type). Frontend polls status instead of
+    awaiting a long HTTP call.
+    """
+    __tablename__ = "bucket_copy_generation_jobs"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    bucket_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("outreach_buckets.id", ondelete="CASCADE"), nullable=False)
+    copy_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    variant_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="pending")
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("copy_type IN ('title', 'description')", name="ck_copy_gen_jobs_type"),
+        CheckConstraint("status IN ('pending', 'generating', 'done', 'failed')", name="ck_copy_gen_jobs_status"),
+        Index("ix_copy_gen_jobs_user", "user_id"),
+        Index("ix_copy_gen_jobs_bucket_type", "bucket_id", "copy_type"),
+        Index("ix_copy_gen_jobs_status", "status"),
+    )
