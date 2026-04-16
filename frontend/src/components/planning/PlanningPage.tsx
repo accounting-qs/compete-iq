@@ -2263,6 +2263,7 @@ export function PlanningPage() {
 
       {/* ── Planning Copy Variant Modal (shared with Copy Generator) ── */}
       {planningCopyModal && modalBucketData && (() => {
+        const modalWebinar = webinars.find(w => w.id === planningCopyModal.webinarId);
         const targetList = webinars.flatMap(w => w.lists).find(l => l.id === planningCopyModal.listId);
         if (!targetList) return null;
         const assignedTitleId = targetList.titleVariants?.find(v => v.selected)?.id;
@@ -2282,6 +2283,8 @@ export function PlanningPage() {
             titles={titles}
             descriptions={descriptions}
             contextLabel={`List: ${targetList.bucket} · ${targetList.sender}`}
+            registrationLink={modalWebinar?.registrationLink || ""}
+            unsubscribeLink={modalWebinar?.unsubscribeLink || ""}
             onClose={closeVariationsModal}
             onUpdateVariant={handleModalUpdateVariant}
             onSetPrimary={handleModalSetPrimary}

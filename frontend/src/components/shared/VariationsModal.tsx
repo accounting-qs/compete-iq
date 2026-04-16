@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
 import type { ApiBucket, ApiCopy } from "@/lib/api";
 
 export interface CopyVariant {
@@ -23,6 +23,73 @@ function LoadingSpinner() {
   );
 }
 
+/**
+ * Render copy text with "Register" / "Unsubscribe" keywords hyperlinked
+ * (case-insensitive). If no links are provided, returns the original text.
+ */
+function linkifyCopyText(
+  text: string,
+  registrationLink: string,
+  unsubscribeLink: string,
+): ReactNode {
+  if (!registrationLink && !unsubscribeLink) return text;
+  const patterns: string[] = [];
+  if (registrationLink) patterns.push("register");
+  if (unsubscribeLink) patterns.push("unsubscribe");
+  if (patterns.length === 0) return text;
+
+  const regex = new RegExp(`(${patterns.join("|")})`, "gi");
+  const parts = text.split(regex);
+  if (parts.length === 1) return text;
+
+  return parts.map((part, i) => {
+    const lower = part.toLowerCase();
+    if (lower === "register" && registrationLink) {
+      return (
+        <a key={i} href={registrationLink} target="_blank" rel="noopener noreferrer"
+          className="text-violet-500 hover:text-violet-400 underline underline-offset-2"
+          onClick={(e) => e.stopPropagation()}
+        >{part}</a>
+      );
+    }
+    if (lower === "unsubscribe" && unsubscribeLink) {
+      return (
+        <a key={i} href={unsubscribeLink} target="_blank" rel="noopener noreferrer"
+          className="text-zinc-500 hover:text-zinc-400 underline underline-offset-2"
+          onClick={(e) => e.stopPropagation()}
+        >{part}</a>
+      );
+    }
+    return part;
+  });
+}
+
+/**
+ * Build an HTML string version of copy text with hyperlinks preserved,
+ * so pasting into rich-text editors keeps the links.
+ */
+function linkifyToHtml(
+  text: string,
+  registrationLink: string,
+  unsubscribeLink: string,
+): string {
+  let html = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  html = html.replace(/\n/g, "<br>");
+  const patterns: string[] = [];
+  if (registrationLink) patterns.push("register");
+  if (unsubscribeLink) patterns.push("unsubscribe");
+  if (patterns.length > 0) {
+    const regex = new RegExp(`(${patterns.join("|")})`, "gi");
+    html = html.replace(regex, (match) => {
+      const lower = match.toLowerCase();
+      if (lower === "register" && registrationLink) return `<a href="${registrationLink}">${match}</a>`;
+      if (lower === "unsubscribe" && unsubscribeLink) return `<a href="${unsubscribeLink}">${match}</a>`;
+      return match;
+    });
+  }
+  return html;
+}
+
 export interface VariationsModalProps {
   bucket: ApiBucket;
   initialTab: "title" | "description";
@@ -38,6 +105,10 @@ export interface VariationsModalProps {
   onPickForList?: (bucketId: string, type: "title" | "description", variantId: string) => void;
   /** Optional: per-tab subtitle shown under bucket name (e.g. "List: Wealth Mgmt · Santi"). */
   contextLabel?: string;
+  /** Optional: webinar registration URL — replaces "Register" keyword with a hyperlink. */
+  registrationLink?: string;
+  /** Optional: webinar unsubscribe URL — replaces "Unsubscribe" keyword with a hyperlink. */
+  unsubscribeLink?: string;
 }
 
 export function VariationsModal({
@@ -53,6 +124,8 @@ export function VariationsModal({
   onDeleteVariant,
   onPickForList,
   contextLabel,
+  registrationLink = "",
+  unsubscribeLink = "",
 }: VariationsModalProps) {
   const [activeTab, setActiveTab] = useState<"title" | "description">(initialTab);
   const [feedback, setFeedback] = useState("");
@@ -102,10 +175,25 @@ export function VariationsModal({
   }, []);
 
   const handleCopy = useCallback((id: string, text: string) => {
-    navigator.clipboard.writeText(text);
+    // If links are provided, write both plain text and HTML (with hyperlinks)
+    // so pasting into rich-text editors preserves the links.
+    if ((registrationLink || unsubscribeLink) && typeof ClipboardItem !== "undefined") {
+      try {
+        const html = linkifyToHtml(text, registrationLink, unsubscribeLink);
+        const item = new ClipboardItem({
+          "text/plain": new Blob([text], { type: "text/plain" }),
+          "text/html": new Blob([html], { type: "text/html" }),
+        });
+        navigator.clipboard.write([item]);
+      } catch {
+        navigator.clipboard.writeText(text);
+      }
+    } else {
+      navigator.clipboard.writeText(text);
+    }
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
-  }, []);
+  }, [registrationLink, unsubscribeLink]);
 
   const handleStartEdit = useCallback((id: string, text: string) => {
     setEditingId(id);
@@ -353,7 +441,7 @@ export function VariationsModal({
                         className="text-sm text-zinc-700 dark:text-zinc-300 leading-relaxed cursor-text whitespace-pre-wrap font-sans"
                         onClick={() => handleStartEdit(v.id, v.text)}
                       >
-                        {v.text}
+                        {linkifyCopyText(v.text, registrationLink, unsubscribeLink)}
                       </pre>
                     )}
                   </div>
