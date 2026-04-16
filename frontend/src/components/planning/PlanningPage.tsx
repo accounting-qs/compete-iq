@@ -8,8 +8,10 @@ import {
   createSender as apiCreateSender, deleteAssignment as apiDeleteAssignment,
   updateAssignment as apiUpdateAssignment, updateWebinar as apiUpdateWebinar,
   deleteWebinar as apiDeleteWebinar, deleteCopy,
+  createCopy as apiCreateCopy, updateCopy as apiUpdateCopy, regenerateCopy as apiRegenerateCopy,
   type ApiBucket, type ApiSender, type ApiWebinar, type ApiAssignment, type ApiCopy,
 } from "@/lib/api";
+import { VariationsModal, apiCopyToVariant, type CopyVariant } from "../shared/VariationsModal";
 
 /* ─── Copy link helper ────────────────────────────────────────────────── */
 
@@ -421,7 +423,11 @@ export function PlanningPage() {
   const [copyModalLists, setCopyModalLists] = useState<PlannedList[]>([]);
   const [generatingCopies, setGeneratingCopies] = useState(false);
   const [planningCopyModal, setPlanningCopyModal] = useState<{ listId: string; webinarId: string; tab: "title" | "description" } | null>(null);
-  const [copiedVariantId, setCopiedVariantId] = useState<string | null>(null);
+  const [modalBucketData, setModalBucketData] = useState<{
+    bucket: ApiBucket;
+    titles: ApiCopy[];
+    descriptions: ApiCopy[];
+  } | null>(null);
 
   // New Webinar modal state
   const [showNewWebinarModal, setShowNewWebinarModal] = useState(false);
@@ -892,6 +898,164 @@ export function PlanningPage() {
     setCopyModalLists((prev) => prev.map(removeFromList as any));
   };
 
+  /* ── Variations Modal (shared with Copy Generator) ─────────────────── */
+
+  const openVariationsModal = useCallback(async (listId: string, webinarId: string, tab: "title" | "description") => {
+    const list = webinars.find(w => w.id === webinarId)?.lists.find(l => l.id === listId);
+    if (!list?.bucketId) return;
+    setPlanningCopyModal({ listId, webinarId, tab });
+    setModalBucketData(null);
+    try {
+      const bucketData = buckets.find(b => b.id === list.bucketId);
+      if (!bucketData) return;
+      const copies = await fetchBucketCopies(list.bucketId);
+      setModalBucketData({
+        bucket: bucketData,
+        titles: copies.titles,
+        descriptions: copies.descriptions,
+      });
+    } catch (err) {
+      console.error("Failed to load bucket copies:", err);
+    }
+  }, [webinars, buckets]);
+
+  const closeVariationsModal = () => {
+    setPlanningCopyModal(null);
+    setModalBucketData(null);
+  };
+
+  // Sync bucket copy updates back to the list's variant arrays (so table row stays current)
+  const syncBucketCopiesToList = useCallback((
+    bucketId: string,
+    titles: ApiCopy[],
+    descriptions: ApiCopy[],
+  ) => {
+    setWebinars((prev) => prev.map((w) => ({
+      ...w,
+      lists: w.lists.map((l) => {
+        if (l.bucketId !== bucketId) return l;
+        const selectedTitleId = l.titleVariants?.find(v => v.selected)?.id;
+        const selectedDescId = l.descVariants?.find(v => v.selected)?.id;
+        const newTitleVariants = titles.map(c => ({
+          id: c.id, text: c.text, variantIndex: c.variant_index,
+          selected: selectedTitleId ? c.id === selectedTitleId : c.is_primary,
+        }));
+        const newDescVariants = descriptions.map(c => ({
+          id: c.id, text: c.text, variantIndex: c.variant_index,
+          selected: selectedDescId ? c.id === selectedDescId : c.is_primary,
+        }));
+        const selectedTitle = newTitleVariants.find(v => v.selected);
+        return {
+          ...l,
+          titleVariants: newTitleVariants,
+          descVariants: newDescVariants,
+          title: selectedTitle?.text ?? l.title,
+          copiesGenerated: newTitleVariants.length > 0 || newDescVariants.length > 0,
+        };
+      }),
+    })));
+  }, []);
+
+  const handleModalAddVariant = useCallback(async (bucketId: string, type: "title" | "description", text: string) => {
+    try {
+      const newCopy = await apiCreateCopy(bucketId, { copy_type: type, text });
+      setModalBucketData(prev => {
+        if (!prev || prev.bucket.id !== bucketId) return prev;
+        const key = type === "title" ? "titles" : "descriptions";
+        const next = { ...prev, [key]: [...prev[key], newCopy] };
+        syncBucketCopiesToList(bucketId, next.titles, next.descriptions);
+        return next;
+      });
+    } catch (err) {
+      console.error("Failed to add variant:", err);
+    }
+  }, [syncBucketCopiesToList]);
+
+  const handleModalRegenerate = useCallback(async (bucketId: string, type: "title" | "description", copyId: string, feedback: string) => {
+    try {
+      const newCopy = await apiRegenerateCopy(copyId, feedback);
+      setModalBucketData(prev => {
+        if (!prev || prev.bucket.id !== bucketId) return prev;
+        const key = type === "title" ? "titles" : "descriptions";
+        const next = { ...prev, [key]: [...prev[key], newCopy] };
+        syncBucketCopiesToList(bucketId, next.titles, next.descriptions);
+        return next;
+      });
+    } catch (err) {
+      console.error("Failed to regenerate:", err);
+    }
+  }, [syncBucketCopiesToList]);
+
+  const handleModalUpdateVariant = useCallback(async (bucketId: string, type: "title" | "description", variantId: string, newText: string) => {
+    try {
+      const updated = await apiUpdateCopy(variantId, { text: newText });
+      setModalBucketData(prev => {
+        if (!prev || prev.bucket.id !== bucketId) return prev;
+        const key = type === "title" ? "titles" : "descriptions";
+        const updatedList = prev[key].map(c => c.id === variantId ? updated : c);
+        const next = { ...prev, [key]: updatedList };
+        syncBucketCopiesToList(bucketId, next.titles, next.descriptions);
+        return next;
+      });
+    } catch (err) {
+      console.error("Failed to update variant:", err);
+    }
+  }, [syncBucketCopiesToList]);
+
+  const handleModalSetPrimary = useCallback(async (bucketId: string, type: "title" | "description", variantId: string) => {
+    try {
+      await apiUpdateCopy(variantId, { is_primary: true });
+      setModalBucketData(prev => {
+        if (!prev || prev.bucket.id !== bucketId) return prev;
+        const key = type === "title" ? "titles" : "descriptions";
+        const updatedList = prev[key].map(c => ({ ...c, is_primary: c.id === variantId }));
+        return { ...prev, [key]: updatedList };
+      });
+    } catch (err) {
+      console.error("Failed to set primary:", err);
+    }
+  }, []);
+
+  const handleModalDeleteVariant = useCallback(async (bucketId: string, type: "title" | "description", variantId: string) => {
+    try {
+      await deleteCopy(variantId);
+      setModalBucketData(prev => {
+        if (!prev || prev.bucket.id !== bucketId) return prev;
+        const key = type === "title" ? "titles" : "descriptions";
+        const updatedList = prev[key].filter(c => c.id !== variantId);
+        const next = { ...prev, [key]: updatedList };
+        syncBucketCopiesToList(bucketId, next.titles, next.descriptions);
+        return next;
+      });
+    } catch (err) {
+      console.error("Failed to delete variant:", err);
+    }
+  }, [syncBucketCopiesToList]);
+
+  const handleModalPickForList = useCallback((bucketId: string, type: "title" | "description", variantId: string) => {
+    if (!planningCopyModal) return;
+    const listId = planningCopyModal.listId;
+    // Update assignment's title_copy_id or desc_copy_id
+    const payload = type === "title" ? { title_copy_id: variantId } : { desc_copy_id: variantId };
+    apiUpdateAssignment(listId, payload).catch((err) => console.error("Failed to pick variant:", err));
+    // Update local list state: mark this variant as selected
+    setWebinars((prev) => prev.map((w) => ({
+      ...w,
+      lists: w.lists.map((l) => {
+        if (l.id !== listId) return l;
+        if (type === "title") {
+          const newVariants = l.titleVariants?.map(v => ({ ...v, selected: v.id === variantId }));
+          const selected = newVariants?.find(v => v.selected);
+          return { ...l, titleVariants: newVariants, title: selected?.text ?? l.title };
+        }
+        return {
+          ...l,
+          descVariants: l.descVariants?.map(v => ({ ...v, selected: v.id === variantId })),
+        };
+      }),
+    })));
+  }, [planningCopyModal]);
+
   const closeCopyModal = () => {
     setShowCopyModal(false);
     setSelectedIds(new Set());
@@ -982,25 +1146,25 @@ export function PlanningPage() {
       {/* Sender legend — editable */}
       <div className="px-6 py-2 border-b border-zinc-200 dark:border-zinc-800/20 bg-white dark:bg-zinc-950/50">
         <div className="flex items-center gap-2 mb-0">
-          <span className="text-[10px] text-zinc-500 uppercase tracking-wider">Senders:</span>
-          <button onClick={() => setEditingSenders(!editingSenders)} className="text-[10px] text-zinc-600 hover:text-zinc-600 dark:text-zinc-400 transition-colors ml-1">
+          <span className="text-xs text-zinc-500 uppercase tracking-wider font-semibold">Senders:</span>
+          <button onClick={() => setEditingSenders(!editingSenders)} className="text-xs text-zinc-600 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200 transition-colors ml-1">
             {editingSenders ? "Done" : "Edit"}
           </button>
         </div>
         {!editingSenders ? (
-          <div className="flex items-center gap-4 mt-1 overflow-x-auto">
+          <div className="flex items-center gap-5 mt-1.5 overflow-x-auto">
             {senders.map((s) => (
-              <div key={s.id} className="flex items-center gap-1.5 shrink-0">
+              <div key={s.id} className="flex items-center gap-2 shrink-0">
                 <SenderBadge name={s.name} color={s.color} />
-                <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">{s.accounts} accts · {s.sendPerAccount}/acct · {s.daysPerWeek}d/webinar</span>
-                <span className="text-[10px] text-zinc-600 font-mono whitespace-nowrap">= {(s.accounts * s.sendPerAccount).toLocaleString()}/d</span>
+                <span className="text-xs text-zinc-500 dark:text-zinc-400 font-mono whitespace-nowrap">{s.accounts} accts · {s.sendPerAccount}/acct · {s.daysPerWeek}d/webinar</span>
+                <span className="text-xs text-zinc-700 dark:text-zinc-300 font-mono font-semibold whitespace-nowrap">= {(s.accounts * s.sendPerAccount).toLocaleString()}/d</span>
               </div>
             ))}
           </div>
         ) : (
           <div className="flex items-center gap-5 mt-2 overflow-x-auto">
             {senders.map((s) => (
-              <div key={s.id} className="flex items-center gap-2 bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800/40 rounded-lg px-3 py-2 shrink-0">
+              <div key={s.id} className="flex items-center gap-2.5 bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800/40 rounded-lg px-3 py-2 shrink-0">
                 <input
                   type="text"
                   defaultValue={s.name}
@@ -1012,34 +1176,34 @@ export function PlanningPage() {
                     }
                   }}
                   onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-                  className="w-20 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-1.5 py-0.5 text-[11px] text-zinc-800 dark:text-zinc-200 font-semibold focus:outline-none focus:ring-1 focus:ring-violet-500"
+                  className="w-24 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-2 py-1 text-sm text-zinc-800 dark:text-zinc-200 font-semibold focus:outline-none focus:ring-1 focus:ring-violet-500"
                 />
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-2">
                   <div className="flex flex-col items-center">
-                    <span className="text-[8px] text-zinc-600 uppercase">Accts</span>
+                    <span className="text-[10px] text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Accts</span>
                     <input type="number" key={`accts-${s.id}-${s.accounts}`} defaultValue={s.accounts}
                       onBlur={(e) => { const v = parseInt(e.target.value) || 0; if (v !== s.accounts) updateSender(s.id, "accounts", v); }}
                       onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-                      className="w-12 bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-1.5 py-0.5 text-[11px] text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
+                      className="w-14 bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-2 py-1 text-sm text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
                   </div>
-                  <span className="text-zinc-600 text-[10px]">×</span>
+                  <span className="text-zinc-500 text-xs">×</span>
                   <div className="flex flex-col items-center">
-                    <span className="text-[8px] text-zinc-600 uppercase">Send/Acct</span>
+                    <span className="text-[10px] text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Send/Acct</span>
                     <input type="number" key={`spa-${s.id}-${s.sendPerAccount}`} defaultValue={s.sendPerAccount}
                       onBlur={(e) => { const v = parseInt(e.target.value) || 0; if (v !== s.sendPerAccount) updateSender(s.id, "sendPerAccount", v); }}
                       onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-                      className="w-12 bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-1.5 py-0.5 text-[11px] text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
+                      className="w-14 bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-2 py-1 text-sm text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
                   </div>
-                  <span className="text-zinc-600 text-[10px]">×</span>
+                  <span className="text-zinc-500 text-xs">×</span>
                   <div className="flex flex-col items-center">
-                    <span className="text-[8px] text-zinc-600 uppercase">Days/Web</span>
+                    <span className="text-[10px] text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Days/Web</span>
                     <input type="number" key={`dpw-${s.id}-${s.daysPerWeek}`} defaultValue={s.daysPerWeek}
                       onBlur={(e) => { const v = parseInt(e.target.value) || 0; if (v !== s.daysPerWeek) updateSender(s.id, "daysPerWeek", v); }}
                       onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-                      className="w-12 bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-1.5 py-0.5 text-[11px] text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
+                      className="w-14 bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-2 py-1 text-sm text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
                   </div>
-                  <span className="text-zinc-600 text-[10px]">=</span>
-                  <span className="text-[11px] text-violet-400 font-mono font-bold">{(s.accounts * s.sendPerAccount).toLocaleString()}/d</span>
+                  <span className="text-zinc-500 text-xs">=</span>
+                  <span className="text-sm text-violet-600 dark:text-violet-400 font-mono font-bold">{(s.accounts * s.sendPerAccount).toLocaleString()}/d</span>
                 </div>
               </div>
             ))}
@@ -1048,53 +1212,53 @@ export function PlanningPage() {
             {!showNewSenderForm ? (
               <button
                 onClick={() => setShowNewSenderForm(true)}
-                className="flex items-center gap-1.5 px-3 py-2 border-2 border-dashed border-zinc-300 dark:border-zinc-700 rounded-lg text-[11px] text-zinc-500 hover:text-violet-400 hover:border-violet-500/40 transition-colors"
+                className="flex items-center gap-1.5 px-3 py-2 border-2 border-dashed border-zinc-300 dark:border-zinc-700 rounded-lg text-xs text-zinc-500 hover:text-violet-400 hover:border-violet-500/40 transition-colors"
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14"/></svg>
                 Add Sender
               </button>
             ) : (
-              <div className="flex items-center gap-2 bg-violet-50 dark:bg-violet-500/5 border border-violet-200 dark:border-violet-500/20 rounded-lg px-3 py-2">
+              <div className="flex items-center gap-2.5 bg-violet-50 dark:bg-violet-500/5 border border-violet-200 dark:border-violet-500/20 rounded-lg px-3 py-2">
                 <div className="flex flex-col">
-                  <span className="text-[8px] text-zinc-600 uppercase">Name</span>
+                  <span className="text-[10px] text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Name</span>
                   <input
                     type="text"
                     value={newSenderName}
                     onChange={(e) => setNewSenderName(e.target.value)}
                     placeholder="Name..."
                     autoFocus
-                    className="w-20 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-1.5 py-0.5 text-[11px] text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                    className="w-24 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-2 py-1 text-sm text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-violet-500"
                   />
                 </div>
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-2">
                   <div className="flex flex-col items-center">
-                    <span className="text-[8px] text-zinc-600 uppercase">Accts</span>
+                    <span className="text-[10px] text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Accts</span>
                     <input type="number" value={newSenderAccounts} onChange={(e) => setNewSenderAccounts(parseInt(e.target.value) || 0)}
-                      className="w-12 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-1.5 py-0.5 text-[11px] text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
+                      className="w-14 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-2 py-1 text-sm text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
                   </div>
-                  <span className="text-zinc-600 text-[10px]">×</span>
+                  <span className="text-zinc-500 text-xs">×</span>
                   <div className="flex flex-col items-center">
-                    <span className="text-[8px] text-zinc-600 uppercase">Send/Acct</span>
+                    <span className="text-[10px] text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Send/Acct</span>
                     <input type="number" value={newSenderSendPerAcct} onChange={(e) => setNewSenderSendPerAcct(parseInt(e.target.value) || 0)}
-                      className="w-12 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-1.5 py-0.5 text-[11px] text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
+                      className="w-14 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-2 py-1 text-sm text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
                   </div>
-                  <span className="text-zinc-600 text-[10px]">×</span>
+                  <span className="text-zinc-500 text-xs">×</span>
                   <div className="flex flex-col items-center">
-                    <span className="text-[8px] text-zinc-600 uppercase">Days/Web</span>
+                    <span className="text-[10px] text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Days/Web</span>
                     <input type="number" value={newSenderDaysPerWeb} onChange={(e) => setNewSenderDaysPerWeb(parseInt(e.target.value) || 0)}
-                      className="w-12 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-1.5 py-0.5 text-[11px] text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
+                      className="w-14 bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded px-2 py-1 text-sm text-zinc-800 dark:text-zinc-200 font-mono text-center focus:outline-none focus:ring-1 focus:ring-violet-500" />
                   </div>
                 </div>
                 <button
                   onClick={handleAddSender}
                   disabled={!newSenderName.trim() || creatingSender}
-                  className="px-3 py-1 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white text-[10px] font-semibold rounded-md transition-colors"
+                  className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white text-xs font-semibold rounded-md transition-colors"
                 >
                   {creatingSender ? "Adding..." : "Add"}
                 </button>
                 <button
                   onClick={() => setShowNewSenderForm(false)}
-                  className="text-[10px] text-zinc-400 hover:text-zinc-600 transition-colors"
+                  className="text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200 transition-colors"
                 >
                   Cancel
                 </button>
@@ -1123,7 +1287,7 @@ export function PlanningPage() {
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Status</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[320px]">Description of List</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[180px]">List Name</th>
-              <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Bucket</th>
+              <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] w-[130px] max-w-[130px]">Bucket</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Sender</th>
               <th className="text-right px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">List Size</th>
               <th className="text-right px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Remaining</th>
@@ -1524,10 +1688,13 @@ export function PlanningPage() {
                           />
                         ) : <span className="text-zinc-600">—</span>}
                       </td>
-                      <td className="px-2 py-1.5">
+                      <td className="px-2 py-1.5 w-[130px] max-w-[130px]">
                         {l.bucket !== "—" ? (
-                          <span className="text-zinc-600 dark:text-zinc-400 text-[10px] bg-zinc-100 dark:bg-zinc-800/60 px-1.5 py-0.5 rounded border border-zinc-300 dark:border-zinc-700/30 whitespace-nowrap">
-                            {l.bucket.length > 25 ? l.bucket.substring(0, 25) + "…" : l.bucket}
+                          <span
+                            title={l.bucket}
+                            className="text-zinc-600 dark:text-zinc-400 text-[10px] bg-zinc-100 dark:bg-zinc-800/60 px-1.5 py-0.5 rounded border border-zinc-300 dark:border-zinc-700/30 inline-block max-w-full truncate align-middle"
+                          >
+                            {l.bucket}
                           </span>
                         ) : <span className="text-zinc-600">—</span>}
                       </td>
@@ -1552,7 +1719,7 @@ export function PlanningPage() {
                         {l.title ? (
                           <div
                             className="max-w-[240px] cursor-pointer group/title"
-                            onClick={() => l.titleVariants && l.titleVariants.length > 0 && setPlanningCopyModal({ listId: l.id, webinarId: w.id, tab: "title" })}
+                            onClick={() => l.titleVariants && l.titleVariants.length > 0 && openVariationsModal(l.id, w.id, "title")}
                           >
                             {(() => {
                               const selectedTitle = l.titleVariants?.find(v => v.selected);
@@ -1576,7 +1743,7 @@ export function PlanningPage() {
                           return descText ? (
                             <div
                               className="max-w-[240px] cursor-pointer group/desc"
-                              onClick={() => l.descVariants && l.descVariants.length > 0 && setPlanningCopyModal({ listId: l.id, webinarId: w.id, tab: "description" })}
+                              onClick={() => l.descVariants && l.descVariants.length > 0 && openVariationsModal(l.id, w.id, "description")}
                             >
                               {selectedDesc && l.descVariants && l.descVariants.length > 1 && (
                                 <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400 inline-block mb-0.5">
@@ -1772,122 +1939,35 @@ export function PlanningPage() {
         </div>
       )}
 
-      {/* ── Planning Copy Variant Modal ─────────────────────────────── */}
-      {planningCopyModal && (() => {
-        const modalWebinar = webinars.find(w => w.id === planningCopyModal.webinarId);
+      {/* ── Planning Copy Variant Modal (shared with Copy Generator) ── */}
+      {planningCopyModal && modalBucketData && (() => {
         const targetList = webinars.flatMap(w => w.lists).find(l => l.id === planningCopyModal.listId);
         if (!targetList) return null;
-        const variants = planningCopyModal.tab === "title" ? targetList.titleVariants : targetList.descVariants;
-        if (!variants || variants.length === 0) return null;
-        const isTitle = planningCopyModal.tab === "title";
-        const regLink = modalWebinar?.registrationLink || "";
-        const unsubLink = modalWebinar?.unsubscribeLink || "";
+        const assignedTitleId = targetList.titleVariants?.find(v => v.selected)?.id;
+        const assignedDescId = targetList.descVariants?.find(v => v.selected)?.id;
+        const titles: CopyVariant[] = modalBucketData.titles.map(c => ({
+          ...apiCopyToVariant(c),
+          isAssigned: c.id === assignedTitleId,
+        }));
+        const descriptions: CopyVariant[] = modalBucketData.descriptions.map(c => ({
+          ...apiCopyToVariant(c),
+          isAssigned: c.id === assignedDescId,
+        }));
         return (
-          <div className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center" onClick={(e) => { if (e.target === e.currentTarget) setPlanningCopyModal(null); }}>
-            <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800/60 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[70vh] flex flex-col overflow-hidden">
-              {/* Header */}
-              <div className="px-6 py-4 border-b border-zinc-200 dark:border-zinc-800/40 shrink-0">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-sm font-bold text-zinc-900 dark:text-zinc-100">
-                      {isTitle ? "Title" : "Description"} Variations
-                    </h3>
-                    <p className="text-[10px] text-zinc-500 mt-0.5">
-                      {targetList.bucket} · {targetList.sender}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => setPlanningCopyModal({ ...planningCopyModal, tab: isTitle ? "description" : "title" })}
-                      className="text-[10px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 px-2 py-1 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800/50 transition-colors"
-                    >
-                      Switch to {isTitle ? "Descriptions" : "Titles"}
-                    </button>
-                    <button onClick={() => setPlanningCopyModal(null)} className="p-1 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors">
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Variants */}
-              <div className="flex-1 overflow-y-auto px-6 py-4 space-y-2">
-                {variants.map((v, i) => (
-                  <button
-                    key={v.id}
-                    onClick={() => {
-                      selectVariant(targetList.id, isTitle ? "title" : "desc", v.id);
-                    }}
-                    className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 group ${
-                      v.selected
-                        ? isTitle
-                          ? "border-violet-400 dark:border-violet-500/40 bg-violet-50/50 dark:bg-violet-500/5"
-                          : "border-blue-400 dark:border-blue-500/40 bg-blue-50/50 dark:bg-blue-500/5"
-                        : "border-zinc-200 dark:border-zinc-800/40 hover:border-zinc-300 dark:hover:border-zinc-700"
-                    }`}
-                  >
-                    <div className={`w-4 h-4 mt-0.5 rounded-full border-2 flex items-center justify-center shrink-0 ${
-                      v.selected
-                        ? isTitle ? "border-violet-500 bg-violet-500" : "border-blue-500 bg-blue-500"
-                        : "border-zinc-400"
-                    }`}>
-                      {v.selected && <div className="w-1.5 h-1.5 bg-white rounded-full" />}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
-                          isTitle
-                            ? "bg-violet-100 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400"
-                            : "bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400"
-                        }`}>V{v.variantIndex + 1}</span>
-                        {v.selected && (
-                          <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">Selected</span>
-                        )}
-                      </div>
-                      <pre className="text-xs text-zinc-800 dark:text-zinc-200 mt-1 leading-relaxed whitespace-pre-wrap font-sans">{linkifyCopyText(v.text, regLink, unsubLink)}</pre>
-                    </div>
-                    <div className="flex items-center gap-0.5 shrink-0 mt-0.5">
-                      <div
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          const html = linkifyToHtml(v.text, regLink, unsubLink);
-                          const item = new ClipboardItem({
-                            "text/plain": new Blob([v.text], { type: "text/plain" }),
-                            "text/html": new Blob([html], { type: "text/html" }),
-                          });
-                          navigator.clipboard.write([item]);
-                          setCopiedVariantId(v.id);
-                          setTimeout(() => setCopiedVariantId(prev => prev === v.id ? null : prev), 1500);
-                        }}
-                        className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800/50 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-all cursor-pointer"
-                        title="Copy to clipboard"
-                      >
-                        {copiedVariantId === v.id ? (
-                          <svg className="w-3.5 h-3.5 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-                        ) : (
-                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
-                        )}
-                      </div>
-                      {variants.length > 1 && (
-                        <div onClick={(e) => { e.stopPropagation(); if (confirm(`Delete this ${isTitle ? "title" : "description"} variant?`)) deleteVariant(targetList.id, isTitle ? "title" : "desc", v.id); }}
-                          className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-100 dark:hover:bg-red-500/10 text-zinc-400 hover:text-red-500 transition-all cursor-pointer">
-                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                        </div>
-                      )}
-                    </div>
-                  </button>
-                ))}
-              </div>
-
-              {/* Footer */}
-              <div className="px-6 py-3 border-t border-zinc-200 dark:border-zinc-800/40 flex justify-end shrink-0">
-                <button onClick={() => setPlanningCopyModal(null)}
-                  className="px-5 py-2 bg-zinc-900 dark:bg-zinc-100 hover:bg-zinc-800 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 text-xs font-semibold rounded-lg transition-colors">
-                  Done
-                </button>
-              </div>
-            </div>
-          </div>
+          <VariationsModal
+            bucket={modalBucketData.bucket}
+            initialTab={planningCopyModal.tab}
+            titles={titles}
+            descriptions={descriptions}
+            contextLabel={`List: ${targetList.bucket} · ${targetList.sender}`}
+            onClose={closeVariationsModal}
+            onUpdateVariant={handleModalUpdateVariant}
+            onSetPrimary={handleModalSetPrimary}
+            onRegenerate={handleModalRegenerate}
+            onAddVariant={handleModalAddVariant}
+            onDeleteVariant={handleModalDeleteVariant}
+            onPickForList={handleModalPickForList}
+          />
         );
       })()}
 
