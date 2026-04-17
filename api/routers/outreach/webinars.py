@@ -233,10 +233,11 @@ async def assign_bucket(
         if not upload:
             raise HTTPException(404, "Custom list not found or not complete")
 
-        # Count available contacts from this upload
+        # Count available contacts from this upload (custom list contacts have bucket_id = NULL)
         available_count_result = await db.execute(
             select(sa_func.count()).where(
                 Contact.upload_id == body.upload_id,
+                Contact.bucket_id.is_(None),
                 Contact.outreach_status == "available",
             )
         )
@@ -328,6 +329,7 @@ async def assign_bucket(
             select(Contact.id)
             .where(
                 Contact.upload_id == body.upload_id,
+                Contact.bucket_id.is_(None),
                 Contact.outreach_status == "available",
             )
             .limit(body.volume)

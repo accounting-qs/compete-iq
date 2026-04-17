@@ -197,6 +197,7 @@ async def generate_custom_list_copies(
         max_idx_result = await db.execute(
             select(sqla_func.max(BucketCopy.variant_index)).where(
                 BucketCopy.upload_id == upload_id,
+                BucketCopy.bucket_id.is_(None),
                 BucketCopy.copy_type == ct,
             )
         )
@@ -247,6 +248,7 @@ async def create_custom_list_copy(
     max_idx_result = await db.execute(
         select(sqla_func.max(BucketCopy.variant_index)).where(
             BucketCopy.upload_id == upload_id,
+            BucketCopy.bucket_id.is_(None),
             BucketCopy.copy_type == copy_type,
         )
     )
@@ -280,6 +282,7 @@ async def get_custom_list_copies(
     result = await db.execute(
         select(BucketCopy).where(
             BucketCopy.upload_id == upload_id,
+            BucketCopy.bucket_id.is_(None),
             BucketCopy.deleted_at.is_(None),
         ).order_by(BucketCopy.copy_type, BucketCopy.variant_index)
     )
@@ -440,6 +443,12 @@ async def start_import(
         raise HTTPException(404, "Upload not found")
     if upload.status not in ("uploading",):
         raise HTTPException(409, f"Cannot start import: upload status is '{upload.status}', expected 'uploading'")
+
+    # Validate custom list mode
+    if body.upload_mode == "custom_list":
+        if not body.custom_list_name or not body.custom_list_name.strip():
+            raise HTTPException(400, "Custom list name is required")
+        body.custom_list_name = body.custom_list_name.strip()
 
     upload.field_mappings = body.field_mappings
     upload.duplicate_mode = body.duplicate_mode
@@ -652,6 +661,17 @@ async def delete_upload(
     upload = result.scalar_one_or_none()
     if not upload:
         raise HTTPException(404, "Upload not found")
+
+    # Block deletion of custom lists with active assignments
+    if upload.upload_mode == "custom_list":
+        from db.models import WebinarListAssignment
+        active_assignments = await db.execute(
+            select(sa_func.count()).where(
+                WebinarListAssignment.source_upload_id == upload_id,
+            )
+        )
+        if (active_assignments.scalar() or 0) > 0:
+            raise HTTPException(409, "This custom list has active assignments. Remove them from webinars first.")
 
     if upload.status in ("processing", "paused"):
         # Cancel the import first if it's still running
