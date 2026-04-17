@@ -94,7 +94,8 @@ class WebinarUpdate(BaseModel):
 # ── Assignments ────────────────────────────────────────────────────────────
 
 class AssignRequest(BaseModel):
-    bucket_id: str
+    bucket_id: str | None = None
+    upload_id: str | None = None
     sender_id: str
     volume: int
     accounts_used: int = 0
@@ -128,6 +129,8 @@ class UploadFileResponse(BaseModel):
 class ImportStartCreate(BaseModel):
     field_mappings: dict[str, str]  # CSV header -> system field
     duplicate_mode: str = "ignore"  # "ignore" | "overwrite"
+    upload_mode: str = "bucket"  # "bucket" | "custom_list"
+    custom_list_name: str | None = None
 
 
 # ── Custom Fields ──────────────────────────────────────────────────────────

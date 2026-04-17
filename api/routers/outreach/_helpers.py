@@ -107,6 +107,8 @@ def assignment_dict(a: WebinarListAssignment) -> dict:
         "is_nonjoiners": a.is_nonjoiners,
         "is_no_list_data": a.is_no_list_data,
         "is_setup": a.is_setup,
+        "source_type": a.source_type,
+        "source_upload_id": a.source_upload_id,
         "list_name": a.list_name,
         "display_order": a.display_order,
     }
