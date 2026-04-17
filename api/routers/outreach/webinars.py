@@ -189,6 +189,14 @@ async def assign_bucket(
     db: AsyncSession = Depends(get_db),
     _: str = Depends(require_auth),
 ):
+    # Validate: exactly one source must be provided
+    if not body.bucket_id and not body.upload_id:
+        raise HTTPException(400, "Either bucket_id or upload_id must be provided")
+    if body.bucket_id and body.upload_id:
+        raise HTTPException(400, "Cannot provide both bucket_id and upload_id")
+
+    is_custom_list = body.upload_id is not None
+
     # Validate webinar
     w_result = await db.execute(
         select(Webinar).where(Webinar.id == webinar_id, Webinar.user_id == LLOYD_USER_ID)
@@ -196,30 +204,6 @@ async def assign_bucket(
     webinar = w_result.scalar_one_or_none()
     if not webinar:
         raise HTTPException(404, "Webinar not found")
-
-    # Validate bucket
-    b_result = await db.execute(
-        select(OutreachBucket).where(OutreachBucket.id == body.bucket_id, OutreachBucket.user_id == LLOYD_USER_ID)
-        .options(selectinload(OutreachBucket.copies))
-    )
-    bucket = b_result.scalar_one_or_none()
-    if not bucket:
-        raise HTTPException(404, "Bucket not found")
-
-    # Count available contacts in this bucket (not assigned or used)
-    available_count_result = await db.execute(
-        select(sa_func.count()).where(
-            Contact.bucket_id == body.bucket_id,
-            Contact.outreach_status == "available",
-        )
-    )
-    available_count = available_count_result.scalar() or 0
-
-    if available_count < body.volume:
-        raise HTTPException(
-            400,
-            f"Volume {body.volume} exceeds available contacts ({available_count})",
-        )
 
     # Validate sender
     s_result = await db.execute(
@@ -229,14 +213,83 @@ async def assign_bucket(
     if not sender:
         raise HTTPException(404, "Sender not found")
 
-    # Find primary copies for this bucket
-    title_copy = next((c for c in (bucket.copies or []) if c.copy_type == "title" and c.is_primary and not c.deleted_at), None)
-    desc_copy = next((c for c in (bucket.copies or []) if c.copy_type == "description" and c.is_primary and not c.deleted_at), None)
+    bucket = None
+    title_copy = None
+    desc_copy = None
+    upload = None
 
-    # Build description string
-    countries = body.countries_override or ", ".join(bucket.countries or [])
-    emp = body.emp_range_override or bucket.emp_range or ""
-    desc_str = f"{bucket.name}, {emp} emp, {countries}"
+    if is_custom_list:
+        # Validate custom list upload
+        from db.models import UploadHistory
+        u_result = await db.execute(
+            select(UploadHistory).where(
+                UploadHistory.id == body.upload_id,
+                UploadHistory.user_id == LLOYD_USER_ID,
+                UploadHistory.upload_mode == "custom_list",
+                UploadHistory.status == "complete",
+            )
+        )
+        upload = u_result.scalar_one_or_none()
+        if not upload:
+            raise HTTPException(404, "Custom list not found or not complete")
+
+        # Count available contacts from this upload (custom list contacts have bucket_id = NULL)
+        available_count_result = await db.execute(
+            select(sa_func.count()).where(
+                Contact.upload_id == body.upload_id,
+                Contact.bucket_id.is_(None),
+                Contact.outreach_status == "available",
+            )
+        )
+        available_count = available_count_result.scalar() or 0
+        desc_str = upload.custom_list_name or upload.file_name
+
+        # Find primary copies for this custom list (by upload_id)
+        from db.models import BucketCopy
+        copies_result = await db.execute(
+            select(BucketCopy).where(
+                BucketCopy.upload_id == body.upload_id,
+                BucketCopy.deleted_at.is_(None),
+                BucketCopy.is_primary.is_(True),
+            )
+        )
+        for c in copies_result.scalars():
+            if c.copy_type == "title" and not title_copy:
+                title_copy = c
+            elif c.copy_type == "description" and not desc_copy:
+                desc_copy = c
+    else:
+        # Validate bucket
+        b_result = await db.execute(
+            select(OutreachBucket).where(OutreachBucket.id == body.bucket_id, OutreachBucket.user_id == LLOYD_USER_ID)
+            .options(selectinload(OutreachBucket.copies))
+        )
+        bucket = b_result.scalar_one_or_none()
+        if not bucket:
+            raise HTTPException(404, "Bucket not found")
+
+        # Count available contacts in this bucket
+        available_count_result = await db.execute(
+            select(sa_func.count()).where(
+                Contact.bucket_id == body.bucket_id,
+                Contact.outreach_status == "available",
+            )
+        )
+        available_count = available_count_result.scalar() or 0
+
+        # Find primary copies for this bucket
+        title_copy = next((c for c in (bucket.copies or []) if c.copy_type == "title" and c.is_primary and not c.deleted_at), None)
+        desc_copy = next((c for c in (bucket.copies or []) if c.copy_type == "description" and c.is_primary and not c.deleted_at), None)
+
+        countries = body.countries_override or ", ".join(bucket.countries or [])
+        emp = body.emp_range_override or bucket.emp_range or ""
+        desc_str = f"{bucket.name}, {emp} emp, {countries}"
+
+    if available_count < body.volume:
+        raise HTTPException(
+            400,
+            f"Volume {body.volume} exceeds available contacts ({available_count})",
+        )
 
     # Get next display order
     max_order_result = await db.execute(
@@ -250,7 +303,7 @@ async def assign_bucket(
     assignment = WebinarListAssignment(
         user_id=LLOYD_USER_ID,
         webinar_id=webinar_id,
-        bucket_id=body.bucket_id,
+        bucket_id=body.bucket_id if not is_custom_list else None,
         sender_id=body.sender_id,
         description=desc_str,
         volume=body.volume,
@@ -262,21 +315,35 @@ async def assign_bucket(
         desc_copy_id=desc_copy.id if desc_copy else None,
         countries_override=body.countries_override,
         emp_range_override=body.emp_range_override,
+        source_type="custom_list" if is_custom_list else "bucket",
+        source_upload_id=body.upload_id if is_custom_list else None,
+        list_name=(upload.custom_list_name or upload.file_name) if is_custom_list else None,
         display_order=next_order,
     )
     db.add(assignment)
     await db.flush()  # get assignment.id
 
-    # Claim available contacts in a single SQL statement (no Python round-trip).
-    # Single UPDATE ... WHERE id IN (SELECT ... LIMIT N) — runs entirely in Postgres.
-    claim_subq = (
-        select(Contact.id)
-        .where(
-            Contact.bucket_id == body.bucket_id,
-            Contact.outreach_status == "available",
+    # Claim available contacts
+    if is_custom_list:
+        claim_subq = (
+            select(Contact.id)
+            .where(
+                Contact.upload_id == body.upload_id,
+                Contact.bucket_id.is_(None),
+                Contact.outreach_status == "available",
+            )
+            .limit(body.volume)
         )
-        .limit(body.volume)
-    )
+    else:
+        claim_subq = (
+            select(Contact.id)
+            .where(
+                Contact.bucket_id == body.bucket_id,
+                Contact.outreach_status == "available",
+            )
+            .limit(body.volume)
+        )
+
     claim_result = await db.execute(
         update(Contact)
         .where(Contact.id.in_(claim_subq))
@@ -288,8 +355,9 @@ async def assign_bucket(
     )
     claimed = claim_result.rowcount
 
-    # Update bucket remaining counter
-    bucket.remaining_contacts = max(0, available_count - claimed)
+    # Update bucket remaining counter (only for bucket assignments)
+    if bucket:
+        bucket.remaining_contacts = max(0, available_count - claimed)
 
     # Log copy usage
     if title_copy:
@@ -312,7 +380,7 @@ async def assign_bucket(
     )
     assignment = reload_result.scalar_one()
     resp = assignment_dict(assignment)
-    resp["bucket_remaining"] = bucket.remaining_contacts
+    resp["bucket_remaining"] = bucket.remaining_contacts if bucket else None
     return resp
 
 

@@ -38,7 +38,8 @@ class BucketCopy(Base):
     __tablename__ = "bucket_copies"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
-    bucket_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("outreach_buckets.id", ondelete="CASCADE"), nullable=False)
+    bucket_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("outreach_buckets.id", ondelete="CASCADE"))
+    upload_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("upload_history.id", ondelete="CASCADE"))
     user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     copy_type: Mapped[str] = mapped_column(String(20), nullable=False)
     variant_index: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
@@ -51,11 +52,12 @@ class BucketCopy(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    bucket: Mapped["OutreachBucket"] = relationship(back_populates="copies")
+    bucket: Mapped[Optional["OutreachBucket"]] = relationship(back_populates="copies")
 
     __table_args__ = (
         CheckConstraint("copy_type IN ('title', 'description')", name="ck_bucket_copies_type"),
         Index("ix_bucket_copies_bucket_type", "bucket_id", "copy_type"),
+        Index("ix_bucket_copies_upload_id", "upload_id"),
         Index("ix_bucket_copies_user_id", "user_id"),
         Index("ix_bucket_copies_batch", "generation_batch_id"),
     )
@@ -130,6 +132,8 @@ class WebinarListAssignment(Base):
     is_nonjoiners: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     is_no_list_data: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     is_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    source_upload_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("upload_history.id", ondelete="SET NULL"))
+    source_type: Mapped[str] = mapped_column(String(20), nullable=False, server_default="bucket")
     list_name: Mapped[Optional[str]] = mapped_column(Text)
     display_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -147,6 +151,7 @@ class WebinarListAssignment(Base):
         Index("ix_wla_sender_id", "sender_id"),
         Index("ix_wla_webinar_sender", "webinar_id", "sender_id"),
         Index("ix_wla_user_id", "user_id"),
+        Index("ix_wla_source_upload_id", "source_upload_id"),
     )
 
 

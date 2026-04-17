@@ -109,6 +109,192 @@ async def list_uploads(
     }
 
 
+@router.get("/uploads/custom-lists")
+async def list_custom_lists(
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """List completed custom-list uploads with available contact counts."""
+    result = await db.execute(
+        select(UploadHistory).where(
+            UploadHistory.user_id == LLOYD_USER_ID,
+            UploadHistory.upload_mode == "custom_list",
+            UploadHistory.status == "complete",
+        ).order_by(UploadHistory.created_at.desc())
+    )
+    uploads = result.scalars().all()
+    upload_ids = [u.id for u in uploads]
+
+    # Single GROUP BY query instead of 2*N round-trips
+    count_map: dict[str, tuple[int, int]] = {}
+    if upload_ids:
+        count_result = await db.execute(
+            select(
+                Contact.upload_id,
+                sa_func.count().label("total"),
+                sa_func.count().filter(Contact.outreach_status == "available").label("available"),
+            )
+            .where(Contact.upload_id.in_(upload_ids))
+            .group_by(Contact.upload_id)
+        )
+        count_map = {row.upload_id: (row.total, row.available) for row in count_result}
+
+    lists = []
+    for u in uploads:
+        total, available = count_map.get(u.id, (0, 0))
+        lists.append({
+            "id": u.id,
+            "name": u.custom_list_name or u.file_name,
+            "total_contacts": total,
+            "available_contacts": available,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        })
+
+    return {"lists": lists}
+
+
+@router.post("/uploads/{upload_id}/copies/generate", status_code=201)
+async def generate_custom_list_copies(
+    upload_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Generate AI title/description copies for a custom list using its name as context."""
+    from db.models import BucketCopy
+    from services.generation import generate_bucket_copies
+
+    result = await db.execute(
+        select(UploadHistory).where(
+            UploadHistory.id == upload_id,
+            UploadHistory.user_id == LLOYD_USER_ID,
+            UploadHistory.upload_mode == "custom_list",
+        )
+    )
+    upload = result.scalar_one_or_none()
+    if not upload:
+        raise HTTPException(404, "Custom list not found")
+
+    copy_type = body.get("copy_type", "both")
+    variant_count = body.get("variant_count", 3)
+    list_name = upload.custom_list_name or upload.file_name
+    batch_id = str(uuid.uuid4())
+
+    generated_titles = []
+    generated_descriptions = []
+
+    for ct in (["title", "description"] if copy_type == "both" else [copy_type]):
+        # Use the custom list name as the AI prompt context
+        texts = await generate_bucket_copies(
+            db=db,
+            user_id=LLOYD_USER_ID,
+            bucket_name=list_name,
+            industry=None,
+            countries=None,
+            emp_range=None,
+            copy_type=ct,
+            count=variant_count,
+        )
+        # Get max variant_index for this upload+type
+        from sqlalchemy import func as sqla_func
+        max_idx_result = await db.execute(
+            select(sqla_func.max(BucketCopy.variant_index)).where(
+                BucketCopy.upload_id == upload_id,
+                BucketCopy.bucket_id.is_(None),
+                BucketCopy.copy_type == ct,
+            )
+        )
+        max_idx = max_idx_result.scalar() or -1
+
+        for i, text in enumerate(texts):
+            copy = BucketCopy(
+                user_id=LLOYD_USER_ID,
+                bucket_id=None,
+                upload_id=upload_id,
+                copy_type=ct,
+                variant_index=max_idx + 1 + i,
+                text=text,
+                is_primary=(i == 0 and max_idx == -1),
+                generation_batch_id=batch_id,
+            )
+            db.add(copy)
+            if ct == "title":
+                generated_titles.append(copy)
+            else:
+                generated_descriptions.append(copy)
+
+    await db.flush()
+    from api.routers.outreach._helpers import copy_dict
+    return {
+        "upload_id": upload_id,
+        "batch_id": batch_id,
+        "titles": [copy_dict(c) for c in generated_titles],
+        "descriptions": [copy_dict(c) for c in generated_descriptions],
+    }
+
+
+@router.post("/uploads/{upload_id}/copies", status_code=201)
+async def create_custom_list_copy(
+    upload_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Create a manual copy variant for a custom list."""
+    from db.models import BucketCopy
+    from api.routers.outreach._helpers import copy_dict
+    from sqlalchemy import func as sqla_func
+
+    copy_type = body.get("copy_type", "title")
+    text = body.get("text", "")
+
+    max_idx_result = await db.execute(
+        select(sqla_func.max(BucketCopy.variant_index)).where(
+            BucketCopy.upload_id == upload_id,
+            BucketCopy.bucket_id.is_(None),
+            BucketCopy.copy_type == copy_type,
+        )
+    )
+    max_idx = max_idx_result.scalar()
+    next_idx = (max_idx + 1) if max_idx is not None else 0
+
+    copy = BucketCopy(
+        user_id=LLOYD_USER_ID,
+        bucket_id=None,
+        upload_id=upload_id,
+        copy_type=copy_type,
+        variant_index=next_idx,
+        text=text,
+        is_primary=False,
+    )
+    db.add(copy)
+    await db.flush()
+    return copy_dict(copy)
+
+
+@router.get("/uploads/{upload_id}/copies")
+async def get_custom_list_copies(
+    upload_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Get title and description copies for a custom list (by upload_id)."""
+    from db.models import BucketCopy
+    from api.routers.outreach._helpers import copy_dict
+
+    result = await db.execute(
+        select(BucketCopy).where(
+            BucketCopy.upload_id == upload_id,
+            BucketCopy.bucket_id.is_(None),
+            BucketCopy.deleted_at.is_(None),
+        ).order_by(BucketCopy.copy_type, BucketCopy.variant_index)
+    )
+    copies = result.scalars().all()
+    titles = [copy_dict(c) for c in copies if c.copy_type == "title"]
+    descriptions = [copy_dict(c) for c in copies if c.copy_type == "description"]
+    return {"upload_id": upload_id, "titles": titles, "descriptions": descriptions}
+
+
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
 
 
@@ -261,8 +447,16 @@ async def start_import(
     if upload.status not in ("uploading",):
         raise HTTPException(409, f"Cannot start import: upload status is '{upload.status}', expected 'uploading'")
 
+    # Validate custom list mode
+    if body.upload_mode == "custom_list":
+        if not body.custom_list_name or not body.custom_list_name.strip():
+            raise HTTPException(400, "Custom list name is required")
+        body.custom_list_name = body.custom_list_name.strip()
+
     upload.field_mappings = body.field_mappings
     upload.duplicate_mode = body.duplicate_mode
+    upload.upload_mode = body.upload_mode
+    upload.custom_list_name = body.custom_list_name
     upload.status = "processing"
     upload.progress = 0
 
@@ -297,7 +491,7 @@ async def start_import(
         _import_cancel_flags.pop(upload_id, None)
 
     task = asyncio.create_task(
-        _process_csv_import(upload_id, upload.storage_path, body.field_mappings, body.duplicate_mode)
+        _process_csv_import(upload_id, upload.storage_path, body.field_mappings, body.duplicate_mode, body.upload_mode)
     )
     _active_import_tasks[upload_id] = task
     task.add_done_callback(_cleanup)
@@ -471,6 +665,17 @@ async def delete_upload(
     if not upload:
         raise HTTPException(404, "Upload not found")
 
+    # Block deletion of custom lists with active assignments
+    if upload.upload_mode == "custom_list":
+        from db.models import WebinarListAssignment
+        active_assignments = await db.execute(
+            select(sa_func.count()).where(
+                WebinarListAssignment.source_upload_id == upload_id,
+            )
+        )
+        if (active_assignments.scalar() or 0) > 0:
+            raise HTTPException(409, "This custom list has active assignments. Remove them from webinars first.")
+
     if upload.status in ("processing", "paused"):
         # Cancel the import first if it's still running
         if upload_id in _active_import_tasks:
@@ -619,6 +824,7 @@ async def _process_csv_import(
     storage_path: str,
     field_mappings: dict,
     duplicate_mode: str,
+    upload_mode: str = "bucket",
 ):
     """Background task: download CSV from Storage, parse, bulk insert."""
     engine = _bg_engine
@@ -709,10 +915,12 @@ async def _process_csv_import(
             "industry", "employee_range", "country", "database_provider", "scraper",
         }
         FLOAT_FIELDS = {"confidence", "cost"}
-        bucket_target_idx = next((idx for idx, t in col_map.items() if t == "bucket"), None)
+        is_custom_list = upload_mode == "custom_list"
+        if is_custom_list:
+            print(f"[IMPORT] Custom list mode — skipping bucket classification")
+        bucket_target_idx = next((idx for idx, t in col_map.items() if t == "bucket"), None) if not is_custom_list else None
 
-        # Load existing buckets — include soft-deleted merged buckets so their
-        # names redirect new contacts to the keeper.
+        # Load existing buckets (harmless for custom lists — bucket_target_idx is None so no contacts get bucket_id)
         bucket_cache: dict[str, str] = {}
         async with engine.begin() as conn:
             result = await conn.execute(
@@ -941,58 +1149,57 @@ async def _process_csv_import(
         total_rows = processed  # actual count after full iteration
         csv_file.close()
 
-        # Recalculate bucket counts
+        # Finalize: recalculate bucket counts (bucket mode) or just mark complete (custom list)
         async with engine.begin() as conn:
-            touched_bucket_ids = list(bucket_cache.values()) if bucket_cache else []
-            if touched_bucket_ids:
-                bucket_counts = await conn.execute(
-                    select(
-                        Contact.__table__.c.bucket_id,
-                        sa_func.count(Contact.__table__.c.id).label("total"),
-                        sa_func.count(Contact.__table__.c.id).filter(
-                            Contact.__table__.c.outreach_status == "available"
-                        ).label("available"),
-                    )
-                    .where(Contact.__table__.c.user_id == LLOYD_USER_ID,
-                           Contact.__table__.c.bucket_id.in_(touched_bucket_ids))
-                    .group_by(Contact.__table__.c.bucket_id)
-                )
-                count_map = {row.bucket_id: {"total": row.total, "available": row.available} for row in bucket_counts}
-            else:
-                count_map = {}
-
-            # Batch update all bucket counts in one query per bucket
-            # (can't do a single UPDATE with varying values without raw SQL,
-            #  but we can batch them efficiently)
-            if count_map:
-                from sqlalchemy import case, literal_column
-                bucket_ids_to_update = list(count_map.keys())
-                total_cases = case(
-                    *[(OutreachBucket.__table__.c.id == bid, count_map[bid]["total"]) for bid in bucket_ids_to_update],
-                    else_=OutreachBucket.__table__.c.total_contacts,
-                )
-                remaining_cases = case(
-                    *[(OutreachBucket.__table__.c.id == bid, count_map[bid]["available"]) for bid in bucket_ids_to_update],
-                    else_=OutreachBucket.__table__.c.remaining_contacts,
-                )
-                await conn.execute(
-                    update(OutreachBucket.__table__)
-                    .where(OutreachBucket.__table__.c.id.in_(bucket_ids_to_update))
-                    .values(total_contacts=total_cases, remaining_contacts=remaining_cases)
-                )
-
-            buckets_result = await conn.execute(
-                select(OutreachBucket.__table__.c.id, OutreachBucket.__table__.c.name,
-                       OutreachBucket.__table__.c.countries, OutreachBucket.__table__.c.emp_range)
-                .where(OutreachBucket.__table__.c.user_id == LLOYD_USER_ID,
-                       OutreachBucket.__table__.c.deleted_at.is_(None))
-            )
             bucket_summary = []
-            for b in buckets_result:
-                real_count = count_map.get(b.id, {"total": 0})["total"]
-                bucket_summary.append({"name": b.name, "count": real_count,
-                    "countries": b.countries or [], "empRanges": [b.emp_range] if b.emp_range else [],
-                    "avgConfidence": 0})
+
+            if not is_custom_list:
+                touched_bucket_ids = list(bucket_cache.values()) if bucket_cache else []
+                if touched_bucket_ids:
+                    bucket_counts = await conn.execute(
+                        select(
+                            Contact.__table__.c.bucket_id,
+                            sa_func.count(Contact.__table__.c.id).label("total"),
+                            sa_func.count(Contact.__table__.c.id).filter(
+                                Contact.__table__.c.outreach_status == "available"
+                            ).label("available"),
+                        )
+                        .where(Contact.__table__.c.user_id == LLOYD_USER_ID,
+                               Contact.__table__.c.bucket_id.in_(touched_bucket_ids))
+                        .group_by(Contact.__table__.c.bucket_id)
+                    )
+                    count_map = {row.bucket_id: {"total": row.total, "available": row.available} for row in bucket_counts}
+                else:
+                    count_map = {}
+
+                if count_map:
+                    from sqlalchemy import case
+                    bucket_ids_to_update = list(count_map.keys())
+                    total_cases = case(
+                        *[(OutreachBucket.__table__.c.id == bid, count_map[bid]["total"]) for bid in bucket_ids_to_update],
+                        else_=OutreachBucket.__table__.c.total_contacts,
+                    )
+                    remaining_cases = case(
+                        *[(OutreachBucket.__table__.c.id == bid, count_map[bid]["available"]) for bid in bucket_ids_to_update],
+                        else_=OutreachBucket.__table__.c.remaining_contacts,
+                    )
+                    await conn.execute(
+                        update(OutreachBucket.__table__)
+                        .where(OutreachBucket.__table__.c.id.in_(bucket_ids_to_update))
+                        .values(total_contacts=total_cases, remaining_contacts=remaining_cases)
+                    )
+
+                buckets_result = await conn.execute(
+                    select(OutreachBucket.__table__.c.id, OutreachBucket.__table__.c.name,
+                           OutreachBucket.__table__.c.countries, OutreachBucket.__table__.c.emp_range)
+                    .where(OutreachBucket.__table__.c.user_id == LLOYD_USER_ID,
+                           OutreachBucket.__table__.c.deleted_at.is_(None))
+                )
+                for b in buckets_result:
+                    real_count = count_map.get(b.id, {"total": 0})["total"]
+                    bucket_summary.append({"name": b.name, "count": real_count,
+                        "countries": b.countries or [], "empRanges": [b.emp_range] if b.emp_range else [],
+                        "avgConfidence": 0})
 
             await conn.execute(
                 update(UploadHistory.__table__)
@@ -1001,7 +1208,7 @@ async def _process_csv_import(
                         total_contacts=total_rows, processed_rows=total_rows,
                         inserted_count=inserted, skipped_count=skipped, overwritten_count=overwritten,
                         total_buckets=len(bucket_summary),
-                        bucket_summary=sorted(bucket_summary, key=lambda x: x["count"], reverse=True))
+                        bucket_summary=sorted(bucket_summary, key=lambda x: x["count"], reverse=True) if bucket_summary else None)
             )
 
         # Cleanup CSV from Storage

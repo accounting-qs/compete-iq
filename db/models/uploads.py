@@ -16,6 +16,8 @@ class UploadHistory(Base):
     storage_path: Mapped[Optional[str]] = mapped_column(Text)
     field_mappings: Mapped[Optional[dict]] = mapped_column(JSONB)
     duplicate_mode: Mapped[str] = mapped_column(String(20), nullable=False, server_default="ignore")
+    upload_mode: Mapped[str] = mapped_column(String(20), nullable=False, server_default="bucket")
+    custom_list_name: Mapped[Optional[str]] = mapped_column(Text)
 
     total_contacts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     total_buckets: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
@@ -114,4 +116,5 @@ class Contact(Base):
         Index("ix_contacts_assignment_id", "assignment_id"),
         Index("ix_contacts_bucket_unassigned", "bucket_id", "assignment_id"),
         Index("ix_contacts_outreach_status", "bucket_id", "outreach_status"),
+        Index("ix_contacts_upload_status_bucket", "upload_id", "outreach_status", "bucket_id"),
     )

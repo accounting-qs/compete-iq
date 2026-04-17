@@ -223,9 +223,174 @@ function MergeBucketsModal({
   );
 }
 
+/* ─── Custom Lists Copy Section ────────────────────────────────────────── */
+
+function CustomListsCopySection() {
+  const [lists, setLists] = useState<import("@/lib/api").ApiCustomList[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [modalUploadId, setModalUploadId] = useState<string | null>(null);
+  const [modalTab, setModalTab] = useState<"title" | "description">("title");
+  const [modalTitles, setModalTitles] = useState<CopyVariant[]>([]);
+  const [modalDescs, setModalDescs] = useState<CopyVariant[]>([]);
+  const [modalBucket, setModalBucket] = useState<import("@/lib/api").ApiBucket | null>(null);
+  const [generating, setGenerating] = useState<string | null>(null);
+
+  useEffect(() => {
+    import("@/lib/api").then(({ fetchCustomLists }) =>
+      fetchCustomLists().then(({ lists: l }) => { setLists(l); setLoading(false); })
+    ).catch(() => setLoading(false));
+  }, []);
+
+  const openModal = async (cl: import("@/lib/api").ApiCustomList, tab: "title" | "description") => {
+    const { fetchCustomListCopies } = await import("@/lib/api");
+    const copies = await fetchCustomListCopies(cl.id);
+    setModalUploadId(cl.id);
+    setModalTab(tab);
+    setModalTitles(copies.titles.map(apiCopyToVariant));
+    setModalDescs(copies.descriptions.map(apiCopyToVariant));
+    setModalBucket({
+      id: cl.id,
+      name: cl.name,
+      industry: null,
+      total_contacts: cl.total_contacts,
+      remaining_contacts: cl.available_contacts,
+      countries: [],
+      emp_range: null,
+      source_file: null,
+      copies_count: { titles: copies.titles.length, descriptions: copies.descriptions.length },
+      has_primary_title: copies.titles.some(c => c.is_primary),
+      has_primary_description: copies.descriptions.some(c => c.is_primary),
+      title_primary_picked: false,
+      desc_primary_picked: false,
+      created_at: cl.created_at,
+    });
+  };
+
+  const handleGenerate = async (clId: string) => {
+    setGenerating(clId);
+    try {
+      const { generateCustomListCopies, fetchCustomListCopies } = await import("@/lib/api");
+      await generateCustomListCopies(clId, { copy_type: "both", variant_count: 3 });
+      // Refresh lists to update copy counts
+      const { fetchCustomLists } = await import("@/lib/api");
+      const { lists: refreshed } = await fetchCustomLists();
+      setLists(refreshed);
+    } catch (err) {
+      console.error("Failed to generate:", err);
+      alert(err instanceof Error ? err.message : "Generation failed");
+    } finally {
+      setGenerating(null);
+    }
+  };
+
+  const handleModalUpdate = async (bucketId: string, type: "title" | "description", variantId: string, newText: string) => {
+    const { updateCopy } = await import("@/lib/api");
+    const updated = await updateCopy(variantId, { text: newText });
+    if (type === "title") setModalTitles(prev => prev.map(v => v.id === variantId ? { ...v, text: updated.text } : v));
+    else setModalDescs(prev => prev.map(v => v.id === variantId ? { ...v, text: updated.text } : v));
+  };
+
+  const handleModalSetPrimary = async (bucketId: string, type: "title" | "description", variantId: string) => {
+    const { updateCopy } = await import("@/lib/api");
+    await updateCopy(variantId, { is_primary: true });
+    if (type === "title") setModalTitles(prev => prev.map(v => ({ ...v, isPrimary: v.id === variantId })));
+    else setModalDescs(prev => prev.map(v => ({ ...v, isPrimary: v.id === variantId })));
+  };
+
+  const handleModalRegenerate = async (bucketId: string, type: "title" | "description", copyId: string, feedback: string) => {
+    const { regenerateCopy } = await import("@/lib/api");
+    const newCopy = await regenerateCopy(copyId, feedback);
+    const v = apiCopyToVariant(newCopy);
+    if (type === "title") setModalTitles(prev => [...prev, v]);
+    else setModalDescs(prev => [...prev, v]);
+  };
+
+  const handleModalAdd = async (bucketId: string, type: "title" | "description", text: string) => {
+    const { createCustomListCopy } = await import("@/lib/api");
+    const newCopy = await createCustomListCopy(bucketId, { copy_type: type, text });
+    const v = apiCopyToVariant(newCopy);
+    if (type === "title") setModalTitles(prev => [...prev, v]);
+    else setModalDescs(prev => [...prev, v]);
+  };
+
+  const handleModalDelete = async (bucketId: string, type: "title" | "description", variantId: string) => {
+    const { deleteCopy } = await import("@/lib/api");
+    await deleteCopy(variantId);
+    if (type === "title") setModalTitles(prev => prev.filter(v => v.id !== variantId));
+    else setModalDescs(prev => prev.filter(v => v.id !== variantId));
+  };
+
+  if (loading) return <div className="text-center py-12 text-zinc-500">Loading custom lists...</div>;
+  if (lists.length === 0) return <div className="text-center py-12 text-zinc-500">No custom lists yet. Upload a CSV in Custom List mode.</div>;
+
+  return (
+    <>
+      <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800/40 rounded-xl overflow-hidden">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-zinc-200 dark:border-zinc-800/40 bg-zinc-50 dark:bg-zinc-800/30">
+              <th className="text-left px-4 py-3 font-semibold text-zinc-500 text-[11px] uppercase tracking-wider">List Name</th>
+              <th className="text-right px-4 py-3 font-semibold text-zinc-500 text-[11px] uppercase tracking-wider">Total</th>
+              <th className="text-right px-4 py-3 font-semibold text-zinc-500 text-[11px] uppercase tracking-wider">Available</th>
+              <th className="text-center px-4 py-3 font-semibold text-zinc-500 text-[11px] uppercase tracking-wider">Titles</th>
+              <th className="text-center px-4 py-3 font-semibold text-zinc-500 text-[11px] uppercase tracking-wider">Descriptions</th>
+              <th className="text-center px-4 py-3 font-semibold text-zinc-500 text-[11px] uppercase tracking-wider">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800/30">
+            {lists.map((cl) => (
+              <tr key={cl.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/20 transition-colors">
+                <td className="px-4 py-3 font-medium text-zinc-800 dark:text-zinc-200 max-w-[400px] truncate" title={cl.name}>{cl.name}</td>
+                <td className="px-4 py-3 text-right font-mono text-zinc-600 dark:text-zinc-400">{cl.total_contacts.toLocaleString()}</td>
+                <td className="px-4 py-3 text-right font-mono text-violet-500">{cl.available_contacts.toLocaleString()}</td>
+                <td className="px-4 py-3 text-center">
+                  <button onClick={() => openModal(cl, "title")} className="text-[10px] font-semibold text-violet-500 hover:text-violet-400 transition-colors">
+                    View →
+                  </button>
+                </td>
+                <td className="px-4 py-3 text-center">
+                  <button onClick={() => openModal(cl, "description")} className="text-[10px] font-semibold text-blue-500 hover:text-blue-400 transition-colors">
+                    View →
+                  </button>
+                </td>
+                <td className="px-4 py-3 text-center">
+                  <button
+                    onClick={() => handleGenerate(cl.id)}
+                    disabled={generating === cl.id}
+                    className="px-3 py-1 text-[10px] font-semibold bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white rounded-md transition-colors"
+                  >
+                    {generating === cl.id ? "Generating..." : "Generate Copies"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {modalUploadId && modalBucket && (
+        <VariationsModal
+          bucket={modalBucket}
+          initialTab={modalTab}
+          titles={modalTitles}
+          descriptions={modalDescs}
+          onClose={() => { setModalUploadId(null); setModalBucket(null); }}
+          onUpdateVariant={handleModalUpdate}
+          onSetPrimary={handleModalSetPrimary}
+          onRegenerate={handleModalRegenerate}
+          onAddVariant={handleModalAdd}
+          onDeleteVariant={handleModalDelete}
+        />
+      )}
+    </>
+  );
+}
+
+
 /* ─── Main Component ───────────────────────────────────────────────────── */
 
 export function CopyGeneratorPage() {
+  const [sourceTab, setSourceTab] = useState<"buckets" | "custom_lists">("buckets");
   const [buckets, setBuckets] = useState<ApiBucket[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -734,10 +899,40 @@ export function CopyGeneratorPage() {
           </div>
         </div>
 
+        {/* ── Source Tab Switcher ───────────────────────────────────────── */}
+        <div className="flex items-center gap-2 mb-4">
+          <div className="flex gap-1 bg-zinc-200 dark:bg-zinc-800 rounded-lg p-0.5">
+            <button
+              onClick={() => setSourceTab("buckets")}
+              className={`px-4 py-1.5 rounded-md text-xs font-semibold transition-all ${
+                sourceTab === "buckets"
+                  ? "bg-white dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100 shadow-sm"
+                  : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700"
+              }`}
+            >Buckets</button>
+            <button
+              onClick={() => setSourceTab("custom_lists")}
+              className={`px-4 py-1.5 rounded-md text-xs font-semibold transition-all ${
+                sourceTab === "custom_lists"
+                  ? "bg-white dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100 shadow-sm"
+                  : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700"
+              }`}
+            >Custom Lists</button>
+          </div>
+        </div>
+
         {/* ── Brain Panel ──────────────────────────────────────────────── */}
         <div className="mb-4">
           <BrainPanel />
         </div>
+
+        {/* ── Custom Lists Tab Content ─────────────────────────────────── */}
+        {sourceTab === "custom_lists" && (
+          <CustomListsCopySection />
+        )}
+
+        {/* ── Buckets Tab Content ─────────────────────────────────────── */}
+        {sourceTab === "buckets" && <>
 
         {/* ── Floating Action Bar ──────────────────────────────────────── */}
         {someSelected && (
@@ -1057,6 +1252,8 @@ export function CopyGeneratorPage() {
             </tbody>
           </table>
         </div>
+
+      </>}
       </div>
 
       {/* ── Modal ──────────────────────────────────────────────────────── */}
