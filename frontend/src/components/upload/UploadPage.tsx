@@ -84,6 +84,10 @@ export function UploadPage() {
   const [newFieldName, setNewFieldName] = useState("");
   const [showNewField, setShowNewField] = useState(false);
 
+  // Upload mode
+  const [uploadMode, setUploadMode] = useState<"bucket" | "custom_list">("bucket");
+  const [customListName, setCustomListName] = useState("");
+
   // Duplicate handling
   const [duplicateMode, setDuplicateMode] = useState<"ignore" | "overwrite">("ignore");
 
@@ -198,15 +202,17 @@ export function UploadPage() {
     if (!uploadResponse) return;
 
     try {
-      await startImport(uploadResponse.id, mappings, duplicateMode);
+      await startImport(uploadResponse.id, mappings, duplicateMode, uploadMode, uploadMode === "custom_list" ? customListName : undefined);
       setStep("idle");
       setUploadResponse(null);
       setMappings({});
+      setUploadMode("bucket");
+      setCustomListName("");
       loadHistory();
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : "Failed to start import");
     }
-  }, [uploadResponse, mappings, duplicateMode, loadHistory]);
+  }, [uploadResponse, mappings, duplicateMode, uploadMode, customListName, loadHistory]);
 
   /* ── History item click handler ────────────────────────────────────── */
 
@@ -489,6 +495,48 @@ export function UploadPage() {
           </div>
 
           <div style={{ padding: "0 32px" }}>
+            {/* Upload mode toggle */}
+            <div style={{ display: "flex", alignItems: "center", gap: 16, margin: "20px 0 0" }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: "var(--muted-foreground)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Upload Mode:</span>
+              <div style={{ display: "flex", gap: 4, background: "var(--background)", borderRadius: 8, padding: 3, border: "1px solid var(--border-subtle)" }}>
+                <button
+                  onClick={() => setUploadMode("bucket")}
+                  style={{
+                    padding: "6px 16px", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer", border: "none",
+                    background: uploadMode === "bucket" ? "#7c3aed" : "transparent",
+                    color: uploadMode === "bucket" ? "white" : "var(--muted-foreground)",
+                    transition: "all 150ms",
+                  }}
+                >Bucket Upload</button>
+                <button
+                  onClick={() => setUploadMode("custom_list")}
+                  style={{
+                    padding: "6px 16px", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer", border: "none",
+                    background: uploadMode === "custom_list" ? "#7c3aed" : "transparent",
+                    color: uploadMode === "custom_list" ? "white" : "var(--muted-foreground)",
+                    transition: "all 150ms",
+                  }}
+                >Custom List</button>
+              </div>
+              {uploadMode === "custom_list" && (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
+                  <label style={{ fontSize: 12, fontWeight: 600, color: "var(--muted-foreground)", whiteSpace: "nowrap" }}>List Name:</label>
+                  <input
+                    type="text"
+                    value={customListName}
+                    onChange={(e) => setCustomListName(e.target.value)}
+                    placeholder={uploadResponse?.file_name?.replace(/\.csv$/i, "") || "Enter list name"}
+                    style={{
+                      flex: 1, padding: "6px 12px", borderRadius: 8, border: "1px solid var(--border-subtle)",
+                      background: "var(--card-bg)", color: "var(--foreground)", fontSize: 13,
+                      outline: "none",
+                    }}
+                    onFocus={() => { if (!customListName && uploadResponse) setCustomListName(uploadResponse.file_name.replace(/\.csv$/i, "")); }}
+                  />
+                </div>
+              )}
+            </div>
+
             {/* Mapping table */}
             <div style={{ margin: "24px 0", border: "1px solid var(--border-subtle)", borderRadius: 12, overflow: "hidden" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
@@ -523,7 +571,7 @@ export function UploadPage() {
                             outline: "none", boxShadow: isMapped ? "0 0 0 1px #3b82f6" : "none",
                           }}
                         >
-                          {SYSTEM_FIELDS.map((f) => (
+                          {SYSTEM_FIELDS.filter((f) => uploadMode !== "custom_list" || f.value !== "bucket").map((f) => (
                             <option key={f.value} value={f.value}>{f.label}</option>
                           ))}
                           {customFields.map((f) => (
@@ -625,17 +673,22 @@ export function UploadPage() {
           <div style={{ padding: "24px 32px", borderTop: "1px solid var(--border-subtle)", background: "var(--background)" }}>
             <button
               onClick={handleImport}
+              disabled={uploadMode === "custom_list" && !customListName.trim()}
               style={{
                 width: "100%", padding: "14px 0", fontSize: 15, fontWeight: 600,
-                background: "linear-gradient(135deg, #3b82f6, #8b5cf6)",
-                color: "#fff", border: "none", borderRadius: 10, cursor: "pointer",
+                background: (uploadMode === "custom_list" && !customListName.trim())
+                  ? "linear-gradient(135deg, #6b7280, #9ca3af)"
+                  : "linear-gradient(135deg, #3b82f6, #8b5cf6)",
+                color: "#fff", border: "none", borderRadius: 10,
+                cursor: (uploadMode === "custom_list" && !customListName.trim()) ? "not-allowed" : "pointer",
                 boxShadow: "0 4px 14px rgba(59,130,246,0.3)", transition: "transform 100ms",
+                opacity: (uploadMode === "custom_list" && !customListName.trim()) ? 0.6 : 1,
               }}
               onMouseDown={(e) => e.currentTarget.style.transform = "scale(0.99)"}
               onMouseUp={(e) => e.currentTarget.style.transform = "scale(1)"}
               onMouseLeave={(e) => e.currentTarget.style.transform = "scale(1)"}
             >
-              🚀 Start Import ({formatNumber(uploadResponse.total_rows)} rows)
+              🚀 Start {uploadMode === "custom_list" ? "Custom List" : "Bucket"} Import ({formatNumber(uploadResponse.total_rows)} rows)
             </button>
           </div>
         </div>

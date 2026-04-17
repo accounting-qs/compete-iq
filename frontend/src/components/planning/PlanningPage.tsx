@@ -9,7 +9,9 @@ import {
   updateAssignment as apiUpdateAssignment, updateWebinar as apiUpdateWebinar,
   deleteWebinar as apiDeleteWebinar, deleteCopy,
   createCopy as apiCreateCopy, updateCopy as apiUpdateCopy, regenerateCopy as apiRegenerateCopy,
+  fetchCustomLists, fetchCustomListCopies,
   type ApiBucket, type ApiSender, type ApiWebinar, type ApiAssignment, type ApiCopy,
+  type ApiCustomList,
 } from "@/lib/api";
 import { VariationsModal, apiCopyToVariant, type CopyVariant } from "../shared/VariationsModal";
 
@@ -115,6 +117,8 @@ interface PlannedList {
   isNonjoiners?: boolean;
   isNoListData?: boolean;
   isSetup?: boolean;
+  sourceType?: string;
+  sourceUploadId?: string;
   // Copy variants
   titleVariants?: { id: string; text: string; selected: boolean; variantIndex: number }[];
   descVariants?: { id: string; text: string; selected: boolean; variantIndex: number }[];
@@ -217,6 +221,8 @@ function apiAssignmentToList(a: ApiAssignment): PlannedList {
     isNonjoiners: a.is_nonjoiners,
     isNoListData: a.is_no_list_data,
     isSetup: a.is_setup,
+    sourceType: a.source_type,
+    sourceUploadId: a.source_upload_id || undefined,
     copiesGenerated: !!a.title_copy,
     bucketId: a.bucket?.id,
     titleVariants: a.title_copy ? [{ id: a.title_copy.id, text: a.title_copy.text, selected: true, variantIndex: a.title_copy.variant_index }] : undefined,
@@ -475,7 +481,10 @@ export function PlanningPage() {
 
   // Assignment form state — scoped to one webinar at a time
   const [assigningWebinarId, setAssigningWebinarId] = useState<string | null>(null);
+  const [assignTab, setAssignTab] = useState<"buckets" | "custom_lists">("buckets");
   const [assignBucket, setAssignBucket] = useState("");
+  const [assignCustomList, setAssignCustomList] = useState("");
+  const [customLists, setCustomLists] = useState<ApiCustomList[]>([]);
   const [assignSender, setAssignSender] = useState("");
   const [assignVolume, setAssignVolume] = useState(0);
   // Assignment filter overrides (pre-filled from bucket, editable)
@@ -579,6 +588,7 @@ export function PlanningPage() {
       // Reset form and open for this webinar
       setAssigningWebinarId(webinarId);
       setAssignBucket("");
+      setAssignCustomList("");
       setAssignSender("");
       setAssignVolume(0);
       setAssignCountries("");
@@ -586,6 +596,8 @@ export function PlanningPage() {
       setAssignAccounts(0);
       setAssignSendPerAcct(0);
       setAssignDays(5);
+      // Load custom lists
+      fetchCustomLists().then(({ lists }) => setCustomLists(lists)).catch(() => {});
     }
   };
 
@@ -697,23 +709,40 @@ export function PlanningPage() {
 
   const handleAssign = useCallback(async (webinarIdOverride?: string) => {
     const targetId = webinarIdOverride || assigningWebinarId;
-    if (!assignBucket || !assignSender || assignVolume <= 0 || !targetId) return;
-    const bucket = buckets.find((b) => b.id === assignBucket);
-    const sender = senders.find((s) => s.id === assignSender);
-    if (!bucket || !sender) return;
+    if (!assignSender || assignVolume <= 0 || !targetId) return;
 
-    const volume = Math.min(assignVolume, bucket.remaining_contacts);
+    const isCustomListAssign = assignTab === "custom_lists";
+
+    if (!isCustomListAssign && !assignBucket) return;
+    if (isCustomListAssign && !assignCustomList) return;
+
+    const sender = senders.find((s) => s.id === assignSender);
+    if (!sender) return;
+
     const sendPerAcct = assignSendPerAcct > 0 ? assignSendPerAcct : sender.sendPerAccount;
     const calculatedAccts = sendPerAcct > 0 && assignDays > 0
-      ? Math.ceil(volume / (sendPerAcct * assignDays))
+      ? Math.ceil(assignVolume / (sendPerAcct * assignDays))
       : 0;
     const accts = assignAccounts > 0 ? assignAccounts : calculatedAccts;
 
-    const countries = assignCountries || (bucket.countries || []).join(", ");
-    const empRange = assignEmpRange || bucket.emp_range || "";
+    let requestData: Parameters<typeof assignBucketToWebinar>[1];
 
-    try {
-      const assignment = await assignBucketToWebinar(targetId, {
+    if (isCustomListAssign) {
+      requestData = {
+        upload_id: assignCustomList,
+        sender_id: assignSender,
+        volume: assignVolume,
+        accounts_used: accts,
+        send_per_account: sendPerAcct,
+        days: assignDays,
+      };
+    } else {
+      const bucket = buckets.find((b) => b.id === assignBucket);
+      if (!bucket) return;
+      const volume = Math.min(assignVolume, bucket.remaining_contacts);
+      const countries = assignCountries || (bucket.countries || []).join(", ");
+      const empRange = assignEmpRange || bucket.emp_range || "";
+      requestData = {
         bucket_id: assignBucket,
         sender_id: assignSender,
         volume,
@@ -722,7 +751,11 @@ export function PlanningPage() {
         days: assignDays,
         countries_override: countries,
         emp_range_override: empRange,
-      });
+      };
+    }
+
+    try {
+      const assignment = await assignBucketToWebinar(targetId, requestData);
 
       // Add to webinar in local state
       const newList = apiAssignmentToList(assignment);
@@ -730,15 +763,21 @@ export function PlanningPage() {
         w.id === targetId ? { ...w, lists: [...w.lists, newList] } : w
       ));
 
-      // Update bucket remaining with authoritative DB value
-      if (assignment.bucket_remaining !== undefined) {
+      // Update bucket remaining with authoritative DB value (only for bucket assignments)
+      if (!isCustomListAssign && assignment.bucket_remaining !== undefined) {
         setBuckets((prev) => prev.map((b) =>
           b.id === assignBucket ? { ...b, remaining_contacts: assignment.bucket_remaining! } : b
         ));
       }
 
+      // Refresh custom lists if we assigned from one
+      if (isCustomListAssign) {
+        fetchCustomLists().then(({ lists }) => setCustomLists(lists)).catch(() => {});
+      }
+
       // Reset form
       setAssignBucket("");
+      setAssignCustomList("");
       setAssignSender("");
       setAssignVolume(0);
       setAssignCountries("");
@@ -748,7 +787,7 @@ export function PlanningPage() {
       setAssignDays(5);
     } catch (err) {
       console.error("Failed to assign:", err);
-      alert(err instanceof Error ? err.message : "Failed to assign bucket");
+      alert(err instanceof Error ? err.message : "Failed to assign");
     }
   }, [assignBucket, assignSender, assignVolume, assigningWebinarId, assignCountries, assignEmpRange, assignAccounts, assignSendPerAcct, assignDays, buckets, senders]);
 
@@ -974,20 +1013,47 @@ export function PlanningPage() {
 
   const openVariationsModal = useCallback(async (listId: string, webinarId: string, tab: "title" | "description") => {
     const list = webinars.find(w => w.id === webinarId)?.lists.find(l => l.id === listId);
-    if (!list?.bucketId) return;
+    if (!list) return;
     setPlanningCopyModal({ listId, webinarId, tab });
     setModalBucketData(null);
     try {
-      const bucketData = buckets.find(b => b.id === list.bucketId);
-      if (!bucketData) return;
-      const copies = await fetchBucketCopies(list.bucketId);
-      setModalBucketData({
-        bucket: bucketData,
-        titles: copies.titles,
-        descriptions: copies.descriptions,
-      });
+      if (list.sourceType === "custom_list" && list.sourceUploadId) {
+        // Custom list: load copies from upload endpoint
+        const copies = await fetchCustomListCopies(list.sourceUploadId);
+        // Create a synthetic "bucket" object for the modal header
+        setModalBucketData({
+          bucket: {
+            id: list.sourceUploadId,
+            name: list.listName || list.description || "Custom List",
+            industry: null,
+            total_contacts: list.listSize,
+            remaining_contacts: list.listRemain,
+            countries: [],
+            emp_range: null,
+            source_file: null,
+            copies_count: { titles: copies.titles.length, descriptions: copies.descriptions.length },
+            has_primary_title: copies.titles.some(c => c.is_primary),
+            has_primary_description: copies.descriptions.some(c => c.is_primary),
+            title_primary_picked: false,
+            desc_primary_picked: false,
+            created_at: null,
+          },
+          titles: copies.titles,
+          descriptions: copies.descriptions,
+        });
+      } else if (list.bucketId) {
+        // Bucket: existing flow
+        const bucketData = buckets.find(b => b.id === list.bucketId);
+        if (!bucketData) return;
+        const copies = await fetchBucketCopies(list.bucketId);
+        setModalBucketData({
+          bucket: bucketData,
+          titles: copies.titles,
+          descriptions: copies.descriptions,
+        });
+      }
     } catch (err) {
-      console.error("Failed to load bucket copies:", err);
+      console.error("Failed to load copies:", err);
     }
   }, [webinars, buckets]);
 
@@ -1494,12 +1560,57 @@ export function PlanningPage() {
                       <td colSpan={16} className="p-0">
                         <div className="relative z-20 bg-zinc-50 dark:bg-zinc-900/40 border-y border-zinc-200 dark:border-zinc-800/30 px-6 py-4">
                           <div className="flex items-center justify-between mb-3">
-                            <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">Assign Buckets to W{w.number}</span>
-                            <span className="text-[10px] text-zinc-500">{buckets.filter((b) => b.remaining_contacts > 0).length} buckets available · {buckets.reduce((s, b) => s + (b.remaining_contacts || 0), 0).toLocaleString()} contacts</span>
+                            <div className="flex items-center gap-3">
+                              <span className="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">Assign Lists to W{w.number}</span>
+                              <div className="flex gap-1 bg-zinc-200 dark:bg-zinc-800 rounded-lg p-0.5">
+                                <button
+                                  onClick={() => setAssignTab("buckets")}
+                                  className={`px-3 py-1 rounded-md text-[10px] font-semibold transition-all ${
+                                    assignTab === "buckets"
+                                      ? "bg-white dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100 shadow-sm"
+                                      : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700"
+                                  }`}
+                                >Buckets</button>
+                                <button
+                                  onClick={() => setAssignTab("custom_lists")}
+                                  className={`px-3 py-1 rounded-md text-[10px] font-semibold transition-all ${
+                                    assignTab === "custom_lists"
+                                      ? "bg-white dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100 shadow-sm"
+                                      : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-700"
+                                  }`}
+                                >Custom Lists</button>
+                              </div>
+                            </div>
+                            {assignTab === "buckets" ? (
+                              <span className="text-[10px] text-zinc-500">{buckets.filter((b) => b.remaining_contacts > 0).length} buckets available · {buckets.reduce((s, b) => s + (b.remaining_contacts || 0), 0).toLocaleString()} contacts</span>
+                            ) : (
+                              <span className="text-[10px] text-zinc-500">{customLists.length} custom lists available</span>
+                            )}
                           </div>
 
-                          {/* Assignment form — row 1: bucket + sender + volume */}
+                          {/* Assignment form — row 1: source + sender + volume */}
                           <div className="flex items-end gap-3 mb-2">
+                            {assignTab === "custom_lists" ? (
+                              <div className="flex-1 min-w-[200px]">
+                                <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Custom List</label>
+                                <Dropdown
+                                  placeholder="Select custom list..."
+                                  value={assignCustomList}
+                                  onChange={(val) => {
+                                    setAssignCustomList(val);
+                                    const cl = customLists.find((l) => l.id === val);
+                                    if (cl) {
+                                      setAssignVolume(cl.available_contacts);
+                                      setAssignAccounts(0);
+                                    }
+                                  }}
+                                  options={customLists.filter((l) => l.available_contacts > 0).map((l) => ({
+                                    value: l.id,
+                                    label: `${l.name} (${l.available_contacts.toLocaleString()} available)`,
+                                  }))}
+                                />
+                              </div>
+                            ) : (
                             <div className="flex-1 min-w-[200px]">
                               <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Bucket</label>
                               <Dropdown
@@ -1533,6 +1644,7 @@ export function PlanningPage() {
                                 }))}
                               />
                             </div>
+                            )}
                             <div className="w-56">
                               <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Sender</label>
                               <Dropdown

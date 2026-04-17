@@ -129,6 +129,8 @@ export interface ApiAssignment {
   is_nonjoiners: boolean;
   is_no_list_data: boolean;
   is_setup: boolean;
+  source_type: string;
+  source_upload_id: string | null;
   list_name: string | null;
   display_order: number;
   bucket_remaining?: number;
@@ -467,7 +469,8 @@ export async function fetchWebinarLists(webinarId: string): Promise<{ assignment
 export async function assignBucketToWebinar(
   webinarId: string,
   data: {
-    bucket_id: string;
+    bucket_id?: string;
+    upload_id?: string;
     sender_id: string;
     volume: number;
     accounts_used?: number;
@@ -508,6 +511,41 @@ export async function deleteAssignment(assignmentId: string): Promise<{ released
     headers: authHeaders(),
   });
   if (!res.ok) throw new Error("Failed to delete assignment");
+  return res.json();
+}
+
+/* ── Outreach: Custom Lists ────────────────────────────────────────────── */
+
+export interface ApiCustomList {
+  id: string;
+  name: string;
+  total_contacts: number;
+  available_contacts: number;
+  created_at: string | null;
+}
+
+export async function fetchCustomLists(): Promise<{ lists: ApiCustomList[] }> {
+  const res = await fetch(`${API_URL}/outreach/uploads/custom-lists`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to fetch custom lists");
+  return res.json();
+}
+
+export async function fetchCustomListCopies(uploadId: string): Promise<{ upload_id: string; titles: ApiCopy[]; descriptions: ApiCopy[] }> {
+  const res = await fetch(`${API_URL}/outreach/uploads/${uploadId}/copies`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to fetch custom list copies");
+  return res.json();
+}
+
+export async function generateCustomListCopies(
+  uploadId: string,
+  data: { copy_type: "title" | "description" | "both"; variant_count?: number }
+): Promise<{ upload_id: string; batch_id: string; titles: ApiCopy[]; descriptions: ApiCopy[] }> {
+  const res = await fetch(`${API_URL}/outreach/uploads/${uploadId}/copies/generate`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error("Failed to generate custom list copies");
   return res.json();
 }
 
@@ -604,11 +642,18 @@ export async function startImport(
   uploadId: string,
   fieldMappings: Record<string, string>,
   duplicateMode: string = "ignore",
+  uploadMode: string = "bucket",
+  customListName?: string,
 ): Promise<{ id: string; status: string }> {
   const res = await fetch(`${API_URL}/outreach/uploads/${uploadId}/import`, {
     method: "POST",
     headers: jsonHeaders(),
-    body: JSON.stringify({ field_mappings: fieldMappings, duplicate_mode: duplicateMode }),
+    body: JSON.stringify({
+      field_mappings: fieldMappings,
+      duplicate_mode: duplicateMode,
+      upload_mode: uploadMode,
+      custom_list_name: customListName,
+    }),
   });
   if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to start import"));
   return res.json();
