@@ -5,10 +5,9 @@ import { usePathname } from "next/navigation";
 import { ThemeToggle } from "./ThemeToggle";
 
 const NAV_LINKS = [
-  { href: "/", label: "Studio" },
-  { href: "/upload", label: "List Upload" },
+  { href: "/", label: "Planning" },
   { href: "/copy-generator", label: "Copy Generator" },
-  { href: "/planning", label: "Planning" },
+  { href: "/upload", label: "List Upload" },
   { href: "/library", label: "Library" },
 ];
 
@@ -16,7 +15,7 @@ export function TopNav() {
   const pathname = usePathname();
 
   function isActive(href: string) {
-    if (href === "/") return pathname === "/" || pathname === "/studio";
+    if (href === "/") return pathname === "/" || pathname === "/planning";
     return pathname.startsWith(href);
   }
 

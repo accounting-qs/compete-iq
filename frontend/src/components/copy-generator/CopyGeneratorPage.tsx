@@ -879,9 +879,18 @@ export function CopyGeneratorPage() {
 
         {/* ── Page Header ──────────────────────────────────────────────── */}
         <div className="flex items-center justify-between mb-6">
-          <div>
-            <h1 className="text-xl font-bold text-zinc-900 dark:text-zinc-100 tracking-tight">Calendar Invite Copy Generator</h1>
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-0.5">Generate calendar invite titles and descriptions for your outreach buckets.</p>
+          <div className="flex items-center gap-3">
+            <a
+              href="/studio"
+              className="px-3 py-1.5 bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700 border border-zinc-200 dark:border-zinc-700/60 rounded-lg text-xs font-semibold text-zinc-700 dark:text-zinc-300 transition-colors flex items-center gap-1.5"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+              Studio
+            </a>
+            <div>
+              <h1 className="text-xl font-bold text-zinc-900 dark:text-zinc-100 tracking-tight">Calendar Invite Copy Generator</h1>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-0.5">Generate calendar invite titles and descriptions for your outreach buckets.</p>
+            </div>
           </div>
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800/40 rounded-lg px-3 py-1.5">

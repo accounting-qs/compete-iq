@@ -1450,7 +1450,6 @@ export function PlanningPage() {
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[130px]">Webinar #</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Status</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[320px]">Description of List</th>
-              <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[180px]">List Name</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] w-[130px] max-w-[130px]">Bucket</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Sender</th>
               <th className="text-right px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">List Size</th>
@@ -1474,13 +1473,13 @@ export function PlanningPage() {
                 <tbody key={w.id}>
                   {/* ── Webinar parent row ─────────────────────────── */}
                   <tr className="bg-zinc-100 dark:bg-zinc-800/40 hover:bg-zinc-200 dark:hover:bg-zinc-800/60 cursor-pointer border-t-2 border-zinc-300 dark:border-zinc-700/40 transition-colors">
-                    <td className="px-2 py-2.5 text-center" onClick={() => toggleWebinar(w.id)}>
+                    <td className="px-2 py-1.5 text-center" onClick={() => toggleWebinar(w.id)}>
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
                         className={`text-zinc-600 dark:text-zinc-400 transition-transform duration-200 ${w.expanded ? "rotate-90" : ""}`}>
                         <path d="M9 18l6-6-6-6"/>
                       </svg>
                     </td>
-                    <td className="px-1 py-2.5">
+                    <td className="px-1 py-1.5">
                       {wLists.length > 0 && (
                         <div onClick={() => selectAllInWebinar(w.id)} className={`w-3.5 h-3.5 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${
                           allInWebinarSelected ? "bg-violet-600 border-violet-600" : "border-zinc-600 hover:border-zinc-500"
@@ -1489,15 +1488,15 @@ export function PlanningPage() {
                         </div>
                       )}
                     </td>
-                    <td className="px-2 py-2.5" onClick={() => toggleWebinar(w.id)}>
+                    <td className="px-2 py-1.5" onClick={() => toggleWebinar(w.id)}>
                       <div className="flex items-center gap-2">
                         <span className="text-zinc-900 dark:text-zinc-100 font-bold text-sm">{w.number}</span>
-                        <span className="text-zinc-500">{w.date}</span>
+                        <span className="text-[11px] text-zinc-500">{w.date}</span>
                         {w.broadcastId && w.broadcastId !== "—" && (
-                          <span className="text-[9px] text-zinc-500 font-mono bg-zinc-100 dark:bg-zinc-800/60 px-1.5 py-0.5 rounded border border-zinc-300 dark:border-zinc-700/30">ID: {w.broadcastId}</span>
+                          <span className="text-[9px] text-zinc-500 font-mono bg-zinc-100 dark:bg-zinc-800/60 px-1 py-0.5 rounded border border-zinc-300 dark:border-zinc-700/30">ID: {w.broadcastId}</span>
                         )}
                         {w.expanded && (
-                          <div className="flex items-center gap-1 ml-1" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex items-center gap-0.5 ml-1" onClick={(e) => e.stopPropagation()}>
                             <button onClick={() => {
                               const d = new Date(w.date);
                               setEditWebinar({
@@ -1509,34 +1508,34 @@ export function PlanningPage() {
                                 registrationLink: w.registrationLink,
                                 unsubscribeLink: w.unsubscribeLink,
                               });
-                            }} className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors" title="Edit webinar">
-                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                            }} className="p-0.5 rounded hover:bg-zinc-200 dark:hover:bg-zinc-800 text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors" title="Edit webinar">
+                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                             </button>
                             <button onClick={() => handleDeleteWebinar(w.id)}
-                              className="p-1 rounded hover:bg-red-500/10 text-zinc-500 hover:text-red-400 transition-colors" title="Delete webinar">
-                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              className="p-0.5 rounded hover:bg-red-500/10 text-zinc-500 hover:text-red-400 transition-colors" title="Delete webinar">
+                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                 <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
                               </svg>
                             </button>
+                            {w.lists.length > 0 && (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); toggleAssignForm(w.id); }}
+                                className={`ml-1 px-2 py-0.5 text-[9px] font-semibold rounded transition-colors flex items-center gap-1 ${
+                                  assigningWebinarId === w.id
+                                    ? "bg-violet-600 text-white"
+                                    : "bg-zinc-200 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-violet-500/20 hover:text-violet-500"
+                                }`}
+                              >
+                                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                                Assign
+                              </button>
+                            )}
                           </div>
                         )}
                       </div>
-                      {w.expanded && w.lists.length > 0 && (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); toggleAssignForm(w.id); }}
-                          className={`mt-1.5 px-2.5 py-1 text-[10px] font-semibold rounded-md transition-colors flex items-center gap-1 ${
-                            assigningWebinarId === w.id
-                              ? "bg-violet-600 text-white"
-                              : "bg-zinc-200 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-violet-500/20 hover:text-violet-500"
-                          }`}
-                        >
-                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14"/></svg>
-                          Assign Lists
-                        </button>
-                      )}
                     </td>
                     <td className="px-2 py-2.5"><StatusBadge status={w.status} /></td>
-                    <td className="px-2 py-2.5" colSpan={4}>
+                    <td className="px-2 py-1.5" colSpan={3}>
                       <input
                         type="text"
                         defaultValue={w.mainTitle}
@@ -1562,7 +1561,7 @@ export function PlanningPage() {
                   {/* ── Assignment section (only for the active webinar) ── */}
                   {w.expanded && (assigningWebinarId === w.id || w.lists.length === 0) && (
                     <tr>
-                      <td colSpan={16} className="p-0">
+                      <td colSpan={15} className="p-0">
                         <div className="relative z-20 bg-zinc-50 dark:bg-zinc-900/40 border-y border-zinc-200 dark:border-zinc-800/30 px-6 py-4">
                           <div className="flex items-center justify-between mb-3">
                             <div className="flex items-center gap-3">
@@ -1874,7 +1873,26 @@ export function PlanningPage() {
                           </div>
                         )}
                       </td>
-                      <td className="px-2 py-1.5"></td>
+                      <td className="px-2 py-1.5">
+                        {!l.isNonjoiners && !l.isNoListData && (
+                          <input
+                            type="text"
+                            defaultValue={l.listName || getDefaultListName(w.lists, l)}
+                            onBlur={(e) => {
+                              const val = e.target.value.trim();
+                              const defaultName = getDefaultListName(w.lists, l);
+                              const newName = val === defaultName ? undefined : val || undefined;
+                              if (newName !== l.listName) {
+                                setWebinars((prev) => prev.map((ww) => ({ ...ww, lists: ww.lists.map((ll) => ll.id === l.id ? { ...ll, listName: newName } : ll) })));
+                                apiUpdateAssignment(l.id, { list_name: val || "" }).catch(console.error);
+                              }
+                            }}
+                            onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                            className="w-full bg-transparent text-zinc-600 dark:text-zinc-400 text-[10px] border-none focus:outline-none focus:ring-1 focus:ring-violet-500 rounded px-0.5 placeholder-zinc-500 truncate"
+                            title={l.listName || getDefaultListName(w.lists, l)}
+                          />
+                        )}
+                      </td>
                       <td className="px-2 py-1.5"></td>
                       <td className="px-2 py-1.5">
                         <div className="flex items-center gap-1.5">
@@ -1899,25 +1917,6 @@ export function PlanningPage() {
                             )
                           )}
                         </div>
-                      </td>
-                      <td className="px-2 py-1.5">
-                        {!l.isNonjoiners && !l.isNoListData ? (
-                          <input
-                            type="text"
-                            defaultValue={l.listName || getDefaultListName(w.lists, l)}
-                            onBlur={(e) => {
-                              const val = e.target.value.trim();
-                              const defaultName = getDefaultListName(w.lists, l);
-                              const newName = val === defaultName ? undefined : val || undefined;
-                              if (newName !== l.listName) {
-                                setWebinars((prev) => prev.map((ww) => ({ ...ww, lists: ww.lists.map((ll) => ll.id === l.id ? { ...ll, listName: newName } : ll) })));
-                                apiUpdateAssignment(l.id, { list_name: val || "" }).catch(console.error);
-                              }
-                            }}
-                            onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-                            className="w-full bg-transparent text-zinc-700 dark:text-zinc-300 text-[11px] border-none focus:outline-none focus:ring-1 focus:ring-violet-500 rounded px-1 -ml-1 placeholder-zinc-500"
-                          />
-                        ) : <span className="text-zinc-600">—</span>}
                       </td>
                       <td className="px-2 py-1.5 w-[130px] max-w-[130px]">
                         {l.bucket !== "—" ? (
@@ -2082,7 +2081,7 @@ export function PlanningPage() {
                             </td>
                             <td className="px-2 py-2"></td>
                             <td className="px-2 py-2"></td>
-                            <td className="px-2 py-2" colSpan={2}>
+                            <td className="px-2 py-2">
                               <div className="flex items-center gap-2">
                                 <span
                                   title={g.bucketName}
@@ -2095,10 +2094,17 @@ export function PlanningPage() {
                                 </span>
                               </div>
                             </td>
-                            <td className="px-2 py-2"></td>
                             <td className="px-2 py-2">
-                              <div className="flex items-center gap-1 flex-wrap">
-                                {uniqSenders.map((s) => <SenderBadge key={s.name} name={s.name} color={s.color} />)}
+                              <div className="flex items-center gap-1 relative group/senders">
+                                {uniqSenders.slice(0, 2).map((s) => <SenderBadge key={s.name} name={s.name} color={s.color} />)}
+                                {uniqSenders.length > 2 && (
+                                  <span className="text-[9px] text-zinc-500 font-semibold cursor-default">+{uniqSenders.length - 2}</span>
+                                )}
+                                {uniqSenders.length > 2 && (
+                                  <div className="hidden group-hover/senders:flex absolute left-0 top-full mt-1 z-50 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg shadow-lg p-1.5 gap-1 flex-wrap min-w-[120px]">
+                                    {uniqSenders.map((s) => <SenderBadge key={s.name} name={s.name} color={s.color} />)}
+                                  </div>
+                                )}
                               </div>
                             </td>
                             <td className="px-2 py-2 text-right font-mono font-bold text-zinc-800 dark:text-zinc-100">
@@ -2180,7 +2186,7 @@ export function PlanningPage() {
                           </td>
                           <td className="px-2 py-2"></td>
                           <td className="px-2 py-2"></td>
-                          <td className="px-2 py-2" colSpan={2}>
+                          <td className="px-2 py-2">
                             <div className="flex items-center gap-2">
                               <span className="text-zinc-800 dark:text-zinc-100 text-xs font-bold italic">
                                 Unique Buckets
@@ -2188,15 +2194,19 @@ export function PlanningPage() {
                               <span className="text-[10px] font-semibold text-zinc-500 dark:text-zinc-400 px-1.5 py-0.5 rounded bg-zinc-200 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/40">
                                 {singleListLists.length}
                               </span>
-                              <span className="text-[10px] text-zinc-500 dark:text-zinc-400">
-                                · one assignment per bucket
-                              </span>
                             </div>
                           </td>
-                          <td className="px-2 py-2"></td>
                           <td className="px-2 py-2">
-                            <div className="flex items-center gap-1 flex-wrap">
-                              {uniqSenders.map((s) => <SenderBadge key={s.name} name={s.name} color={s.color} />)}
+                            <div className="flex items-center gap-1 relative group/usenders">
+                              {uniqSenders.slice(0, 2).map((s) => <SenderBadge key={s.name} name={s.name} color={s.color} />)}
+                              {uniqSenders.length > 2 && (
+                                <span className="text-[9px] text-zinc-500 font-semibold cursor-default">+{uniqSenders.length - 2}</span>
+                              )}
+                              {uniqSenders.length > 2 && (
+                                <div className="hidden group-hover/usenders:flex absolute left-0 top-full mt-1 z-50 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg shadow-lg p-1.5 gap-1 flex-wrap min-w-[120px]">
+                                  {uniqSenders.map((s) => <SenderBadge key={s.name} name={s.name} color={s.color} />)}
+                                </div>
+                              )}
                             </div>
                           </td>
                           <td className="px-2 py-2 text-right font-mono font-bold text-zinc-800 dark:text-zinc-100">
