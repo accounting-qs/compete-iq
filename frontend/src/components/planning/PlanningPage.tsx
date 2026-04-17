@@ -9,7 +9,7 @@ import {
   updateAssignment as apiUpdateAssignment, updateWebinar as apiUpdateWebinar,
   deleteWebinar as apiDeleteWebinar, deleteCopy,
   createCopy as apiCreateCopy, updateCopy as apiUpdateCopy, regenerateCopy as apiRegenerateCopy,
-  fetchCustomLists, fetchCustomListCopies,
+  fetchCustomLists, fetchCustomListCopies, createCustomListCopy as apiCreateCustomListCopy,
   type ApiBucket, type ApiSender, type ApiWebinar, type ApiAssignment, type ApiCopy,
   type ApiCustomList,
 } from "@/lib/api";
@@ -1096,7 +1096,12 @@ export function PlanningPage() {
 
   const handleModalAddVariant = useCallback(async (bucketId: string, type: "title" | "description", text: string) => {
     try {
-      const newCopy = await apiCreateCopy(bucketId, { copy_type: type, text });
+      // Detect if this is a custom-list assignment (bucketId is actually an upload_id)
+      const targetList = planningCopyModal ? webinars.flatMap(w => w.lists).find(l => l.id === planningCopyModal.listId) : null;
+      const isCustom = targetList?.sourceType === "custom_list";
+      const newCopy = isCustom
+        ? await apiCreateCustomListCopy(bucketId, { copy_type: type, text })
+        : await apiCreateCopy(bucketId, { copy_type: type, text });
       setModalBucketData(prev => {
         if (!prev || prev.bucket.id !== bucketId) return prev;
         const key = type === "title" ? "titles" : "descriptions";

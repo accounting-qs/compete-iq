@@ -229,6 +229,44 @@ async def generate_custom_list_copies(
     }
 
 
+@router.post("/uploads/{upload_id}/copies", status_code=201)
+async def create_custom_list_copy(
+    upload_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Create a manual copy variant for a custom list."""
+    from db.models import BucketCopy
+    from api.routers.outreach._helpers import copy_dict
+    from sqlalchemy import func as sqla_func
+
+    copy_type = body.get("copy_type", "title")
+    text = body.get("text", "")
+
+    max_idx_result = await db.execute(
+        select(sqla_func.max(BucketCopy.variant_index)).where(
+            BucketCopy.upload_id == upload_id,
+            BucketCopy.copy_type == copy_type,
+        )
+    )
+    max_idx = max_idx_result.scalar()
+    next_idx = (max_idx + 1) if max_idx is not None else 0
+
+    copy = BucketCopy(
+        user_id=LLOYD_USER_ID,
+        bucket_id=None,
+        upload_id=upload_id,
+        copy_type=copy_type,
+        variant_index=next_idx,
+        text=text,
+        is_primary=False,
+    )
+    db.add(copy)
+    await db.flush()
+    return copy_dict(copy)
+
+
 @router.get("/uploads/{upload_id}/copies")
 async def get_custom_list_copies(
     upload_id: str,

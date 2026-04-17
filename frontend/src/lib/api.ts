@@ -536,6 +536,19 @@ export async function fetchCustomListCopies(uploadId: string): Promise<{ upload_
   return res.json();
 }
 
+export async function createCustomListCopy(
+  uploadId: string,
+  data: { copy_type: "title" | "description"; text: string }
+): Promise<ApiCopy> {
+  const res = await fetch(`${API_URL}/outreach/uploads/${uploadId}/copies`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error("Failed to create custom list copy");
+  return res.json();
+}
+
 export async function generateCustomListCopies(
   uploadId: string,
   data: { copy_type: "title" | "description" | "both"; variant_count?: number }
