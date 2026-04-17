@@ -123,22 +123,25 @@ async def list_custom_lists(
         ).order_by(UploadHistory.created_at.desc())
     )
     uploads = result.scalars().all()
+    upload_ids = [u.id for u in uploads]
+
+    # Single GROUP BY query instead of 2*N round-trips
+    count_map: dict[str, tuple[int, int]] = {}
+    if upload_ids:
+        count_result = await db.execute(
+            select(
+                Contact.upload_id,
+                sa_func.count().label("total"),
+                sa_func.count().filter(Contact.outreach_status == "available").label("available"),
+            )
+            .where(Contact.upload_id.in_(upload_ids))
+            .group_by(Contact.upload_id)
+        )
+        count_map = {row.upload_id: (row.total, row.available) for row in count_result}
 
     lists = []
     for u in uploads:
-        # Count available contacts for this custom list
-        avail_result = await db.execute(
-            select(sa_func.count()).where(
-                Contact.upload_id == u.id,
-                Contact.outreach_status == "available",
-            )
-        )
-        available = avail_result.scalar() or 0
-        total_result = await db.execute(
-            select(sa_func.count()).where(Contact.upload_id == u.id)
-        )
-        total = total_result.scalar() or 0
-
+        total, available = count_map.get(u.id, (0, 0))
         lists.append({
             "id": u.id,
             "name": u.custom_list_name or u.file_name,

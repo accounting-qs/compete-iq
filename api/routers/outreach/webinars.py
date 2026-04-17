@@ -380,7 +380,7 @@ async def assign_bucket(
     )
     assignment = reload_result.scalar_one()
     resp = assignment_dict(assignment)
-    resp["bucket_remaining"] = bucket.remaining_contacts
+    resp["bucket_remaining"] = bucket.remaining_contacts if bucket else None
     return resp
 
 

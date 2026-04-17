@@ -7,7 +7,6 @@ Revision ID: 019
 Revises: 018
 """
 from alembic import op
-import sqlalchemy as sa
 
 revision = "019"
 down_revision = "018"
@@ -29,8 +28,14 @@ def upgrade() -> None:
     op.execute("ALTER TABLE bucket_copies ADD COLUMN IF NOT EXISTS upload_id UUID REFERENCES upload_history(id) ON DELETE CASCADE")
     op.execute("CREATE INDEX IF NOT EXISTS ix_bucket_copies_upload_id ON bucket_copies (upload_id)")
 
+    # Performance indexes for custom list queries
+    op.execute("CREATE INDEX IF NOT EXISTS ix_wla_source_upload_id ON webinar_list_assignments (source_upload_id)")
+    op.execute("CREATE INDEX IF NOT EXISTS ix_contacts_upload_status_bucket ON contacts (upload_id, outreach_status, bucket_id)")
+
 
 def downgrade() -> None:
+    op.execute("DROP INDEX IF EXISTS ix_contacts_upload_status_bucket")
+    op.execute("DROP INDEX IF EXISTS ix_wla_source_upload_id")
     op.drop_index("ix_bucket_copies_upload_id", table_name="bucket_copies")
     op.drop_column("bucket_copies", "upload_id")
     op.execute("ALTER TABLE bucket_copies ALTER COLUMN bucket_id SET NOT NULL")

@@ -151,6 +151,7 @@ class WebinarListAssignment(Base):
         Index("ix_wla_sender_id", "sender_id"),
         Index("ix_wla_webinar_sender", "webinar_id", "sender_id"),
         Index("ix_wla_user_id", "user_id"),
+        Index("ix_wla_source_upload_id", "source_upload_id"),
     )
 
 

@@ -116,4 +116,5 @@ class Contact(Base):
         Index("ix_contacts_assignment_id", "assignment_id"),
         Index("ix_contacts_bucket_unassigned", "bucket_id", "assignment_id"),
         Index("ix_contacts_outreach_status", "bucket_id", "outreach_status"),
+        Index("ix_contacts_upload_status_bucket", "upload_id", "outreach_status", "bucket_id"),
     )
