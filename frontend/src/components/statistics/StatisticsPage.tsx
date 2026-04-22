@@ -41,13 +41,6 @@ const IDENTITY_COL_COUNT = 8; // expand, webinar#, status, note, description, co
 const Z_HEADER = "z-30";
 const Z_ROW = "z-20";
 
-// Vertical sticky offsets for the two thead rows so the table header stays
-// fixed under the page's sticky top-12 header when the user scrolls down.
-// Page header (nav 48px + Statistics bar ~60px) ends near 108px; then the
-// band-label row (~24px tall) sits above the column-label row.
-const TOP_BAND_ROW = "top-[108px]";
-const TOP_LABEL_ROW = "top-[132px]";
-
 // Row-type backgrounds (must be opaque so scroll doesn't bleed through)
 const BG_HEADER = "bg-zinc-50 dark:bg-zinc-900";
 const BG_PARENT = "bg-zinc-100 dark:bg-zinc-800";
@@ -67,13 +60,11 @@ const W_COPY = "w-[260px] min-w-[260px] max-w-[260px]";
 const W_URL = "w-[32px] min-w-[32px] max-w-[32px]";
 const W_SEND = "w-[120px] min-w-[120px] max-w-[120px]";
 
-// Composite classes (left + z + bg) per row type / column.
-// Header cells also get the vertical-sticky TOP_LABEL_ROW so they stay
-// pinned while the body scrolls vertically.
-const sDescH = `${L_DESC} ${TOP_LABEL_ROW} ${Z_HEADER} ${BG_HEADER}`;
-const sCopyH = `${L_COPY} ${TOP_LABEL_ROW} ${Z_HEADER} ${BG_HEADER}`;
-const sUrlH = `${L_URL} ${TOP_LABEL_ROW} ${Z_HEADER} ${BG_HEADER}`;
-const sSendH = `${L_SEND} ${TOP_LABEL_ROW} ${Z_HEADER} ${BG_HEADER}`;
+// Composite classes (left + z + bg) per row type / column
+const sDescH = `${L_DESC} ${Z_HEADER} ${BG_HEADER}`;
+const sCopyH = `${L_COPY} ${Z_HEADER} ${BG_HEADER}`;
+const sUrlH = `${L_URL} ${Z_HEADER} ${BG_HEADER}`;
+const sSendH = `${L_SEND} ${Z_HEADER} ${BG_HEADER}`;
 
 const sDescP = `${L_DESC} ${Z_ROW} ${BG_PARENT}`;
 // (parent-row's colSpan={4} cell spans Desc+Copy+URL+Send, one sticky cell)
@@ -773,25 +764,25 @@ export function StatisticsPage() {
       <div className="overflow-x-auto">
         <table className="w-full text-xs min-w-[3200px]">
           <thead>
-            {/* Row 1: Group spans (sticky top + already-sticky first cell on left) */}
+            {/* Row 1: Group spans */}
             <tr className="bg-zinc-50 dark:bg-zinc-900/90 border-b border-zinc-100 dark:border-zinc-800/20">
-              <th colSpan={IDENTITY_COL_COUNT} className={`px-2 py-1 sticky ${TOP_BAND_ROW} ${L_DESC} ${Z_HEADER} ${BG_HEADER}`}></th>
+              <th colSpan={IDENTITY_COL_COUNT} className={`px-2 py-1 ${L_DESC} ${Z_HEADER} ${BG_HEADER}`}></th>
               {METRIC_GROUPS.map((g) => (
                 <th
                   key={g}
                   colSpan={columnsInGroup(g)}
-                  className={`text-center px-1 py-1 text-[9px] font-bold uppercase tracking-wider text-zinc-400 border-l border-zinc-200 dark:border-zinc-800/30 sticky ${TOP_BAND_ROW} ${Z_HEADER} ${BG_HEADER}`}
+                  className="text-center px-1 py-1 text-[9px] font-bold uppercase tracking-wider text-zinc-400 border-l border-zinc-200 dark:border-zinc-800/30"
                 >
                   {g}
                 </th>
               ))}
             </tr>
-            {/* Row 2: Individual column labels (sticky top below row 1) */}
+            {/* Row 2: Individual column labels */}
             <tr className="bg-zinc-50 dark:bg-zinc-900/90 border-b border-zinc-200 dark:border-zinc-800/40">
-              <th className={`w-8 px-2 py-2 sticky ${TOP_LABEL_ROW} ${Z_HEADER} ${BG_HEADER}`}></th>
-              <th className={`text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[140px] sticky ${TOP_LABEL_ROW} ${Z_HEADER} ${BG_HEADER}`}>Webinar #</th>
-              <th className={`text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] sticky ${TOP_LABEL_ROW} ${Z_HEADER} ${BG_HEADER}`}>Status</th>
-              <th className={`text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[120px] sticky ${TOP_LABEL_ROW} ${Z_HEADER} ${BG_HEADER}`}>Note</th>
+              <th className="w-8 px-2 py-2"></th>
+              <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[140px]">Webinar #</th>
+              <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Status</th>
+              <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[120px]">Note</th>
               <th className={`text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] ${W_DESC} ${sDescH}`}>Description</th>
               <th className={`text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] ${W_COPY} ${sCopyH}`}>Copy</th>
               <th className={`text-center px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] ${W_URL} ${sUrlH}`}>URL</th>
@@ -799,7 +790,7 @@ export function StatisticsPage() {
               {METRIC_COLUMNS.map((col, idx) => (
                 <th
                   key={col.key}
-                  className={`text-right px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] whitespace-nowrap sticky ${TOP_LABEL_ROW} ${Z_HEADER} ${BG_HEADER} ${
+                  className={`text-right px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] whitespace-nowrap ${
                     isGroupBoundary(idx) ? GROUP_BOUNDARY_CLASSES : ""
                   }`}
                   title={col.formulaText}
