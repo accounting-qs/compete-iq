@@ -1097,6 +1097,7 @@ export interface ApiStatisticsRow {
   id: string;
   webinarNumber: number;
   workbookRow: number;
+  assignmentId: string | null;
   kind: "list" | "nonjoiners" | "no_list_data";
   status: string | null;
   note: string | null;
@@ -1148,6 +1149,53 @@ export async function fetchStatisticsWebinars(source: "auto" | "ghl" | "workbook
     headers: authHeaders(),
   });
   if (!res.ok) throw new Error("Failed to fetch statistics");
+  return res.json();
+}
+
+export interface ContactDrilldownItem {
+  ghl_contact_id: string;
+  email: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  company_website: string | null;
+  assignment_id: string | null;
+  ghl_url: string;
+  opportunity_id?: string | null;
+  opportunity_url?: string | null;
+  opportunity_stage_id?: string | null;
+  opportunity_value?: number | null;
+  call1_status?: string | null;
+  call1_date?: string | null;
+  lead_quality?: string | null;
+}
+
+export interface ContactDrilldownResponse {
+  metric: string;
+  webinar_number: number;
+  assignment_id: string | null;
+  unit: "contact" | "opportunity";
+  total: number;
+  items: ContactDrilldownItem[];
+  available: boolean;
+  reason: string | null;
+}
+
+export async function fetchStatisticsContacts(params: {
+  webinar: number;
+  metric: string;
+  assignment?: string | null;
+  limit?: number;
+}): Promise<ContactDrilldownResponse> {
+  const qs = new URLSearchParams({
+    webinar: String(params.webinar),
+    metric: params.metric,
+  });
+  if (params.assignment) qs.set("assignment", params.assignment);
+  if (params.limit) qs.set("limit", String(params.limit));
+  const res = await fetch(`${API_URL}/statistics/contacts?${qs.toString()}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to fetch contacts drill-down");
   return res.json();
 }
 

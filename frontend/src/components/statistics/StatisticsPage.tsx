@@ -104,16 +104,66 @@ function StatusBadge({ status }: { status: string | null }) {
 
 /* ─── Metric cell ─────────────────────────────────────────────────────── */
 
-function MetricCell({ value, col, bold, boundary }: { value: number | null | undefined; col: MetricColumn; bold?: boolean; boundary?: boolean }) {
+/** Keys that can be drilled down to a contact list. */
+const DRILLDOWN_KEYS = new Set([
+  "gcalInvitedGhl",
+  "unsubscribes",
+  "lpRegs",
+  "yesMarked", "yesAttended", "yes10MinPlus", "yesAttendBySmsClick", "yesBookings",
+  "maybeMarked", "maybeAttended", "maybe10MinPlus", "maybeAttendBySmsClick", "maybeBookings",
+  "selfRegMarked", "selfRegAttended", "selfReg10MinPlus", "selfRegBookings",
+  "totalRegs", "totalAttended", "total10MinPlus", "total30MinPlus", "attendBySmsReminder",
+  "totalBookings", "totalCallsDatePassed", "confirmed", "shows", "noShows",
+  "canceled", "won", "disqualified", "qualified",
+  "leadQualityGreat", "leadQualityOk", "leadQualityBarelyPassable", "leadQualityBadDq",
+]);
+
+function MetricCell({
+  value, col, bold, boundary, webinarNumber, assignmentId, listLabel,
+}: {
+  value: number | null | undefined;
+  col: MetricColumn;
+  bold?: boolean;
+  boundary?: boolean;
+  webinarNumber?: number;
+  assignmentId?: string | null;
+  listLabel?: string | null;
+}) {
   const formatted = formatMetricValue(value, col);
   const isNull = value === null || value === undefined;
+  const isNonZero = typeof value === "number" && value > 0;
+  const drillable = webinarNumber != null && DRILLDOWN_KEYS.has(col.key) && isNonZero;
+
+  const content = drillable ? (
+    <a
+      href={(() => {
+        const qs = new URLSearchParams({
+          webinar: String(webinarNumber),
+          metric: col.key,
+        });
+        if (assignmentId) qs.set("assignment", assignmentId);
+        if (listLabel) qs.set("list", listLabel);
+        return `/statistics/contacts?${qs.toString()}`;
+      })()}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      className="hover:text-violet-500 dark:hover:text-violet-400 underline underline-offset-2 decoration-dotted decoration-zinc-400/40"
+      title={`Click to see the ${col.group} · ${col.label} contacts`}
+    >
+      {formatted}
+    </a>
+  ) : (
+    formatted
+  );
+
   return (
     <td className={`px-2 py-1.5 text-right font-mono whitespace-nowrap ${
       bold ? "font-bold" : ""
     } ${isNull ? "text-zinc-400" : bold ? "text-zinc-800 dark:text-zinc-200" : "text-zinc-700 dark:text-zinc-300"} ${
       boundary ? GROUP_BOUNDARY_CLASSES : ""
     }`}>
-      {formatted}
+      {content}
     </td>
   );
 }
@@ -335,7 +385,15 @@ function renderGroupedRows(
         </span>
       </td>
       {METRIC_COLUMNS.map((col, idx) => (
-        <MetricCell key={col.key} value={row.metrics[col.key]} col={col} boundary={isGroupBoundary(idx)} />
+        <MetricCell
+          key={col.key}
+          value={row.metrics[col.key]}
+          col={col}
+          boundary={isGroupBoundary(idx)}
+          webinarNumber={w.number}
+          assignmentId={row.assignmentId}
+          listLabel={row.description}
+        />
       ))}
     </tr>
     );
@@ -796,7 +854,15 @@ export function StatisticsPage() {
                     </button>
                   </td>
                   {METRIC_COLUMNS.map((col, idx) => (
-                    <MetricCell key={col.key} value={w.summary[col.key]} col={col} bold boundary={isGroupBoundary(idx)} />
+                    <MetricCell
+                      key={col.key}
+                      value={w.summary[col.key]}
+                      col={col}
+                      bold
+                      boundary={isGroupBoundary(idx)}
+                      webinarNumber={w.number}
+                      listLabel={`Webinar ${w.number}`}
+                    />
                   ))}
                 </tr>
 

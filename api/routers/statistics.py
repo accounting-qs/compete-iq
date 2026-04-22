@@ -109,6 +109,7 @@ class ApiStatisticsRow(BaseModel):
     id: str
     webinarNumber: int
     workbookRow: int
+    assignmentId: str | None = None
     kind: str  # "list" | "nonjoiners" | "no_list_data"
     status: str | None = None
     note: str | None = None
@@ -155,6 +156,134 @@ class StatisticsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+class ContactDrilldownItem(BaseModel):
+    ghl_contact_id: str
+    email: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    company_website: str | None = None
+    assignment_id: str | None = None
+    ghl_url: str
+    # When metric unit is "opportunity"
+    opportunity_id: str | None = None
+    opportunity_url: str | None = None
+    opportunity_stage_id: str | None = None
+    opportunity_value: float | None = None
+    call1_status: str | None = None
+    call1_date: str | None = None
+    lead_quality: str | None = None
+
+
+class ContactDrilldownResponse(BaseModel):
+    metric: str
+    webinar_number: int
+    assignment_id: str | None = None
+    unit: str  # "contact" | "opportunity"
+    total: int
+    items: list[ContactDrilldownItem]
+    available: bool
+    reason: str | None = None
+
+
+@router.get("/contacts", response_model=ContactDrilldownResponse)
+async def list_contacts_for_metric(
+    webinar: int,
+    metric: str,
+    assignment: str | None = None,
+    limit: int = 500,
+):
+    """Return contacts (or opportunities) behind a specific metric on the
+    Statistics dashboard. Each item has a GHL deep-link for opening the
+    contact / opportunity in a new tab."""
+    from config import settings
+    from datetime import date, timedelta
+    from sqlalchemy import select, text
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from db.models import Webinar as WebinarModel
+    from db.session import AsyncSessionLocal
+    from services.statistics_metric_filters import spec_for_metric, build_contacts_query
+
+    async with AsyncSessionLocal() as db:
+        # Resolve webinar
+        r = await db.execute(select(WebinarModel).where(WebinarModel.number == webinar))
+        w = r.scalar_one_or_none()
+        if w is None:
+            return {
+                "metric": metric, "webinar_number": webinar, "assignment_id": assignment,
+                "unit": "contact", "total": 0, "items": [],
+                "available": False, "reason": f"Webinar {webinar} not found",
+            }
+
+        # Compute prev_date (mirrors the source: 30-day fallback when no prior webinar)
+        prev_r = await db.execute(
+            select(WebinarModel).where(WebinarModel.number < webinar).order_by(WebinarModel.number.desc()).limit(1)
+        )
+        prev_w = prev_r.scalar_one_or_none()
+        prev_date = prev_w.date if prev_w else None
+        current_date = w.date
+        if prev_date is None and current_date is not None:
+            prev_date = current_date - timedelta(days=30)
+
+        spec = spec_for_metric(
+            metric, webinar, broadcast_id=w.broadcast_id,
+            prev_date=prev_date, current_date=current_date,
+        )
+        if spec is None:
+            return {
+                "metric": metric, "webinar_number": webinar, "assignment_id": assignment,
+                "unit": "contact", "total": 0, "items": [],
+                "available": False, "reason": f"Metric '{metric}' not supported for drill-down",
+            }
+        if spec.unavailable:
+            return {
+                "metric": metric, "webinar_number": webinar, "assignment_id": assignment,
+                "unit": spec.unit, "total": 0, "items": [],
+                "available": False,
+                "reason": "Required data missing (broadcast not linked or no prior webinar for date window)",
+            }
+
+        sql, params = build_contacts_query(spec, w.id, assignment_id=assignment, limit=limit)
+        r = await db.execute(text(sql).bindparams(**params))
+        rows = r.mappings().all()
+
+        loc = settings.GHL_LOCATION_ID or ""
+        items: list[dict] = []
+        for row in rows:
+            contact_id = row.get("ghl_contact_id")
+            opportunity_id = row.get("opportunity_id") if spec.unit == "opportunity" else None
+            item = {
+                "ghl_contact_id": contact_id,
+                "email": row.get("email"),
+                "first_name": row.get("first_name"),
+                "last_name": row.get("last_name"),
+                "company_website": row.get("company_website"),
+                "assignment_id": str(row.get("assignment_id")) if row.get("assignment_id") else None,
+                "ghl_url": f"https://app.gohighlevel.com/v2/location/{loc}/contacts/detail/{contact_id}" if contact_id else "",
+            }
+            if opportunity_id:
+                item.update({
+                    "opportunity_id": opportunity_id,
+                    "opportunity_url": f"https://app.gohighlevel.com/v2/location/{loc}/opportunities/list?opp={opportunity_id}",
+                    "opportunity_stage_id": row.get("pipeline_stage_id"),
+                    "opportunity_value": float(row["monetary_value"]) if row.get("monetary_value") is not None else None,
+                    "call1_status": row.get("call1_appointment_status"),
+                    "call1_date": row["call1_appointment_date"].isoformat() if row.get("call1_appointment_date") else None,
+                    "lead_quality": row.get("lead_quality"),
+                })
+            items.append(item)
+
+        return {
+            "metric": metric,
+            "webinar_number": webinar,
+            "assignment_id": assignment,
+            "unit": spec.unit,
+            "total": len(items),
+            "items": items,
+            "available": True,
+            "reason": None,
+        }
+
 
 @router.get("/webinars", response_model=StatisticsResponse)
 async def list_statistics_webinars(source: str = "auto"):

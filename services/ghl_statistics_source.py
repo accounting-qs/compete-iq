@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import func, or_, select
@@ -228,6 +229,7 @@ def _row_for_assignment(a: WebinarListAssignment, webinar_status: str) -> dict[s
 
     return {
         "workbookRow": a.display_order or 0,
+        "assignmentId": a.id,
         "kind": _row_kind_from_assignment(a),
         "status": webinar_status,
         "note": None,
@@ -622,7 +624,47 @@ class GoHighLevelStatisticsSource:
                 out[aid]["totalBookings"] = cnt
 
         # Attendance metrics — need broadcast_id + WebinarGeek subscribers
+        # ── Attendance metrics (need broadcast_id + WG subscribers) ─────
         if broadcast_id:
+            # Shared attended predicate
+            ATT = "(wgs.watched_live = TRUE OR wgs.minutes_viewing > 0)"
+
+            async def _wg_count(response_filter: str | None, min_min: int | None, sms_tag: bool, key: str):
+                joins = "JOIN webinargeek_subscribers wgs ON LOWER(wgs.email) = LOWER(c.email)"
+                wheres = [f"wgs.broadcast_id = :bid", ATT]
+                params = {"bid": broadcast_id}
+                if response_filter == "yes":
+                    wheres.append("g.calendar_invite_response_history ~* :yes_re")
+                    params["yes_re"] = yes_re
+                elif response_filter == "maybe":
+                    wheres.append("g.calendar_invite_response_history ~* :maybe_re")
+                    params["maybe_re"] = maybe_re
+                elif response_filter == "self_reg" and prev_date and current_date:
+                    wheres.append("g.webinar_registration_in_form_date >= :sr_start")
+                    wheres.append("g.webinar_registration_in_form_date < :sr_end")
+                    params["sr_start"] = prev_date
+                    params["sr_end"] = current_date
+                if min_min is not None:
+                    wheres.append("wgs.minutes_viewing >= :mm")
+                    params["mm"] = min_min
+                if sms_tag:
+                    wheres.append("g.has_sms_click_tag = TRUE")
+                sql = f"""
+                    SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
+                    FROM contacts c
+                    JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
+                    JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
+                    {joins}
+                    WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
+                      AND ({' AND '.join(f'({w})' for w in wheres)})
+                    GROUP BY c.assignment_id
+                """
+                counts = await _group_count(sql, **params)
+                for aid, cnt in counts.items():
+                    if aid in out:
+                        out[aid][key] = cnt
+
+            # totalRegs (all WG subscribers in this list for this broadcast)
             counts = await _group_count("""
                 SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
                 FROM contacts c
@@ -636,36 +678,90 @@ class GoHighLevelStatisticsSource:
                 if aid in out:
                     out[aid]["totalRegs"] = cnt
 
-            # totalAttended — watched_live OR minutes_viewing > 0
-            counts = await _group_count("""
-                SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
+            # Total attended + 10m+ / 30m+ / SMS reminder
+            await _wg_count(None, None, False, "totalAttended")
+            await _wg_count(None, 10, False, "total10MinPlus")
+            await _wg_count(None, 30, False, "total30MinPlus")
+            await _wg_count(None, None, True, "attendBySmsReminder")
+
+            # Yes split
+            await _wg_count("yes", None, False, "yesAttended")
+            await _wg_count("yes", 10, False, "yes10MinPlus")
+            await _wg_count("yes", None, True, "yesAttendBySmsClick")
+
+            # Maybe split
+            await _wg_count("maybe", None, False, "maybeAttended")
+            await _wg_count("maybe", 10, False, "maybe10MinPlus")
+            await _wg_count("maybe", None, True, "maybeAttendBySmsClick")
+
+            # Self-Reg split (needs date window too)
+            if prev_date and current_date:
+                await _wg_count("self_reg", None, False, "selfRegAttended")
+                await _wg_count("self_reg", 10, False, "selfReg10MinPlus")
+
+        # ── Sales metrics per-list (opportunities via ghl_contact join) ──
+        # Union of (opp.webinar_source_number = N) or (contact.booked_call_webinar_series = N)
+        async def _opp_count(opp_predicate: str, key: str, count_expr: str = "DISTINCT o.ghl_opportunity_id"):
+            sql = f"""
+                SELECT c.assignment_id, COUNT({count_expr})
                 FROM contacts c
                 JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
-                JOIN webinargeek_subscribers wgs ON LOWER(wgs.email) = LOWER(c.email)
+                JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
+                JOIN ghl_opportunity o ON o.ghl_contact_id = g.ghl_contact_id
                 WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
-                  AND wgs.broadcast_id = :bid
-                  AND (wgs.watched_live = TRUE OR wgs.minutes_viewing > 0)
+                  AND (o.webinar_source_number = :N OR g.booked_call_webinar_series = :N)
+                  AND ({opp_predicate})
                 GROUP BY c.assignment_id
-            """, bid=broadcast_id)
+            """
+            counts = await _group_count(sql, N=N)
             for aid, cnt in counts.items():
                 if aid in out:
-                    out[aid]["totalAttended"] = cnt
+                    out[aid][key] = cnt
 
-            for key, min_minutes in [("total10MinPlus", 10), ("total30MinPlus", 30)]:
-                counts = await _group_count("""
-                    SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
-                    FROM contacts c
-                    JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
-                    JOIN webinargeek_subscribers wgs ON LOWER(wgs.email) = LOWER(c.email)
-                    WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
-                      AND wgs.broadcast_id = :bid
-                      AND (wgs.watched_live = TRUE OR wgs.minutes_viewing > 0)
-                      AND wgs.minutes_viewing >= :mm
-                    GROUP BY c.assignment_id
-                """, bid=broadcast_id, mm=min_minutes)
-                for aid, cnt in counts.items():
-                    if aid in out:
-                        out[aid][key] = cnt
+        now_iso = datetime.now(timezone.utc).isoformat()
+        await _opp_count(f"o.call1_appointment_date IS NOT NULL AND o.call1_appointment_date <= CAST('{now_iso}' AS timestamptz)", "totalCallsDatePassed")
+        await _opp_count("LOWER(COALESCE(o.call1_appointment_status, '')) = 'confirmed'", "confirmed")
+        await _opp_count("LOWER(COALESCE(o.call1_appointment_status, '')) = 'showed'", "shows")
+        await _opp_count("LOWER(COALESCE(o.call1_appointment_status, '')) IN ('noshow','no show','no-show')", "noShows")
+        await _opp_count("LOWER(COALESCE(o.call1_appointment_status, '')) = 'cancelled'", "canceled")
+        await _opp_count(f"o.pipeline_stage_id = '{DEAL_WON_STAGE_ID}'", "won")
+        await _opp_count(f"o.pipeline_stage_id = '{DISQUALIFIED_STAGE_ID}'", "disqualified")
+
+        # Qualified = shows with a non-DQ quality
+        qual_in = "('" + "', '".join(QUALIFIED_SET) + "')"
+        await _opp_count(f"LOWER(COALESCE(o.call1_appointment_status, '')) = 'showed' AND o.lead_quality IN {qual_in}", "qualified")
+
+        # Lead quality buckets
+        for key, val in [
+            ("leadQualityGreat", LEAD_QUALITY_GREAT),
+            ("leadQualityOk", LEAD_QUALITY_OK),
+            ("leadQualityBarelyPassable", LEAD_QUALITY_BARELY),
+            ("leadQualityBadDq", LEAD_QUALITY_BAD_DQ),
+        ]:
+            await _opp_count(f"o.lead_quality = '{val}'", key)
+
+        # Default any keys we queried to 0 for lists that had no hits — so the
+        # UI shows "0" instead of "—" (we genuinely queried and found none).
+        default_zero = [
+            "yesMarked", "maybeMarked", "gcalInvitedGhl",
+            "yesBookings", "maybeBookings", "selfRegMarked", "selfRegBookings", "lpRegs",
+            "unsubscribes",
+            "totalBookings", "totalCallsDatePassed", "confirmed", "shows", "noShows",
+            "canceled", "won", "disqualified", "qualified",
+            "leadQualityGreat", "leadQualityOk", "leadQualityBarelyPassable", "leadQualityBadDq",
+        ]
+        if broadcast_id:
+            default_zero.extend([
+                "totalRegs", "totalAttended", "total10MinPlus", "total30MinPlus",
+                "attendBySmsReminder",
+                "yesAttended", "yes10MinPlus", "yesAttendBySmsClick",
+                "maybeAttended", "maybe10MinPlus", "maybeAttendBySmsClick",
+            ])
+            if prev_date and current_date:
+                default_zero.extend(["selfRegAttended", "selfReg10MinPlus"])
+        for aid, m in out.items():
+            for k in default_zero:
+                m.setdefault(k, 0)
 
         return out
 
