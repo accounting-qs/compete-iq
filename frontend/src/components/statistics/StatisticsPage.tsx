@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, type ReactNode } from "react";
 import {
   fetchStatisticsWebinars,
   fetchWgWebinars,
   syncWgSubscribers,
   triggerGhlWebinarSync,
+  type ApiStatisticsRow,
   type ApiStatisticsWebinar,
   type StatisticsMeta,
   type WgWebinar,
@@ -68,6 +69,210 @@ function ExternalLinkIcon() {
 
 /* ─── Main Component ──────────────────────────────────────────────────── */
 
+/* ─── Bucket-grouped child-row renderer ─────────────────────────────── */
+
+const BASE_SUM_KEYS = ["listSize", "listRemain", "gcalInvited", "accountsNeeded", "invited"] as const;
+
+function sumMetric(rows: ApiStatisticsRow[], key: string): number {
+  let total = 0;
+  for (const r of rows) {
+    const v = r.metrics[key];
+    if (typeof v === "number") total += v;
+  }
+  return total;
+}
+
+/**
+ * Render child rows for an expanded webinar, grouped by bucket like the
+ * Planning page: multi-list buckets collapse under a header row, single-list
+ * buckets go into a synthetic "Unique Buckets" group, and Nonjoiners /
+ * NO LIST DATA rows render below as-is.
+ */
+function renderGroupedRows(
+  w: ApiStatisticsWebinar,
+  collapsedBuckets: Set<string>,
+  toggleBucketGroup: (webinarId: string, groupKey: string) => void,
+): ReactNode[] {
+  type Group = { bucketId: string; bucketName: string; lists: ApiStatisticsRow[] };
+
+  const groups: Group[] = [];
+  const seen = new Map<string, number>();
+  const unbucketed: ApiStatisticsRow[] = [];
+  const specials: ApiStatisticsRow[] = [];
+
+  for (const r of w.rows) {
+    if (r.kind !== "list") { specials.push(r); continue; }
+    if (!r.bucketId) { unbucketed.push(r); continue; }
+    const idx = seen.get(r.bucketId);
+    if (idx !== undefined) {
+      groups[idx].lists.push(r);
+    } else {
+      seen.set(r.bucketId, groups.length);
+      groups.push({
+        bucketId: r.bucketId,
+        bucketName: r.bucketName ?? r.description ?? "Bucket",
+        lists: [r],
+      });
+    }
+  }
+
+  const multi = groups.filter((g) => g.lists.length >= 2);
+  const single = groups.filter((g) => g.lists.length === 1).map((g) => g.lists[0]);
+
+  const renderListRow = (row: ApiStatisticsRow) => (
+    <tr
+      key={row.id}
+      className={`border-b border-zinc-200 dark:border-zinc-800/20 transition-colors ${
+        row.kind !== "list"
+          ? "bg-zinc-50 dark:bg-zinc-900/20 text-zinc-500 italic"
+          : "hover:bg-zinc-100 dark:hover:bg-zinc-800/20"
+      }`}
+    >
+      <td className="px-2 py-1.5"></td>
+      <td className="px-2 py-1.5"></td>
+      <td className="px-2 py-1.5">
+        {row.kind === "list" && <StatusBadge status={row.status} />}
+      </td>
+      <td className="px-2 py-1.5">
+        <span className={row.kind !== "list" ? "text-zinc-500" : "text-zinc-700 dark:text-zinc-300"}>
+          {row.note ?? ""}
+        </span>
+      </td>
+      <td className="px-2 py-1.5">
+        <span className={row.kind !== "list" ? "text-zinc-500" : "text-zinc-800 dark:text-zinc-300"}>
+          {row.description ?? (row.kind === "nonjoiners" ? "Nonjoiners" : row.kind === "no_list_data" ? "NO LIST DATA" : "")}
+        </span>
+      </td>
+      <td className="px-2 py-1.5 text-center">
+        {row.listUrl && (
+          <a
+            href={row.listUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            title={row.listUrl}
+            className="text-violet-400 hover:text-violet-300"
+          >
+            <ExternalLinkIcon />
+          </a>
+        )}
+      </td>
+      <td className="px-2 py-1.5 text-zinc-600 dark:text-zinc-400">
+        {row.sendInfo ?? ""}
+      </td>
+      {METRIC_COLUMNS.map((col) => (
+        <MetricCell key={col.key} value={row.metrics[col.key]} col={col} />
+      ))}
+    </tr>
+  );
+
+  const renderGroupHeader = (groupKey: string, bucketName: string, lists: ApiStatisticsRow[], italic = false) => {
+    const key = `${w.id}::${groupKey}`;
+    const collapsed = collapsedBuckets.has(key);
+    const uniqSenders: { name: string; color: string | null }[] = [];
+    const seenSenders = new Set<string>();
+    for (const l of lists) {
+      if (l.sendInfo && !seenSenders.has(l.sendInfo)) {
+        seenSenders.add(l.sendInfo);
+        uniqSenders.push({ name: l.sendInfo, color: l.senderColor });
+      }
+    }
+    const summed: Record<string, number> = {};
+    for (const k of BASE_SUM_KEYS) summed[k] = sumMetric(lists, k);
+
+    return (
+      <tr
+        key={`bucket-${groupKey}`}
+        onClick={() => toggleBucketGroup(w.id, groupKey)}
+        className="bg-zinc-100/70 dark:bg-zinc-800/25 hover:bg-zinc-200/70 dark:hover:bg-zinc-800/45 cursor-pointer border-b border-zinc-200 dark:border-zinc-800/30 transition-colors"
+      >
+        <td className="px-2 py-2 text-center">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+            className={`text-zinc-500 dark:text-zinc-400 transition-transform duration-200 ${collapsed ? "" : "rotate-90"}`}>
+            <path d="M9 18l6-6-6-6"/>
+          </svg>
+        </td>
+        <td className="px-2 py-2"></td>
+        <td className="px-2 py-2"></td>
+        <td className="px-2 py-2"></td>
+        <td className="px-2 py-2">
+          <div className="flex items-center gap-2">
+            <span
+              title={bucketName}
+              className={`text-zinc-800 dark:text-zinc-100 text-xs font-bold truncate max-w-[280px] ${italic ? "italic" : ""}`}
+            >
+              {bucketName}
+            </span>
+            <span className="text-[10px] font-semibold text-zinc-500 dark:text-zinc-400 px-1.5 py-0.5 rounded bg-zinc-200 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/40">
+              {lists.length}
+            </span>
+          </div>
+        </td>
+        <td className="px-2 py-2"></td>
+        <td className="px-2 py-2">
+          <div className="flex items-center gap-1">
+            {uniqSenders.slice(0, 2).map((s) => (
+              <span
+                key={s.name}
+                title={s.name}
+                className="text-[9px] font-semibold px-1.5 py-0.5 rounded border"
+                style={s.color ? { color: s.color, borderColor: s.color, backgroundColor: `${s.color}15` } : undefined}
+              >
+                {s.name}
+              </span>
+            ))}
+            {uniqSenders.length > 2 && (
+              <span className="text-[9px] text-zinc-500 font-semibold">+{uniqSenders.length - 2}</span>
+            )}
+          </div>
+        </td>
+        {METRIC_COLUMNS.map((col) => {
+          const isBase = (BASE_SUM_KEYS as readonly string[]).includes(col.key);
+          const val = isBase ? summed[col.key] : 0;
+          const show = isBase && val > 0;
+          return (
+            <td
+              key={col.key}
+              className={`px-2 py-2 text-right font-mono font-bold whitespace-nowrap ${
+                show ? "text-zinc-800 dark:text-zinc-100" : "text-zinc-500"
+              }`}
+            >
+              {show ? formatMetricValue(val, col) : ""}
+            </td>
+          );
+        })}
+      </tr>
+    );
+  };
+
+  const nodes: ReactNode[] = [];
+
+  // 1) Multi-list bucket groups
+  for (const g of multi) {
+    const key = `${w.id}::${g.bucketId}`;
+    const collapsed = collapsedBuckets.has(key);
+    nodes.push(renderGroupHeader(g.bucketId, g.bucketName, g.lists));
+    if (!collapsed) g.lists.forEach((l) => nodes.push(renderListRow(l)));
+  }
+
+  // 2) "Unique Buckets" — synthetic group for single-list buckets
+  if (single.length > 0) {
+    const uniqueKey = "__unique__";
+    const collapsed = collapsedBuckets.has(`${w.id}::${uniqueKey}`);
+    nodes.push(renderGroupHeader(uniqueKey, "Unique Buckets", single, true));
+    if (!collapsed) single.forEach((l) => nodes.push(renderListRow(l)));
+  }
+
+  // 3) Unbucketed lists (shouldn't normally exist but render safely)
+  for (const l of unbucketed) nodes.push(renderListRow(l));
+
+  // 4) Special rows (Nonjoiners / NO LIST DATA) — always visible, italic
+  for (const l of specials) nodes.push(renderListRow(l));
+
+  return nodes;
+}
+
+
 export function StatisticsPage() {
   const [webinars, setWebinars] = useState<ApiStatisticsWebinar[]>([]);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
@@ -75,6 +280,17 @@ export function StatisticsPage() {
   const [loading, setLoading] = useState(true);
   const [meta, setMeta] = useState<StatisticsMeta | null>(null);
   const [syncingWebinar, setSyncingWebinar] = useState<number | null>(null);
+  const [collapsedBuckets, setCollapsedBuckets] = useState<Set<string>>(new Set());
+
+  const toggleBucketGroup = (webinarId: string, groupKey: string) => {
+    setCollapsedBuckets((prev) => {
+      const key = `${webinarId}::${groupKey}`;
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
 
   const handleWebinarSync = async (webinarNumber: number, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -404,53 +620,8 @@ export function StatisticsPage() {
                   ))}
                 </tr>
 
-                {/* ── Child rows ─────────────────────────────────── */}
-                {isExpanded && w.rows.map((row) => (
-                  <tr
-                    key={row.id}
-                    className={`border-b border-zinc-200 dark:border-zinc-800/20 transition-colors ${
-                      row.kind !== "list"
-                        ? "bg-zinc-50 dark:bg-zinc-900/20 text-zinc-500 italic"
-                        : "hover:bg-zinc-100 dark:hover:bg-zinc-800/20"
-                    }`}
-                  >
-                    <td className="px-2 py-1.5"></td>
-                    <td className="px-2 py-1.5"></td>
-                    <td className="px-2 py-1.5">
-                      {row.kind === "list" && <StatusBadge status={row.status} />}
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <span className={row.kind !== "list" ? "text-zinc-500" : "text-zinc-700 dark:text-zinc-300"}>
-                        {row.note ?? ""}
-                      </span>
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <span className={row.kind !== "list" ? "text-zinc-500" : "text-zinc-800 dark:text-zinc-300"}>
-                        {row.description ?? (row.kind === "nonjoiners" ? "Nonjoiners" : row.kind === "no_list_data" ? "NO LIST DATA" : "")}
-                      </span>
-                    </td>
-                    <td className="px-2 py-1.5 text-center">
-                      {row.listUrl && (
-                        <a
-                          href={row.listUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onClick={(e) => e.stopPropagation()}
-                          title={row.listUrl}
-                          className="text-violet-400 hover:text-violet-300"
-                        >
-                          <ExternalLinkIcon />
-                        </a>
-                      )}
-                    </td>
-                    <td className="px-2 py-1.5 text-zinc-600 dark:text-zinc-400">
-                      {row.sendInfo ?? ""}
-                    </td>
-                    {METRIC_COLUMNS.map((col) => (
-                      <MetricCell key={col.key} value={row.metrics[col.key]} col={col} />
-                    ))}
-                  </tr>
-                ))}
+                {/* ── Child rows (bucket-grouped) ─────────────────── */}
+                {isExpanded && renderGroupedRows(w, collapsedBuckets, toggleBucketGroup)}
               </tbody>
             );
           })}

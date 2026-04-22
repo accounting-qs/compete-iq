@@ -108,7 +108,11 @@ class ApiStatisticsRow(BaseModel):
     note: str | None = None
     listUrl: str | None = None
     description: str | None = None
+    listName: str | None = None
     sendInfo: str | None = None
+    senderColor: str | None = None
+    bucketId: str | None = None
+    bucketName: str | None = None
     descLabel: str | None = None
     titleText: str | None = None
     segmentName: str | None = None

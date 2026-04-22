@@ -1027,7 +1027,11 @@ export interface ApiStatisticsRow {
   note: string | null;
   listUrl: string | null;
   description: string | null;
+  listName: string | null;
   sendInfo: string | null;
+  senderColor: string | null;
+  bucketId: string | null;
+  bucketName: string | null;
   descLabel: string | null;
   titleText: string | null;
   segmentName: string | null;

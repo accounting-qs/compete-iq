@@ -201,6 +201,7 @@ def _row_for_assignment(a: WebinarListAssignment, webinar_status: str) -> dict[s
     and shown in the summary.
     """
     sender_name = a.sender.name if a.sender else None
+    sender_color = a.sender.color if a.sender else None
     metrics: dict[str, float | None] = {
         "listSize": a.volume or 0,
         "listRemain": a.remaining or 0,
@@ -217,6 +218,9 @@ def _row_for_assignment(a: WebinarListAssignment, webinar_status: str) -> dict[s
         "description": a.description,
         "listName": a.list_name,
         "sendInfo": sender_name,
+        "senderColor": sender_color,
+        "bucketId": a.bucket_id,
+        "bucketName": a.bucket.name if a.bucket else None,
         "descLabel": None,
         "titleText": None,
         "createdDate": a.created_at.date().isoformat() if a.created_at else None,
