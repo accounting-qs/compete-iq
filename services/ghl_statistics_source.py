@@ -287,6 +287,12 @@ class GoHighLevelStatisticsSource:
                     extra = per_list.get(a.id, {})
                     r["metrics"].update(extra)
 
+                # Synthesize Nonjoiners + No List Data rows (if any data exists)
+                synthetic = await self._synthetic_special_rows(
+                    db, w, assignments, prev_date, current_date,
+                )
+                rows.extend(synthetic)
+
             raw_webinars.append({
                 "number": w.number,
                 "date": w.date.isoformat() if w.date else None,
@@ -299,6 +305,157 @@ class GoHighLevelStatisticsSource:
 
         raw_webinars.reverse()  # descending by number for the UI
         return raw_webinars
+
+    async def _synthetic_special_rows(
+        self,
+        db: AsyncSession,
+        w: Webinar,
+        assignments: list[WebinarListAssignment],
+        prev_date,
+        current_date,
+    ) -> list[dict[str, Any]]:
+        """Build synthetic Nonjoiners + No List Data rows for this webinar.
+
+        - Nonjoiners: GHL contacts whose calendar_webinar_series_non_joiners
+          (or the narrower `_prefix_non_joiners`) contains eN, counted at
+          webinar level. Always shown (value may be 0).
+        - No List Data: contacts with any webinar-N signal (invite_response,
+          non-joiners, booked_call=N, registration_number=N, self-reg in
+          window) whose email is NOT in any Planning assignment for this
+          webinar. "Leftover" counts not attributable to a planned list.
+        """
+        from sqlalchemy import text as sa_text
+
+        N = w.number
+        series_nj_re = _webinar_series_regex(N)
+        yes_re = _invite_response_regex(N, "Yes")
+        maybe_re = _invite_response_regex(N, "Maybe")
+        broadcast_id = w.broadcast_id
+        wid = w.id
+
+        # ── Nonjoiners ────────────────────────────────────────────────
+        r = await db.execute(sa_text("""
+            SELECT COUNT(DISTINCT g.ghl_contact_id)
+            FROM ghl_contact g
+            WHERE g.calendar_webinar_series_non_joiners ~* :re
+               OR g.calendar_invite_response_prefix_non_joiners ~* :re
+        """).bindparams(re=series_nj_re))
+        nj_count = int(r.scalar() or 0)
+
+        # Nonjoiners row metrics
+        nj_metrics: dict[str, float | None] = {
+            "listSize": None,
+            "listRemain": None,
+            "gcalInvited": None,
+            "accountsNeeded": None,
+            "invited": nj_count,  # treat nonjoiners as part of the invited pool
+            "yesMarked": 0,
+            "maybeMarked": 0,
+            "selfRegMarked": 0,
+            "gcalInvitedGhl": nj_count,
+        }
+
+        # ── No List Data ──────────────────────────────────────────────
+        # Contacts with any webinar-N signal NOT mapped to any Planning list
+        # for this webinar. Use EXISTS anti-join.
+        # Use LEFT JOIN anti-pattern on LOWER(email) — 156k planned emails
+        # is too large for `NOT IN` without hash support; LEFT JOIN ... WHERE
+        # planned.email IS NULL compiles to a hash anti-join.
+        nld_counts_sql = """
+            WITH
+            relevant AS (
+                SELECT g.ghl_contact_id, LOWER(g.email) AS lem,
+                       g.calendar_invite_response_history AS irh,
+                       g.booked_call_webinar_series AS bcws
+                FROM ghl_contact g
+                WHERE g.calendar_invite_response_history ~* :yes_re
+                   OR g.calendar_invite_response_history ~* :maybe_re
+                   OR g.calendar_webinar_series_non_joiners ~* :nj_re
+                   OR g.booked_call_webinar_series = :N
+                   OR g.webinar_registration_number = :N
+            ),
+            planned AS (
+                SELECT DISTINCT LOWER(c.email) AS email
+                FROM contacts c
+                JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
+                WHERE wla.webinar_id = CAST(:wid AS uuid)
+                  AND c.email IS NOT NULL
+            ),
+            unplanned AS (
+                SELECT r.*
+                FROM relevant r
+                LEFT JOIN planned p ON p.email = r.lem
+                WHERE p.email IS NULL
+            )
+            SELECT
+                COUNT(DISTINCT ghl_contact_id)                          AS total_unplanned,
+                COUNT(DISTINCT ghl_contact_id) FILTER (WHERE irh ~* :yes_re)   AS yes_unplanned,
+                COUNT(DISTINCT ghl_contact_id) FILTER (WHERE irh ~* :maybe_re) AS maybe_unplanned,
+                COUNT(DISTINCT ghl_contact_id) FILTER (WHERE bcws = :N)        AS booked_unplanned
+            FROM unplanned
+        """
+        r = await db.execute(sa_text(nld_counts_sql).bindparams(
+            wid=wid, yes_re=yes_re, maybe_re=maybe_re, nj_re=series_nj_re, N=N,
+        ))
+        row = r.one_or_none()
+        total_u, yes_u, maybe_u, booked_u = (int(row[0] or 0), int(row[1] or 0), int(row[2] or 0), int(row[3] or 0)) if row else (0, 0, 0, 0)
+
+        nld_metrics: dict[str, float | None] = {
+            "listSize": None,
+            "listRemain": None,
+            "gcalInvited": None,
+            "accountsNeeded": None,
+            "invited": total_u,
+            "yesMarked": yes_u,
+            "maybeMarked": maybe_u,
+            "totalBookings": booked_u,
+        }
+
+        # Order rows: display_order later than any real list (negative means first; 999999 keeps them at the end)
+        rows_out: list[dict[str, Any]] = []
+        if nj_count > 0:
+            rows_out.append({
+                "workbookRow": 999998,
+                "kind": "nonjoiners",
+                "status": w.status,
+                "note": None,
+                "listUrl": None,
+                "description": "Nonjoiners",
+                "listName": None,
+                "sendInfo": None,
+                "senderColor": None,
+                "bucketId": None,
+                "bucketName": None,
+                "descLabel": None,
+                "titleText": None,
+                "createdDate": None,
+                "industry": None,
+                "employeeRange": None,
+                "country": None,
+                "metrics": nj_metrics,
+            })
+        if total_u > 0:
+            rows_out.append({
+                "workbookRow": 999999,
+                "kind": "no_list_data",
+                "status": w.status,
+                "note": None,
+                "listUrl": None,
+                "description": "NO LIST DATA",
+                "listName": None,
+                "sendInfo": None,
+                "senderColor": None,
+                "bucketId": None,
+                "bucketName": None,
+                "descLabel": None,
+                "titleText": None,
+                "createdDate": None,
+                "industry": None,
+                "employeeRange": None,
+                "country": None,
+                "metrics": nld_metrics,
+            })
+        return rows_out
 
     async def _compute_per_list_metrics(
         self,
@@ -424,7 +581,9 @@ class GoHighLevelStatisticsSource:
                 if aid in out:
                     out[aid]["unsubscribes"] = cnt
 
-        # totalBookings per list — opportunities with webinar_source_number = N
+        # totalBookings per list — UNION of (opps with webinar_source_number = N)
+        # + (opps whose contact has booked_call_webinar_series = N). Matches
+        # the webinar-level union since the opp-level field is often empty.
         counts = await _group_count("""
             SELECT c.assignment_id, COUNT(DISTINCT o.ghl_opportunity_id)
             FROM contacts c
@@ -432,7 +591,7 @@ class GoHighLevelStatisticsSource:
             JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
             JOIN ghl_opportunity o ON o.ghl_contact_id = g.ghl_contact_id
             WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
-              AND o.webinar_source_number = :N
+              AND (o.webinar_source_number = :N OR g.booked_call_webinar_series = :N)
             GROUP BY c.assignment_id
         """, N=N)
         for aid, cnt in counts.items():
@@ -662,17 +821,38 @@ class GoHighLevelStatisticsSource:
         else:
             metrics["unsubscribes"] = None
 
-        # --- Sales (opportunities keyed on webinar_source_number) ---
+        # --- Sales ---
+        # Load opps two ways:
+        #   (a) opportunities with webinar_source_number = N (primary signal)
+        #   (b) opportunities whose contact has booked_call_webinar_series = N
+        #       (fallback when the opp-level field isn't populated — common in
+        #        this location, so treat the contact field as authoritative)
         r = await db.execute(
             select(GHLOpportunity).where(GHLOpportunity.webinar_source_number == N)
         )
-        opps = list(r.scalars().all())
+        opps_primary = list(r.scalars().all())
+
+        r = await db.execute(
+            select(GHLOpportunity)
+            .join(GHLContact, GHLContact.ghl_contact_id == GHLOpportunity.ghl_contact_id)
+            .where(GHLContact.booked_call_webinar_series == N)
+        )
+        opps_fallback = list(r.scalars().all())
+
+        # Union by ghl_opportunity_id
+        seen_ids: set[str] = set()
+        opps: list[GHLOpportunity] = []
+        for o in (*opps_primary, *opps_fallback):
+            if o.ghl_opportunity_id in seen_ids:
+                continue
+            seen_ids.add(o.ghl_opportunity_id)
+            opps.append(o)
         n_opps = len(opps)
 
         def cnt(pred) -> int:
             return sum(1 for o in opps if pred(o))
 
-        metrics["totalBookings"] = n_opps if n_opps > 0 else 0
+        metrics["totalBookings"] = n_opps
         from datetime import datetime, timezone
         now_utc = datetime.now(timezone.utc)
         metrics["totalCallsDatePassed"] = cnt(

@@ -26,6 +26,23 @@ class GHLContact(Base):
     cold_calendar_unsubscribe_date: Mapped[Optional[datetime]] = mapped_column(Date)
     has_sms_click_tag: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
+    # --- Fallback / auxiliary fields (migration 026) ---
+    calendar_invite_response_prefix: Mapped[Optional[str]] = mapped_column(Text)
+    calendar_invite_response_prefix_non_joiners: Mapped[Optional[str]] = mapped_column(Text)
+    webinar_registration_number: Mapped[Optional[int]] = mapped_column(Integer)
+    zoom_webinar_series_latest: Mapped[Optional[int]] = mapped_column(Integer)
+    zoom_webinar_series_registered_total_count: Mapped[Optional[int]] = mapped_column(Integer)
+    zoom_webinar_series_attended_total_count: Mapped[Optional[int]] = mapped_column(Integer)
+    zoom_time_in_session_minutes: Mapped[Optional[int]] = mapped_column(Integer)
+    zoom_viewing_time_in_minutes_total: Mapped[Optional[int]] = mapped_column(Integer)
+    zoom_attended: Mapped[Optional[str]] = mapped_column(Text)
+    book_campaign_source: Mapped[Optional[str]] = mapped_column(Text)
+    book_campaign_medium: Mapped[Optional[str]] = mapped_column(Text)
+    book_campaign_name: Mapped[Optional[str]] = mapped_column(Text)
+    registration_campaign_source: Mapped[Optional[str]] = mapped_column(Text)
+    registration_campaign_medium: Mapped[Optional[str]] = mapped_column(Text)
+    registration_campaign_name: Mapped[Optional[str]] = mapped_column(Text)
+
     tags: Mapped[Optional[list]] = mapped_column(JSONB)
     raw_custom_fields: Mapped[Optional[dict]] = mapped_column(JSONB)
 

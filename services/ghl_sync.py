@@ -20,13 +20,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import GHLContact, GHLOpportunity, GHLSyncRun, GHLSyncSettings, GHLWebinarStats
 from db.session import AsyncSessionLocal
 from integrations.ghl_client import (
+    CONTACT_FIELD_BOOK_CAMPAIGN_MEDIUM,
+    CONTACT_FIELD_BOOK_CAMPAIGN_NAME,
+    CONTACT_FIELD_BOOK_CAMPAIGN_SOURCE,
     CONTACT_FIELD_BOOKED_CALL_WEBINAR_SERIES,
     CONTACT_FIELD_CALENDAR_INVITE_RESPONSE_HISTORY,
     CONTACT_FIELD_CALENDAR_WEBINAR_SERIES_HISTORY,
     CONTACT_FIELD_CALENDAR_WEBINAR_SERIES_NON_JOINERS,
     CONTACT_FIELD_COLD_CALENDAR_UNSUBSCRIBE_DATE,
+    CONTACT_FIELD_INVITE_RESPONSE_PREFIX,
+    CONTACT_FIELD_INVITE_RESPONSE_PREFIX_NON_JOINERS,
     CONTACT_FIELD_IS_BOOKED_CALL,
+    CONTACT_FIELD_REGISTRATION_CAMPAIGN_MEDIUM,
+    CONTACT_FIELD_REGISTRATION_CAMPAIGN_NAME,
+    CONTACT_FIELD_REGISTRATION_CAMPAIGN_SOURCE,
     CONTACT_FIELD_WEBINAR_REGISTRATION_IN_FORM_DATE,
+    CONTACT_FIELD_WEBINAR_REGISTRATION_NUMBER,
+    CONTACT_FIELD_ZOOM_ATTENDED,
+    CONTACT_FIELD_ZOOM_TIME_IN_SESSION_MINUTES,
+    CONTACT_FIELD_ZOOM_VIEWING_TIME_IN_MINUTES,
+    CONTACT_FIELD_ZOOM_WEBINAR_SERIES_ATTENDED_COUNT,
+    CONTACT_FIELD_ZOOM_WEBINAR_SERIES_LATEST,
+    CONTACT_FIELD_ZOOM_WEBINAR_SERIES_REG_COUNT,
     GHLClient,
     OPP_FIELD_CALL1_APPT_DATE,
     OPP_FIELD_CALL1_APPT_STATUS,
@@ -96,6 +111,22 @@ def _build_contact_row(c: dict) -> dict:
         "cold_calendar_unsubscribe_date": _parse_date(custom.get(CONTACT_FIELD_COLD_CALENDAR_UNSUBSCRIBE_DATE)),
         "has_sms_click_tag": SMS_CLICK_TAG in tags,
         "tags": tags,
+        # Fallback / auxiliary fields (migration 026)
+        "calendar_invite_response_prefix": custom.get(CONTACT_FIELD_INVITE_RESPONSE_PREFIX),
+        "calendar_invite_response_prefix_non_joiners": custom.get(CONTACT_FIELD_INVITE_RESPONSE_PREFIX_NON_JOINERS),
+        "webinar_registration_number": _safe_int(custom.get(CONTACT_FIELD_WEBINAR_REGISTRATION_NUMBER)),
+        "zoom_webinar_series_latest": _safe_int(custom.get(CONTACT_FIELD_ZOOM_WEBINAR_SERIES_LATEST)),
+        "zoom_webinar_series_registered_total_count": _safe_int(custom.get(CONTACT_FIELD_ZOOM_WEBINAR_SERIES_REG_COUNT)),
+        "zoom_webinar_series_attended_total_count": _safe_int(custom.get(CONTACT_FIELD_ZOOM_WEBINAR_SERIES_ATTENDED_COUNT)),
+        "zoom_time_in_session_minutes": _safe_int(custom.get(CONTACT_FIELD_ZOOM_TIME_IN_SESSION_MINUTES)),
+        "zoom_viewing_time_in_minutes_total": _safe_int(custom.get(CONTACT_FIELD_ZOOM_VIEWING_TIME_IN_MINUTES)),
+        "zoom_attended": custom.get(CONTACT_FIELD_ZOOM_ATTENDED),
+        "book_campaign_source": custom.get(CONTACT_FIELD_BOOK_CAMPAIGN_SOURCE),
+        "book_campaign_medium": custom.get(CONTACT_FIELD_BOOK_CAMPAIGN_MEDIUM),
+        "book_campaign_name": custom.get(CONTACT_FIELD_BOOK_CAMPAIGN_NAME),
+        "registration_campaign_source": custom.get(CONTACT_FIELD_REGISTRATION_CAMPAIGN_SOURCE),
+        "registration_campaign_medium": custom.get(CONTACT_FIELD_REGISTRATION_CAMPAIGN_MEDIUM),
+        "registration_campaign_name": custom.get(CONTACT_FIELD_REGISTRATION_CAMPAIGN_NAME),
         "raw_custom_fields": custom if custom else None,
         "created_at_ghl": _parse_dt(c.get("dateAdded")),
         "updated_at_ghl": _parse_dt(c.get("dateUpdated")),
@@ -454,13 +485,15 @@ async def run_webinar_sync(
                 await _update_run_progress(run_id, contacts_synced, opps_synced)
 
             # Opportunities (narrow phase only — deep skips)
+            # Store ALL opps encountered — bookings are counted at read time by
+            # UNION of (opps with webinar_source_number = N) + (contacts with
+            # booked_call_webinar_series = N), which catches opps whose custom
+            # field isn't set but whose contact has the webinar tag.
             if not deep:
                 async with AsyncSessionLocal() as db:
                     batch = []
                     async for o in client.stream_opportunities():
                         row = _build_opp_row(o)
-                        if row.get("webinar_source_number") != webinar_number:
-                            continue
                         batch.append(row)
                         if len(batch) >= 250:
                             try:

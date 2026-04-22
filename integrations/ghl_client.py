@@ -26,7 +26,7 @@ OPP_FIELD_PROJECTED_DEAL_SIZE = "Oo9ktilF7QwTNBzksT3k"
 OPP_FIELD_CALL1_APPT_STATUS = "V82ErbW24izA5aQUzRUv"
 OPP_FIELD_CALL1_APPT_DATE = "bFDWu3koncdxn26h6nAm"
 
-# Contact custom field IDs
+# Contact custom field IDs — primary signals
 CONTACT_FIELD_CALENDAR_INVITE_RESPONSE_HISTORY = "ghPIByTtKxRmHveNu4b1"
 CONTACT_FIELD_CALENDAR_WEBINAR_SERIES_HISTORY = "6YyME5pcbkr2zpxMHDPK"
 CONTACT_FIELD_CALENDAR_WEBINAR_SERIES_NON_JOINERS = "6TYlHOaOXS2DWHH5kR8D"
@@ -34,6 +34,23 @@ CONTACT_FIELD_BOOKED_CALL_WEBINAR_SERIES = "rsgthoV5ScH49VPFZlyq"
 CONTACT_FIELD_IS_BOOKED_CALL = "wWkP8RfjazF5HdAzR9hA"
 CONTACT_FIELD_WEBINAR_REGISTRATION_IN_FORM_DATE = "PUuRqljS3gWyBEmwBxwL"
 CONTACT_FIELD_COLD_CALENDAR_UNSUBSCRIBE_DATE = "OLQt9nEWyG7tpYIdNs4F"
+
+# Contact custom field IDs — fallback / auxiliary (all discovered from live location)
+CONTACT_FIELD_INVITE_RESPONSE_PREFIX = "nFS2za5WnLXWmp55sWi1"
+CONTACT_FIELD_INVITE_RESPONSE_PREFIX_NON_JOINERS = "SAiRDcopO9DhvokO2E8W"
+CONTACT_FIELD_WEBINAR_REGISTRATION_NUMBER = "kJQewaxZUjDp83WCS0Fj"
+CONTACT_FIELD_ZOOM_WEBINAR_SERIES_LATEST = "XH7sGVl71ZqO9xhEn4gg"
+CONTACT_FIELD_ZOOM_WEBINAR_SERIES_REG_COUNT = "IzPgZbcLiXTSmCz8LFGM"
+CONTACT_FIELD_ZOOM_WEBINAR_SERIES_ATTENDED_COUNT = "5hubKUb30XFSKHLBZzje"
+CONTACT_FIELD_ZOOM_TIME_IN_SESSION_MINUTES = "hiADWfGo1jeaMIhzM97o"
+CONTACT_FIELD_ZOOM_VIEWING_TIME_IN_MINUTES = "dfAAxcYN08ZQ09wTtQ8N"
+CONTACT_FIELD_ZOOM_ATTENDED = "ycQkLxVLljWmk7qAZRRR"
+CONTACT_FIELD_BOOK_CAMPAIGN_SOURCE = "TBPA9KJhtSV9bWxLKrXm"
+CONTACT_FIELD_BOOK_CAMPAIGN_MEDIUM = "iNpb0QADMehVmkdePLVF"
+CONTACT_FIELD_BOOK_CAMPAIGN_NAME = "j5P9np8IegTDp5HsJgc9"
+CONTACT_FIELD_REGISTRATION_CAMPAIGN_SOURCE = "J2DrQ8FJ1i0yIDnZr7BD"
+CONTACT_FIELD_REGISTRATION_CAMPAIGN_MEDIUM = "T5F3y5f5rjOqGELX84CB"
+CONTACT_FIELD_REGISTRATION_CAMPAIGN_NAME = "M9B6aeMQ5243R3GJZNit"
 
 # Tag we need to preserve as a boolean on the contact
 SMS_CLICK_TAG = "webinar reminder sms clicked"
@@ -141,8 +158,8 @@ class GHLClient:
         calendar_webinar_series_history field (4.2M rows).
 
         Captures contacts who: responded Yes/Maybe, are non-joiners, have
-        booked a call, self-registered, unsubscribed, or have Is_Booked_call.
-        ~54K contacts total against this location.
+        booked a call, self-registered, unsubscribed, or have any
+        registration/zoom signal.
         """
         return [{"group": "OR", "filters": [
             {"field": f"customFields.{CONTACT_FIELD_CALENDAR_INVITE_RESPONSE_HISTORY}", "operator": "exists"},
@@ -151,6 +168,12 @@ class GHLClient:
             {"field": f"customFields.{CONTACT_FIELD_IS_BOOKED_CALL}", "operator": "exists"},
             {"field": f"customFields.{CONTACT_FIELD_WEBINAR_REGISTRATION_IN_FORM_DATE}", "operator": "exists"},
             {"field": f"customFields.{CONTACT_FIELD_COLD_CALENDAR_UNSUBSCRIBE_DATE}", "operator": "exists"},
+            # Fallback signals — narrower variants of the above
+            {"field": f"customFields.{CONTACT_FIELD_INVITE_RESPONSE_PREFIX}", "operator": "exists"},
+            {"field": f"customFields.{CONTACT_FIELD_INVITE_RESPONSE_PREFIX_NON_JOINERS}", "operator": "exists"},
+            {"field": f"customFields.{CONTACT_FIELD_WEBINAR_REGISTRATION_NUMBER}", "operator": "exists"},
+            {"field": f"customFields.{CONTACT_FIELD_ZOOM_ATTENDED}", "operator": "exists"},
+            {"field": f"customFields.{CONTACT_FIELD_ZOOM_WEBINAR_SERIES_LATEST}", "operator": "exists"},
         ]}]
 
     @staticmethod
