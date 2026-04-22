@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   fetchWgStatus,
   saveWgApiKey,
@@ -8,52 +8,72 @@ import {
   fetchWgWebinars,
   refreshWgWebinars,
   syncWgSubscribers,
+  syncAllWgSubscribers,
+  fetchWgSubscribers,
+  wgSubscribersCsvUrl,
   type WgCredentialStatus,
   type WgWebinar,
+  type WgSubscriber,
 } from "@/lib/api";
 
+type Tab = "config" | "broadcasts" | "subscribers";
+
+function formatDuration(sec: number | null | undefined): string {
+  if (sec == null || sec <= 0) return "—";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function formatDateTime(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function formatDate(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleDateString();
+}
+
+function StatusPill({ w }: { w: WgWebinar }) {
+  let label = "Ended";
+  let cls = "bg-sky-500/15 text-sky-500 border-sky-500/30";
+  if (w.cancelled) { label = "Cancelled"; cls = "bg-red-500/15 text-red-400 border-red-500/30"; }
+  else if (!w.has_ended) { label = "Active"; cls = "bg-emerald-500/15 text-emerald-500 border-emerald-500/30"; }
+  return <span className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${cls}`}>{label}</span>;
+}
+
 export function ConnectorsPage() {
+  const [tab, setTab] = useState<Tab>("config");
   const [status, setStatus] = useState<WgCredentialStatus | null>(null);
   const [apiKeyInput, setApiKeyInput] = useState("");
-  const [webinars, setWebinars] = useState<WgWebinar[]>([]);
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-  const [syncingId, setSyncingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-
-  async function loadAll() {
-    setLoading(true);
-    try {
-      const s = await fetchWgStatus();
-      setStatus(s);
-      if (s.configured) {
-        const { webinars } = await fetchWgWebinars();
-        setWebinars(webinars);
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-    } finally {
-      setLoading(false);
-    }
-  }
+  const [loadingStatus, setLoadingStatus] = useState(true);
 
   useEffect(() => {
-    loadAll();
+    fetchWgStatus()
+      .then((s) => {
+        setStatus(s);
+        if (s.configured) setTab("broadcasts");
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load"))
+      .finally(() => setLoadingStatus(false));
   }, []);
 
   async function handleSave() {
-    setError(null);
-    setMessage(null);
-    setSaving(true);
+    setError(null); setMessage(null); setSaving(true);
     try {
       const s = await saveWgApiKey(apiKeyInput.trim());
       setStatus(s);
       setApiKeyInput("");
       setMessage("API key saved.");
-      // Auto-refresh webinars on first save
-      await handleRefresh();
+      setTab("broadcasts");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save");
     } finally {
@@ -63,64 +83,68 @@ export function ConnectorsPage() {
 
   async function handleDelete() {
     if (!confirm("Remove WebinarGeek API key? Synced data will be preserved.")) return;
-    setError(null);
     try {
       await deleteWgApiKey();
       setStatus({ configured: false });
-      setWebinars([]);
+      setTab("config");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete");
     }
   }
 
-  async function handleRefresh() {
-    setError(null);
-    setMessage(null);
-    setRefreshing(true);
-    try {
-      const { count } = await refreshWgWebinars();
-      const { webinars } = await fetchWgWebinars();
-      setWebinars(webinars);
-      setMessage(`Refreshed — ${count} broadcasts loaded.`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to refresh");
-    } finally {
-      setRefreshing(false);
-    }
-  }
-
-  async function handleSync(broadcastId: string) {
-    setError(null);
-    setMessage(null);
-    setSyncingId(broadcastId);
-    try {
-      const res = await syncWgSubscribers(broadcastId);
-      setMessage(`Synced ${res.total} subscribers for ${broadcastId}.`);
-      const { webinars } = await fetchWgWebinars();
-      setWebinars(webinars);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to sync");
-    } finally {
-      setSyncingId(null);
-    }
-  }
-
-  if (loading) {
+  if (loadingStatus) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="flex items-center gap-3">
-          <div className="w-4 h-4 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
-          <span className="text-sm text-zinc-500">Loading connectors...</span>
-        </div>
+        <div className="w-4 h-4 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
       </div>
     );
   }
 
   return (
-    <div className="px-6 py-6 max-w-5xl">
-      <h1 className="text-lg font-bold text-zinc-900 dark:text-zinc-100 tracking-tight mb-6">
-        Connectors
-      </h1>
+    <div className="px-6 py-6 max-w-[1400px]">
+      <div className="flex items-center gap-3 mb-6">
+        <button
+          onClick={() => history.back()}
+          className="text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 text-lg"
+          aria-label="Back"
+        >
+          ←
+        </button>
+        <div className="w-8 h-8 rounded-md bg-violet-500/15 flex items-center justify-center">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-violet-500">
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
+        </div>
+        <h1 className="text-xl font-bold text-zinc-900 dark:text-zinc-100 tracking-tight">
+          WebinarGeek Connector
+        </h1>
+      </div>
+
+      {/* Tabs — segmented control with purple ring on active */}
+      <div className="grid grid-cols-3 p-1.5 rounded-xl bg-zinc-100 dark:bg-zinc-900/60 mb-6">
+        {([
+          { key: "config", label: "Configuration" },
+          { key: "broadcasts", label: "Broadcasts" },
+          { key: "subscribers", label: "Subscribers" },
+        ] as const).map((t) => {
+          const active = tab === t.key;
+          const disabled = !status?.configured && t.key !== "config";
+          return (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              disabled={disabled}
+              className={`py-3 rounded-lg text-sm font-semibold transition-all ${
+                active
+                  ? "bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 ring-2 ring-violet-500 shadow-sm"
+                  : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              }`}
+            >
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
 
       {error && (
         <div className="mb-4 px-3 py-2 rounded-md border border-red-500/30 bg-red-500/10 text-xs text-red-500">
@@ -133,134 +157,387 @@ export function ConnectorsPage() {
         </div>
       )}
 
-      {/* ── WebinarGeek card ────────────────────────────────────────── */}
-      <section className="rounded-lg border border-zinc-200 dark:border-zinc-800/60 bg-white dark:bg-zinc-900/40 overflow-hidden">
-        <header className="px-4 py-3 border-b border-zinc-200 dark:border-zinc-800/60 flex items-center justify-between">
-          <div>
-            <h2 className="text-sm font-bold text-zinc-900 dark:text-zinc-100">WebinarGeek</h2>
-            <p className="text-xs text-zinc-500 mt-0.5">
-              Connect your API key to sync webinar subscribers.
-            </p>
-          </div>
-          <span
-            className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${
-              status?.configured
-                ? "bg-emerald-500/15 text-emerald-500 border-emerald-500/30"
-                : "bg-zinc-500/15 text-zinc-400 border-zinc-500/30"
-            }`}
-          >
-            {status?.configured ? "Connected" : "Not connected"}
-          </span>
-        </header>
-
-        <div className="p-4 space-y-4">
-          {/* API key row */}
-          {status?.configured ? (
-            <div className="flex items-center gap-3">
-              <div className="flex-1">
-                <label className="block text-[10px] uppercase tracking-wider text-zinc-500 font-semibold mb-1">
-                  API Key
-                </label>
-                <div className="font-mono text-xs text-zinc-700 dark:text-zinc-300">
-                  {status.api_key_masked}
-                </div>
-              </div>
-              <button
-                onClick={handleDelete}
-                className="px-3 py-1.5 text-xs rounded-md border border-red-500/40 text-red-500 hover:bg-red-500/10"
-              >
-                Remove
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <label className="block text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">
-                WebinarGeek API Key
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="password"
-                  value={apiKeyInput}
-                  onChange={(e) => setApiKeyInput(e.target.value)}
-                  placeholder="Paste your API key"
-                  className="flex-1 bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700/60 rounded-md px-3 py-1.5 text-xs text-zinc-800 dark:text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
-                />
-                <button
-                  onClick={handleSave}
-                  disabled={!apiKeyInput.trim() || saving}
-                  className="px-3 py-1.5 text-xs rounded-md bg-violet-600 hover:bg-violet-500 text-white font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {saving ? "Saving..." : "Save & Verify"}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Webinars list */}
-          {status?.configured && (
-            <div className="pt-2 border-t border-zinc-200 dark:border-zinc-800/60">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
-                  Cached broadcasts ({webinars.length})
-                </h3>
-                <button
-                  onClick={handleRefresh}
-                  disabled={refreshing}
-                  className="px-3 py-1.5 text-xs rounded-md border border-zinc-300 dark:border-zinc-700/60 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800/50 disabled:opacity-50"
-                >
-                  {refreshing ? "Refreshing..." : "Refresh from WebinarGeek"}
-                </button>
-              </div>
-
-              {webinars.length === 0 ? (
-                <p className="text-xs text-zinc-500 py-4 text-center">
-                  No broadcasts cached yet. Click "Refresh" to pull from WebinarGeek.
-                </p>
-              ) : (
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b border-zinc-200 dark:border-zinc-800/60 text-zinc-500 text-[10px] uppercase tracking-wider">
-                      <th className="text-left py-2 px-2 font-semibold">Name</th>
-                      <th className="text-left py-2 px-2 font-semibold">Broadcast ID</th>
-                      <th className="text-left py-2 px-2 font-semibold">Starts</th>
-                      <th className="text-right py-2 px-2 font-semibold">Subs</th>
-                      <th className="text-left py-2 px-2 font-semibold">Last synced</th>
-                      <th className="text-right py-2 px-2 font-semibold">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {webinars.map((w) => (
-                      <tr
-                        key={w.broadcast_id}
-                        className="border-b border-zinc-100 dark:border-zinc-800/30 hover:bg-zinc-50 dark:hover:bg-zinc-900/40"
-                      >
-                        <td className="py-2 px-2 text-zinc-800 dark:text-zinc-200">{w.name}</td>
-                        <td className="py-2 px-2 font-mono text-zinc-500">{w.broadcast_id}</td>
-                        <td className="py-2 px-2 text-zinc-600 dark:text-zinc-400">
-                          {w.starts_at ? new Date(w.starts_at).toLocaleString() : "—"}
-                        </td>
-                        <td className="py-2 px-2 text-right font-mono">{w.subscriber_count}</td>
-                        <td className="py-2 px-2 text-zinc-500">
-                          {w.last_synced_at ? new Date(w.last_synced_at).toLocaleString() : "Never"}
-                        </td>
-                        <td className="py-2 px-2 text-right">
-                          <button
-                            onClick={() => handleSync(w.broadcast_id)}
-                            disabled={syncingId === w.broadcast_id}
-                            className="px-2.5 py-1 text-[11px] rounded-md bg-violet-600 hover:bg-violet-500 text-white font-semibold disabled:opacity-50"
-                          >
-                            {syncingId === w.broadcast_id ? "Syncing..." : "Sync"}
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          )}
-        </div>
-      </section>
+      {tab === "config" && (
+        <ConfigTab
+          status={status}
+          apiKeyInput={apiKeyInput}
+          setApiKeyInput={setApiKeyInput}
+          onSave={handleSave}
+          onDelete={handleDelete}
+          saving={saving}
+        />
+      )}
+      {tab === "broadcasts" && status?.configured && <BroadcastsTab onMessage={setMessage} onError={setError} />}
+      {tab === "subscribers" && status?.configured && <SubscribersTab />}
     </div>
+  );
+}
+
+/* ─── Configuration tab ──────────────────────────────────────────────── */
+function ConfigTab(props: {
+  status: WgCredentialStatus | null;
+  apiKeyInput: string;
+  setApiKeyInput: (v: string) => void;
+  onSave: () => void;
+  onDelete: () => void;
+  saving: boolean;
+}) {
+  const { status, apiKeyInput, setApiKeyInput, onSave, onDelete, saving } = props;
+  return (
+    <section className="rounded-lg border border-zinc-200 dark:border-zinc-800/60 bg-white dark:bg-zinc-900/40 p-4">
+      <h2 className="text-sm font-bold text-zinc-900 dark:text-zinc-100 mb-1">WebinarGeek API</h2>
+      <p className="text-xs text-zinc-500 mb-4">
+        Connect your API key to pull broadcasts and subscribers.
+      </p>
+
+      {status?.configured ? (
+        <div className="flex items-center gap-3">
+          <div className="flex-1">
+            <label className="block text-[10px] uppercase tracking-wider text-zinc-500 font-semibold mb-1">API Key</label>
+            <div className="font-mono text-xs text-zinc-700 dark:text-zinc-300">{status.api_key_masked}</div>
+          </div>
+          <span className="px-2 py-0.5 rounded text-[10px] font-semibold border bg-emerald-500/15 text-emerald-500 border-emerald-500/30">
+            Connected
+          </span>
+          <button
+            onClick={onDelete}
+            className="px-3 py-1.5 text-xs rounded-md border border-red-500/40 text-red-500 hover:bg-red-500/10"
+          >
+            Remove
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <label className="block text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">
+            WebinarGeek API Key
+          </label>
+          <div className="flex gap-2">
+            <input
+              type="password"
+              value={apiKeyInput}
+              onChange={(e) => setApiKeyInput(e.target.value)}
+              placeholder="Paste your API key"
+              className="flex-1 bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700/60 rounded-md px-3 py-1.5 text-xs text-zinc-800 dark:text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+            />
+            <button
+              onClick={onSave}
+              disabled={!apiKeyInput.trim() || saving}
+              className="px-3 py-1.5 text-xs rounded-md bg-violet-600 hover:bg-violet-500 text-white font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {saving ? "Saving..." : "Save & Verify"}
+            </button>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/* ─── Broadcasts tab ─────────────────────────────────────────────────── */
+function BroadcastsTab(props: { onMessage: (m: string) => void; onError: (e: string) => void }) {
+  const [rows, setRows] = useState<WgWebinar[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [syncAllRunning, setSyncAllRunning] = useState(false);
+  const [syncingId, setSyncingId] = useState<string | null>(null);
+
+  async function load(q?: string) {
+    setLoading(true);
+    try {
+      const { broadcasts, total } = await fetchWgWebinars({ limit: 500, q });
+      setRows(broadcasts);
+      setTotal(total);
+    } catch (e) {
+      props.onError(e instanceof Error ? e.message : "Failed to load");
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => { load(); }, []);
+
+  const filtered = useMemo(() => {
+    if (!filter.trim()) return rows;
+    const q = filter.toLowerCase();
+    return rows.filter((r) =>
+      r.broadcast_id.includes(q) ||
+      r.name.toLowerCase().includes(q) ||
+      (r.internal_title ?? "").toLowerCase().includes(q)
+    );
+  }, [rows, filter]);
+
+  async function handleRefresh() {
+    setRefreshing(true); props.onError(""); props.onMessage("");
+    try {
+      const { count } = await refreshWgWebinars();
+      props.onMessage(`Refreshed — ${count} broadcasts loaded.`);
+      await load();
+    } catch (e) {
+      props.onError(e instanceof Error ? e.message : "Refresh failed");
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function handleSyncAll() {
+    if (!confirm(`Sync subscribers for all ${rows.length} broadcasts? This may take a while.`)) return;
+    setSyncAllRunning(true);
+    try {
+      const res = await syncAllWgSubscribers();
+      props.onMessage(`Synced ${res.total_subscribers} subscribers across ${res.broadcasts_synced} broadcasts.`);
+      if (res.errors?.length) props.onError(`Errors: ${res.errors.join("; ")}`);
+      await load();
+    } catch (e) {
+      props.onError(e instanceof Error ? e.message : "Sync all failed");
+    } finally {
+      setSyncAllRunning(false);
+    }
+  }
+
+  async function handleSync(id: string) {
+    setSyncingId(id);
+    try {
+      const res = await syncWgSubscribers(id);
+      props.onMessage(`Synced ${res.total} subscribers for ${id}.`);
+      await load();
+    } catch (e) {
+      props.onError(e instanceof Error ? e.message : "Sync failed");
+    } finally {
+      setSyncingId(null);
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-zinc-200 dark:border-zinc-800/60 bg-white dark:bg-zinc-900/40 overflow-hidden">
+      <header className="px-4 py-3 border-b border-zinc-200 dark:border-zinc-800/60 flex items-center justify-between">
+        <div>
+          <h2 className="text-sm font-bold text-zinc-900 dark:text-zinc-100">Broadcasts</h2>
+          <p className="text-xs text-zinc-500 mt-0.5">
+            {total} broadcasts cached. Click a row action to sync its subscribers.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            className="px-3 py-1.5 text-xs rounded-md bg-violet-600 hover:bg-violet-500 text-white font-semibold disabled:opacity-50"
+          >
+            {refreshing ? "Refreshing..." : "Sync Broadcasts"}
+          </button>
+          <button
+            onClick={handleSyncAll}
+            disabled={syncAllRunning || rows.length === 0}
+            className="px-3 py-1.5 text-xs rounded-md bg-sky-600 hover:bg-sky-500 text-white font-semibold disabled:opacity-50"
+          >
+            {syncAllRunning ? "Syncing all..." : "Sync All Subscriber Data"}
+          </button>
+        </div>
+      </header>
+
+      <div className="p-4">
+        <input
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter broadcasts..."
+          className="w-64 mb-3 bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700/60 rounded-md px-3 py-1.5 text-xs text-zinc-800 dark:text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+        />
+
+        {loading ? (
+          <div className="py-8 text-center text-xs text-zinc-500">Loading...</div>
+        ) : filtered.length === 0 ? (
+          <div className="py-8 text-center text-xs text-zinc-500">
+            No broadcasts cached. Click "Sync Broadcasts" to pull from WebinarGeek.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-zinc-200 dark:border-zinc-800/60 text-zinc-500 text-[10px] uppercase tracking-wider">
+                  <th className="text-left py-2 px-2 font-semibold">ID</th>
+                  <th className="text-left py-2 px-2 font-semibold">Internal #</th>
+                  <th className="text-left py-2 px-2 font-semibold">Date &amp; Time</th>
+                  <th className="text-left py-2 px-2 font-semibold">Duration</th>
+                  <th className="text-right py-2 px-2 font-semibold">Subscribers</th>
+                  <th className="text-right py-2 px-2 font-semibold">Live Viewers</th>
+                  <th className="text-right py-2 px-2 font-semibold">Replay Viewers</th>
+                  <th className="text-left py-2 px-2 font-semibold">Status</th>
+                  <th className="text-right py-2 px-2 font-semibold">Synced</th>
+                  <th className="text-right py-2 px-2 font-semibold">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((w) => (
+                  <tr key={w.broadcast_id} className="border-b border-zinc-100 dark:border-zinc-800/30 hover:bg-zinc-50 dark:hover:bg-zinc-900/40">
+                    <td className="py-2 px-2 font-mono text-zinc-700 dark:text-zinc-300">{w.broadcast_id}</td>
+                    <td className="py-2 px-2 text-zinc-600 dark:text-zinc-400">{w.internal_title || "—"}</td>
+                    <td className="py-2 px-2 text-zinc-600 dark:text-zinc-400">{formatDateTime(w.starts_at)}</td>
+                    <td className="py-2 px-2 text-zinc-600 dark:text-zinc-400">{formatDuration(w.duration_seconds)}</td>
+                    <td className="py-2 px-2 text-right font-mono">{w.subscriptions_count}</td>
+                    <td className="py-2 px-2 text-right font-mono">{w.live_viewers_count}</td>
+                    <td className="py-2 px-2 text-right font-mono">{w.replay_viewers_count}</td>
+                    <td className="py-2 px-2"><StatusPill w={w} /></td>
+                    <td className="py-2 px-2 text-right font-mono text-zinc-500">{w.synced_subscriber_count}</td>
+                    <td className="py-2 px-2 text-right">
+                      <button
+                        onClick={() => handleSync(w.broadcast_id)}
+                        disabled={syncingId === w.broadcast_id}
+                        className="px-2.5 py-1 text-[11px] rounded-md border border-zinc-300 dark:border-zinc-700/60 hover:bg-zinc-100 dark:hover:bg-zinc-800/50 disabled:opacity-50"
+                      >
+                        {syncingId === w.broadcast_id ? "Syncing..." : "Get Subscribers"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/* ─── Subscribers tab ────────────────────────────────────────────────── */
+function SubscribersTab() {
+  const PAGE = 100;
+  const [broadcasts, setBroadcasts] = useState<WgWebinar[]>([]);
+  const [selected, setSelected] = useState<string>("");
+  const [search, setSearch] = useState("");
+  const [rows, setRows] = useState<WgSubscriber[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [offset, setOffset] = useState(0);
+
+  useEffect(() => {
+    fetchWgWebinars({ limit: 500 })
+      .then(({ broadcasts }) => setBroadcasts(broadcasts))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    setLoading(true); setOffset(0);
+    fetchWgSubscribers({ broadcast_id: selected || undefined, q: search || undefined, limit: PAGE, offset: 0 })
+      .then(({ subscribers, total }) => {
+        setRows(subscribers);
+        setTotal(total);
+      })
+      .finally(() => setLoading(false));
+  }, [selected, search]);
+
+  async function loadMore() {
+    const next = offset + PAGE;
+    const { subscribers } = await fetchWgSubscribers({
+      broadcast_id: selected || undefined,
+      q: search || undefined,
+      limit: PAGE,
+      offset: next,
+    });
+    setRows((prev) => [...prev, ...subscribers]);
+    setOffset(next);
+  }
+
+  const csvUrl = wgSubscribersCsvUrl({ broadcast_id: selected || undefined, q: search || undefined });
+
+  return (
+    <section className="rounded-lg border border-zinc-200 dark:border-zinc-800/60 bg-white dark:bg-zinc-900/40 overflow-hidden">
+      <header className="px-4 py-3 border-b border-zinc-200 dark:border-zinc-800/60 flex items-center justify-between">
+        <div>
+          <h2 className="text-sm font-bold text-zinc-900 dark:text-zinc-100">Subscribers</h2>
+          <p className="text-xs text-zinc-500 mt-0.5">{total.toLocaleString()} total subscribers</p>
+        </div>
+        <a
+          href={csvUrl}
+          className="px-3 py-1.5 text-xs rounded-md border border-zinc-300 dark:border-zinc-700/60 hover:bg-zinc-100 dark:hover:bg-zinc-800/50"
+        >
+          ⬇ Export CSV
+        </a>
+      </header>
+
+      <div className="p-4">
+        <div className="flex gap-3 mb-3">
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-zinc-500">Broadcast:</label>
+            <select
+              value={selected}
+              onChange={(e) => setSelected(e.target.value)}
+              className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700/60 rounded-md px-2 py-1.5 text-xs text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-violet-500 min-w-[240px]"
+            >
+              <option value="">All Broadcasts</option>
+              {broadcasts.map((b) => (
+                <option key={b.broadcast_id} value={b.broadcast_id}>
+                  {b.internal_title ? `${b.internal_title} · ` : ""}{formatDate(b.starts_at)} · {b.broadcast_id}
+                </option>
+              ))}
+            </select>
+          </div>
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search by email or name..."
+            className="flex-1 max-w-md bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700/60 rounded-md px-3 py-1.5 text-xs text-zinc-800 dark:text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+          />
+        </div>
+
+        {loading ? (
+          <div className="py-8 text-center text-xs text-zinc-500">Loading...</div>
+        ) : rows.length === 0 ? (
+          <div className="py-8 text-center text-xs text-zinc-500">
+            No subscribers synced yet. Use the Broadcasts tab to sync a broadcast.
+          </div>
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-zinc-200 dark:border-zinc-800/60 text-zinc-500 text-[10px] uppercase tracking-wider">
+                    <th className="text-left py-2 px-2 font-semibold">Email</th>
+                    <th className="text-left py-2 px-2 font-semibold">Name</th>
+                    <th className="text-left py-2 px-2 font-semibold">Broadcast ID</th>
+                    <th className="text-left py-2 px-2 font-semibold">Registered</th>
+                    <th className="text-left py-2 px-2 font-semibold">Source</th>
+                    <th className="text-left py-2 px-2 font-semibold">Watched</th>
+                    <th className="text-right py-2 px-2 font-semibold">Duration</th>
+                    <th className="text-left py-2 px-2 font-semibold">Device</th>
+                    <th className="text-left py-2 px-2 font-semibold">Country</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((s) => (
+                    <tr key={s.id} className="border-b border-zinc-100 dark:border-zinc-800/30">
+                      <td className="py-2 px-2 text-zinc-800 dark:text-zinc-200">{s.email}</td>
+                      <td className="py-2 px-2 text-zinc-700 dark:text-zinc-300">{[s.first_name, s.last_name].filter(Boolean).join(" ") || "—"}</td>
+                      <td className="py-2 px-2 font-mono text-zinc-500">{s.broadcast_id}</td>
+                      <td className="py-2 px-2 text-zinc-600 dark:text-zinc-400">{formatDate(s.subscribed_at)}</td>
+                      <td className="py-2 px-2 text-zinc-600 dark:text-zinc-400">{s.registration_source || "—"}</td>
+                      <td className="py-2 px-2">
+                        {s.watched_live ? <span className="text-emerald-500">✓ Live</span>
+                          : s.watched_replay ? <span className="text-sky-500">✓ Replay</span>
+                          : <span className="text-zinc-500">✕</span>}
+                      </td>
+                      <td className="py-2 px-2 text-right font-mono text-zinc-600 dark:text-zinc-400">
+                        {s.minutes_viewing != null ? `${s.minutes_viewing}m` : "—"}
+                      </td>
+                      <td className="py-2 px-2 text-zinc-600 dark:text-zinc-400">{s.viewing_device || "—"}</td>
+                      <td className="py-2 px-2 text-zinc-600 dark:text-zinc-400">{s.viewing_country || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {rows.length < total && (
+              <div className="pt-3 text-center">
+                <button
+                  onClick={loadMore}
+                  className="px-4 py-1.5 text-xs rounded-md border border-zinc-300 dark:border-zinc-700/60 hover:bg-zinc-100 dark:hover:bg-zinc-800/50"
+                >
+                  Load more ({rows.length} / {total})
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </section>
   );
 }

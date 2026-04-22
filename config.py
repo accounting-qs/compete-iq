@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     META_APP_ID: Optional[str] = None
     META_APP_SECRET: Optional[str] = None
     GHL_API_KEY: Optional[str] = None
+    GHL_LOCATION_ID: Optional[str] = None
+    GHL_PIPELINE_ID: Optional[str] = None
+    GHL_API_BASE_URL: str = "https://services.leadconnectorhq.com"
+    GHL_PAGE_DELAY_MS: int = 150
+    GHL_PAGE_SIZE: int = 100
 
     class Config:
         env_file = ".env"

@@ -11,6 +11,7 @@ const NAV_LINKS = [
   { href: "/library", label: "Library" },
   { href: "/statistics", label: "Statistics" },
   { href: "/connectors", label: "Connectors" },
+  { href: "/sync", label: "Sync" },
 ];
 
 export function TopNav() {
