@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   fetchGhlSyncStatus,
   fetchGhlSyncHistory,
@@ -36,7 +36,37 @@ function formatTimestamp(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
-  return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return d.toLocaleString(undefined, {
+    month: "short", day: "numeric",
+    hour: "numeric", minute: "2-digit", hour12: true,
+  });
+}
+
+function formatRelative(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  const diffMs = Date.now() - d.getTime();
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return "just now";
+  if (diffMin < 60) return `${diffMin} min ago`;
+  const diffH = Math.floor(diffMin / 60);
+  if (diffH < 24) return `${diffH} hr${diffH === 1 ? "" : "s"} ago`;
+  const diffD = Math.floor(diffH / 24);
+  return `${diffD} day${diffD === 1 ? "" : "s"} ago`;
+}
+
+/**
+ * Friendly label for sync_type:
+ *   "incremental" -> "Incremental"
+ *   "full" -> "Full"
+ *   "webinar:136" -> "Webinar 136"
+ */
+function formatSyncType(raw: string): string {
+  if (raw.startsWith("webinar:")) {
+    return `Webinar ${raw.slice(8)}`;
+  }
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
 
 function StatusPill({ status }: { status: string }) {
@@ -45,10 +75,55 @@ function StatusPill({ status }: { status: string }) {
     completed: "bg-emerald-500/15 text-emerald-500 border-emerald-500/30",
     failed: "bg-red-500/15 text-red-400 border-red-500/30",
   };
+  const label = status === "completed" ? "✓ completed"
+    : status === "running" ? "• running"
+    : status === "failed" ? "✗ failed"
+    : status;
   return (
-    <span className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${colors[status] ?? "bg-zinc-500/15 text-zinc-400 border-zinc-500/30"}`}>
-      {status}
+    <span className={`px-2 py-0.5 rounded text-[10px] font-semibold border uppercase tracking-wider ${colors[status] ?? "bg-zinc-500/15 text-zinc-400 border-zinc-500/30"}`}>
+      {label}
     </span>
+  );
+}
+
+interface Stats {
+  lastSyncRelative: string;
+  status: string;
+  recentFailures: number;
+  avgDurationSeconds: number | null;
+  totalSynced24h: number;
+}
+
+function computeStats(history: GhlSyncRun[]): Stats {
+  const now = Date.now();
+  const last24h = now - 24 * 3600 * 1000;
+
+  const latest = history[0];
+  const lastSyncRelative = latest ? formatRelative(latest.started_at) : "—";
+  const status = latest?.status ?? "idle";
+
+  const runs24h = history.filter((r) => new Date(r.started_at).getTime() >= last24h);
+  const recentFailures = runs24h.filter((r) => r.status === "failed").length;
+  const completedDurations = runs24h
+    .filter((r) => r.status === "completed" && r.duration_seconds !== null)
+    .map((r) => r.duration_seconds as number);
+  const avgDurationSeconds = completedDurations.length
+    ? Math.round(completedDurations.reduce((s, x) => s + x, 0) / completedDurations.length)
+    : null;
+  const totalSynced24h = runs24h.reduce(
+    (s, r) => s + (r.contacts_synced || 0) + (r.opportunities_synced || 0),
+    0,
+  );
+
+  return { lastSyncRelative, status, recentFailures, avgDurationSeconds, totalSynced24h };
+}
+
+function StatCard({ label, value, valueClass }: { label: string; value: string | number; valueClass?: string }) {
+  return (
+    <div className="rounded-lg border border-zinc-200 dark:border-zinc-800/40 bg-zinc-50 dark:bg-zinc-900/40 p-4">
+      <div className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold mb-1.5">{label}</div>
+      <div className={`text-2xl font-bold font-mono ${valueClass ?? "text-zinc-900 dark:text-zinc-100"}`}>{value}</div>
+    </div>
   );
 }
 
@@ -86,7 +161,6 @@ export function SyncPage() {
     return () => { mounted = false; };
   }, [refresh]);
 
-  // Auto-poll while a sync is running
   useEffect(() => {
     if (status?.is_running) {
       pollRef.current = window.setInterval(refresh, 5000);
@@ -98,6 +172,8 @@ export function SyncPage() {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [status?.is_running, refresh]);
+
+  const stats = useMemo(() => computeStats(history), [history]);
 
   const handleTrigger = async (syncType: "full" | "incremental") => {
     if (triggering) return;
@@ -150,7 +226,10 @@ export function SyncPage() {
       {/* Sticky header */}
       <div className="sticky top-12 z-40 bg-white dark:bg-zinc-950/90 backdrop-blur-md border-b border-zinc-200 dark:border-zinc-800/40 px-6 py-3">
         <div className="flex items-center justify-between">
-          <h1 className="text-lg font-bold text-zinc-900 dark:text-zinc-100 tracking-tight">GHL Sync</h1>
+          <div className="flex items-baseline gap-3">
+            <h1 className="text-lg font-bold text-zinc-900 dark:text-zinc-100 tracking-tight">Sync History</h1>
+            <span className="text-[11px] text-zinc-500">All times in your local timezone</span>
+          </div>
           <div className="flex items-center gap-2">
             <button
               onClick={() => handleTrigger("incremental")}
@@ -170,58 +249,110 @@ export function SyncPage() {
         </div>
       </div>
 
-      <div className="px-6 py-6 space-y-6 max-w-6xl">
-        {/* Current status card */}
-        <div className="rounded-lg border border-zinc-200 dark:border-zinc-800/40 bg-zinc-50 dark:bg-zinc-900/40 p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">Current Status</h2>
-            {status?.is_running && (
-              <div className="flex items-center gap-2 text-xs text-amber-500">
-                <div className="w-3 h-3 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
-                Sync in progress...
-              </div>
-            )}
-          </div>
-          {status?.latest ? (
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
-              <div>
-                <div className="text-zinc-500 uppercase tracking-wider text-[10px] mb-0.5">Type</div>
-                <div className="text-zinc-800 dark:text-zinc-200 font-medium">{status.latest.sync_type} ({status.latest.trigger})</div>
-              </div>
-              <div>
-                <div className="text-zinc-500 uppercase tracking-wider text-[10px] mb-0.5">Status</div>
-                <StatusPill status={status.latest.status} />
-              </div>
-              <div>
-                <div className="text-zinc-500 uppercase tracking-wider text-[10px] mb-0.5">Started</div>
-                <div className="text-zinc-800 dark:text-zinc-200">{formatTimestamp(status.latest.started_at)}</div>
-              </div>
-              <div>
-                <div className="text-zinc-500 uppercase tracking-wider text-[10px] mb-0.5">Duration</div>
-                <div className="text-zinc-800 dark:text-zinc-200 font-mono">{formatDuration(status.latest.duration_seconds)}</div>
-              </div>
-              <div>
-                <div className="text-zinc-500 uppercase tracking-wider text-[10px] mb-0.5">Records</div>
-                <div className="text-zinc-800 dark:text-zinc-200 font-mono">
-                  {status.latest.contacts_synced.toLocaleString()}c · {status.latest.opportunities_synced.toLocaleString()}o
-                  {status.latest.errors_count > 0 && (
-                    <span className="text-red-400 ml-1">· {status.latest.errors_count}err</span>
-                  )}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <p className="text-sm text-zinc-500">No syncs yet. Click "Sync Full" above to run the first one.</p>
-          )}
+      <div className="px-6 py-6 space-y-6 max-w-7xl">
+        {/* Stats cards */}
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <StatCard label="Last Sync" value={stats.lastSyncRelative} />
+          <StatCard
+            label="Status"
+            value={stats.status}
+            valueClass={
+              stats.status === "completed" ? "text-emerald-400"
+              : stats.status === "running" ? "text-amber-400"
+              : stats.status === "failed" ? "text-red-400"
+              : "text-zinc-400"
+            }
+          />
+          <StatCard
+            label="Recent Failures (24h)"
+            value={stats.recentFailures}
+            valueClass={stats.recentFailures > 0 ? "text-red-400" : "text-emerald-400"}
+          />
+          <StatCard
+            label="Avg Duration"
+            value={stats.avgDurationSeconds !== null ? formatDuration(stats.avgDurationSeconds) : "—"}
+          />
+          <StatCard
+            label="Total Synced (24h)"
+            value={stats.totalSynced24h.toLocaleString()}
+            valueClass="text-violet-400"
+          />
         </div>
 
-        {/* Settings panel */}
+        {/* History table */}
+        <div className="rounded-lg border border-zinc-200 dark:border-zinc-800/40 bg-white dark:bg-zinc-900/20 overflow-hidden">
+          {history.length === 0 ? (
+            <p className="p-4 text-sm text-zinc-500">No syncs yet. Click "Sync Incremental" or "Sync Full" above to run the first one.</p>
+          ) : (
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-zinc-50 dark:bg-zinc-900/50 text-left border-b border-zinc-200 dark:border-zinc-800/40">
+                  <th className="px-4 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Started</th>
+                  <th className="px-4 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Type</th>
+                  <th className="px-4 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Trigger</th>
+                  <th className="px-4 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Status</th>
+                  <th className="px-4 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] text-right">Duration</th>
+                  <th className="px-4 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] text-right">Contacts</th>
+                  <th className="px-4 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] text-right">Opportunities</th>
+                  <th className="px-4 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] text-right">Errors</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((r) => (
+                  <tr
+                    key={r.id}
+                    className={`border-t border-zinc-200 dark:border-zinc-800/20 ${r.errors_count > 0 ? "cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/30" : ""}`}
+                    onClick={r.errors_count > 0 ? () => toggleErrorExpand(r.id) : undefined}
+                  >
+                    <td className="px-4 py-2.5 text-zinc-700 dark:text-zinc-300 whitespace-nowrap">
+                      {formatTimestamp(r.started_at)}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                        r.sync_type.startsWith("webinar:")
+                          ? "bg-violet-500/15 text-violet-400 border-violet-500/30"
+                          : r.sync_type === "full"
+                          ? "bg-sky-500/15 text-sky-400 border-sky-500/30"
+                          : "bg-zinc-500/15 text-zinc-400 border-zinc-500/30"
+                      }`}>
+                        {formatSyncType(r.sync_type)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-zinc-600 dark:text-zinc-400 capitalize">{r.trigger}</td>
+                    <td className="px-4 py-2.5"><StatusPill status={r.status} /></td>
+                    <td className="px-4 py-2.5 text-right font-mono text-zinc-700 dark:text-zinc-300">{formatDuration(r.duration_seconds)}</td>
+                    <td className="px-4 py-2.5 text-right font-mono text-zinc-700 dark:text-zinc-300">{r.contacts_synced.toLocaleString()}</td>
+                    <td className="px-4 py-2.5 text-right font-mono text-zinc-700 dark:text-zinc-300">{r.opportunities_synced.toLocaleString()}</td>
+                    <td className={`px-4 py-2.5 text-right font-mono ${r.errors_count > 0 ? "text-red-400" : "text-zinc-500"}`}>
+                      {r.errors_count}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {/* Error details expandable */}
+          {[...expandedErrors].map((runId) => {
+            const run = history.find((h) => h.id === runId);
+            if (!run || !run.error_details) return null;
+            return (
+              <div key={runId} className="px-4 py-3 bg-red-500/5 border-t border-red-500/20 text-[11px]">
+                <div className="text-red-400 font-semibold mb-1">Errors for run {runId.slice(0, 8)}...</div>
+                <pre className="text-zinc-600 dark:text-zinc-400 overflow-x-auto whitespace-pre-wrap">
+                  {JSON.stringify(run.error_details, null, 2)}
+                </pre>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Settings panel (kept as-is per user) */}
         {settings && (
           <div className="rounded-lg border border-zinc-200 dark:border-zinc-800/40 bg-white dark:bg-zinc-900/20 p-4">
             <h2 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200 mb-3">Schedule Settings</h2>
 
             <div className="space-y-4">
-              {/* Incremental */}
               <div className="flex flex-wrap items-center gap-3">
                 <label className="flex items-center gap-2 text-xs">
                   <input
@@ -246,7 +377,6 @@ export function SyncPage() {
                 </select>
               </div>
 
-              {/* Weekly full */}
               <div className="flex flex-wrap items-center gap-3">
                 <label className="flex items-center gap-2 text-xs">
                   <input
@@ -297,64 +427,6 @@ export function SyncPage() {
             </div>
           </div>
         )}
-
-        {/* History table */}
-        <div className="rounded-lg border border-zinc-200 dark:border-zinc-800/40 bg-white dark:bg-zinc-900/20 overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-200 dark:border-zinc-800/40">
-            <h2 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">Sync History</h2>
-            <span className="text-xs text-zinc-500">{history.length} runs</span>
-          </div>
-          {history.length === 0 ? (
-            <p className="p-4 text-sm text-zinc-500">No syncs yet.</p>
-          ) : (
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="bg-zinc-50 dark:bg-zinc-900/50 text-left">
-                  <th className="px-3 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Type</th>
-                  <th className="px-3 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Trigger</th>
-                  <th className="px-3 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Status</th>
-                  <th className="px-3 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Started</th>
-                  <th className="px-3 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] text-right">Duration</th>
-                  <th className="px-3 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] text-right">Contacts</th>
-                  <th className="px-3 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] text-right">Opportunities</th>
-                  <th className="px-3 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] text-right">Errors</th>
-                </tr>
-              </thead>
-              <tbody>
-                {history.map((r) => (
-                  <tr
-                    key={r.id}
-                    className={`border-t border-zinc-200 dark:border-zinc-800/20 ${r.errors_count > 0 ? "cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/30" : ""}`}
-                    onClick={r.errors_count > 0 ? () => toggleErrorExpand(r.id) : undefined}
-                  >
-                    <td className="px-3 py-2 text-zinc-800 dark:text-zinc-300">{r.sync_type}</td>
-                    <td className="px-3 py-2 text-zinc-600 dark:text-zinc-400">{r.trigger}</td>
-                    <td className="px-3 py-2"><StatusPill status={r.status} /></td>
-                    <td className="px-3 py-2 text-zinc-600 dark:text-zinc-400">{formatTimestamp(r.started_at)}</td>
-                    <td className="px-3 py-2 text-right font-mono text-zinc-800 dark:text-zinc-300">{formatDuration(r.duration_seconds)}</td>
-                    <td className="px-3 py-2 text-right font-mono text-zinc-800 dark:text-zinc-300">{r.contacts_synced.toLocaleString()}</td>
-                    <td className="px-3 py-2 text-right font-mono text-zinc-800 dark:text-zinc-300">{r.opportunities_synced.toLocaleString()}</td>
-                    <td className={`px-3 py-2 text-right font-mono ${r.errors_count > 0 ? "text-red-400" : "text-zinc-500"}`}>{r.errors_count}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-
-          {/* Error details expandable */}
-          {[...expandedErrors].map((runId) => {
-            const run = history.find((h) => h.id === runId);
-            if (!run || !run.error_details) return null;
-            return (
-              <div key={runId} className="px-4 py-3 bg-red-500/5 border-t border-red-500/20 text-[11px]">
-                <div className="text-red-400 font-semibold mb-1">Errors for run {runId.slice(0, 8)}...</div>
-                <pre className="text-zinc-600 dark:text-zinc-400 overflow-x-auto whitespace-pre-wrap">
-                  {JSON.stringify(run.error_details, null, 2)}
-                </pre>
-              </div>
-            );
-          })}
-        </div>
       </div>
     </div>
   );

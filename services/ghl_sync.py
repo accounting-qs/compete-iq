@@ -124,22 +124,49 @@ def _build_opp_row(o: dict) -> dict:
     }
 
 
-async def _upsert_contact(db: AsyncSession, row: dict) -> None:
-    stmt = pg_insert(GHLContact).values(**row)
-    update_cols = {k: v for k, v in row.items() if k != "ghl_contact_id"}
+async def _upsert_contacts_batch(db: AsyncSession, rows: list[dict]) -> None:
+    """Batch upsert many contacts in a single round-trip.
+
+    Uses INSERT ... VALUES (...), (...) ON CONFLICT (ghl_contact_id) DO UPDATE.
+    On Supabase remote DB this is ~10-50x faster than per-row upserts.
+    """
+    if not rows:
+        return
+    stmt = pg_insert(GHLContact).values(rows)
+    # Column list is the same for every row, derived from the first row's keys.
+    update_cols = {k: getattr(stmt.excluded, k) for k in rows[0].keys() if k != "ghl_contact_id"}
     stmt = stmt.on_conflict_do_update(
-        index_elements=["ghl_contact_id"], set_=update_cols
+        index_elements=["ghl_contact_id"], set_=update_cols,
     )
     await db.execute(stmt)
 
 
-async def _upsert_opp(db: AsyncSession, row: dict) -> None:
-    stmt = pg_insert(GHLOpportunity).values(**row)
-    update_cols = {k: v for k, v in row.items() if k != "ghl_opportunity_id"}
+async def _upsert_opps_batch(db: AsyncSession, rows: list[dict]) -> None:
+    if not rows:
+        return
+    stmt = pg_insert(GHLOpportunity).values(rows)
+    update_cols = {k: getattr(stmt.excluded, k) for k in rows[0].keys() if k != "ghl_opportunity_id"}
     stmt = stmt.on_conflict_do_update(
-        index_elements=["ghl_opportunity_id"], set_=update_cols
+        index_elements=["ghl_opportunity_id"], set_=update_cols,
     )
     await db.execute(stmt)
+
+
+async def _update_run_progress(run_id: str, contacts_synced: int, opps_synced: int) -> None:
+    """Persist live progress on the running sync_run row so the UI can poll it."""
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                update(GHLSyncRun)
+                .where(GHLSyncRun.id == run_id)
+                .values(
+                    contacts_synced=contacts_synced,
+                    opportunities_synced=opps_synced,
+                )
+            )
+            await db.commit()
+    except Exception as exc:
+        logger.warning("Failed to persist sync progress: %s", exc)
 
 
 async def _get_last_successful_sync_start(db: AsyncSession) -> datetime | None:
@@ -206,39 +233,67 @@ async def run_sync(sync_type: SyncType, trigger: SyncTrigger = "scheduled") -> s
         opp_updated_after = updated_after if sync_type_effective == "incremental" else None
 
         try:
-            # Sync contacts
+            # Sync contacts — batched upserts per page for speed
             async with AsyncSessionLocal() as db:
-                batch = 0
+                batch: list[dict] = []
                 async for c in client.stream_contacts(
                     updated_after=contact_updated_after, filters=contact_filter,
                 ):
                     try:
-                        await _upsert_contact(db, _build_contact_row(c))
-                        contacts_synced += 1
-                        batch += 1
-                        if batch >= 100:
-                            await db.commit()
-                            batch = 0
+                        batch.append(_build_contact_row(c))
                     except Exception as exc:
                         errors.append({"type": "contact", "id": c.get("id"), "error": str(exc)[:500]})
-                        logger.exception("Failed to upsert contact %s", c.get("id"))
-                await db.commit()
+                        logger.exception("Failed to build contact row %s", c.get("id"))
+                        continue
+                    if len(batch) >= 250:
+                        try:
+                            await _upsert_contacts_batch(db, batch)
+                            contacts_synced += len(batch)
+                            await db.commit()
+                            await _update_run_progress(run_id, contacts_synced, opps_synced)
+                        except Exception as exc:
+                            errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
+                            logger.exception("Failed to upsert contact batch")
+                            await db.rollback()
+                        batch = []
+                if batch:
+                    try:
+                        await _upsert_contacts_batch(db, batch)
+                        contacts_synced += len(batch)
+                        await db.commit()
+                    except Exception as exc:
+                        errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
+                        await db.rollback()
+                await _update_run_progress(run_id, contacts_synced, opps_synced)
 
             # Sync opportunities
             async with AsyncSessionLocal() as db:
-                batch = 0
+                batch = []
                 async for o in client.stream_opportunities(opp_updated_after):
                     try:
-                        await _upsert_opp(db, _build_opp_row(o))
-                        opps_synced += 1
-                        batch += 1
-                        if batch >= 100:
-                            await db.commit()
-                            batch = 0
+                        batch.append(_build_opp_row(o))
                     except Exception as exc:
                         errors.append({"type": "opportunity", "id": o.get("id"), "error": str(exc)[:500]})
-                        logger.exception("Failed to upsert opportunity %s", o.get("id"))
-                await db.commit()
+                        continue
+                    if len(batch) >= 250:
+                        try:
+                            await _upsert_opps_batch(db, batch)
+                            opps_synced += len(batch)
+                            await db.commit()
+                            await _update_run_progress(run_id, contacts_synced, opps_synced)
+                        except Exception as exc:
+                            errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
+                            await db.rollback()
+                        batch = []
+                if batch:
+                    try:
+                        await _upsert_opps_batch(db, batch)
+                        opps_synced += len(batch)
+                        await db.commit()
+                    except Exception as exc:
+                        errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
+                        await db.rollback()
+                await _update_run_progress(run_id, contacts_synced, opps_synced)
 
             status = "completed"
 
@@ -311,41 +366,63 @@ async def run_webinar_sync(webinar_number: int, trigger: SyncTrigger = "manual")
         contact_filter = GHLClient.webinar_number_filter(webinar_number)
 
         try:
-            # Contacts referencing this webinar
+            # Contacts referencing this webinar — batched upserts
             async with AsyncSessionLocal() as db:
-                batch = 0
+                batch: list[dict] = []
                 async for c in client.stream_contacts(filters=contact_filter):
                     try:
-                        await _upsert_contact(db, _build_contact_row(c))
-                        contacts_synced += 1
-                        batch += 1
-                        if batch >= 100:
-                            await db.commit()
-                            batch = 0
+                        batch.append(_build_contact_row(c))
                     except Exception as exc:
                         errors.append({"type": "contact", "id": c.get("id"), "error": str(exc)[:500]})
-                        logger.exception("Failed to upsert contact %s", c.get("id"))
-                await db.commit()
+                        continue
+                    if len(batch) >= 250:
+                        try:
+                            await _upsert_contacts_batch(db, batch)
+                            contacts_synced += len(batch)
+                            await db.commit()
+                            await _update_run_progress(run_id, contacts_synced, opps_synced)
+                        except Exception as exc:
+                            errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
+                            logger.exception("Failed to upsert contact batch")
+                            await db.rollback()
+                        batch = []
+                if batch:
+                    try:
+                        await _upsert_contacts_batch(db, batch)
+                        contacts_synced += len(batch)
+                        await db.commit()
+                    except Exception as exc:
+                        errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
+                        await db.rollback()
+                await _update_run_progress(run_id, contacts_synced, opps_synced)
 
             # Opportunities with webinar_source_number = N
-            # (stream all opps, filter client-side — the sales pipeline is small)
             async with AsyncSessionLocal() as db:
-                batch = 0
+                batch = []
                 async for o in client.stream_opportunities():
                     row = _build_opp_row(o)
                     if row.get("webinar_source_number") != webinar_number:
                         continue
-                    try:
-                        await _upsert_opp(db, row)
-                        opps_synced += 1
-                        batch += 1
-                        if batch >= 100:
+                    batch.append(row)
+                    if len(batch) >= 250:
+                        try:
+                            await _upsert_opps_batch(db, batch)
+                            opps_synced += len(batch)
                             await db.commit()
-                            batch = 0
+                            await _update_run_progress(run_id, contacts_synced, opps_synced)
+                        except Exception as exc:
+                            errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
+                            await db.rollback()
+                        batch = []
+                if batch:
+                    try:
+                        await _upsert_opps_batch(db, batch)
+                        opps_synced += len(batch)
+                        await db.commit()
                     except Exception as exc:
-                        errors.append({"type": "opportunity", "id": o.get("id"), "error": str(exc)[:500]})
-                        logger.exception("Failed to upsert opportunity %s", o.get("id"))
-                await db.commit()
+                        errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
+                        await db.rollback()
+                await _update_run_progress(run_id, contacts_synced, opps_synced)
 
             status = "completed"
 
