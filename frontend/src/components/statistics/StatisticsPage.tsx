@@ -12,10 +12,12 @@ import {
   type WgWebinar,
 } from "@/lib/api";
 import {
+  GROUP_BOUNDARY_CLASSES,
   METRIC_COLUMNS,
   METRIC_GROUPS,
   columnsInGroup,
   formatMetricValue,
+  isGroupBoundary,
   type MetricColumn,
 } from "./metricRegistry";
 
@@ -43,13 +45,15 @@ function StatusBadge({ status }: { status: string | null }) {
 
 /* ─── Metric cell ─────────────────────────────────────────────────────── */
 
-function MetricCell({ value, col, bold }: { value: number | null | undefined; col: MetricColumn; bold?: boolean }) {
+function MetricCell({ value, col, bold, boundary }: { value: number | null | undefined; col: MetricColumn; bold?: boolean; boundary?: boolean }) {
   const formatted = formatMetricValue(value, col);
   const isNull = value === null || value === undefined;
   return (
     <td className={`px-2 py-1.5 text-right font-mono whitespace-nowrap ${
       bold ? "font-bold" : ""
-    } ${isNull ? "text-zinc-400" : bold ? "text-zinc-800 dark:text-zinc-200" : "text-zinc-700 dark:text-zinc-300"}`}>
+    } ${isNull ? "text-zinc-400" : bold ? "text-zinc-800 dark:text-zinc-200" : "text-zinc-700 dark:text-zinc-300"} ${
+      boundary ? GROUP_BOUNDARY_CLASSES : ""
+    }`}>
       {formatted}
     </td>
   );
@@ -160,8 +164,8 @@ function renderGroupedRows(
       <td className="px-2 py-1.5 text-zinc-600 dark:text-zinc-400">
         {row.sendInfo ?? ""}
       </td>
-      {METRIC_COLUMNS.map((col) => (
-        <MetricCell key={col.key} value={row.metrics[col.key]} col={col} />
+      {METRIC_COLUMNS.map((col, idx) => (
+        <MetricCell key={col.key} value={row.metrics[col.key]} col={col} boundary={isGroupBoundary(idx)} />
       ))}
     </tr>
   );
@@ -226,7 +230,7 @@ function renderGroupedRows(
             )}
           </div>
         </td>
-        {METRIC_COLUMNS.map((col) => {
+        {METRIC_COLUMNS.map((col, idx) => {
           const isBase = (BASE_SUM_KEYS as readonly string[]).includes(col.key);
           const val = isBase ? summed[col.key] : 0;
           const show = isBase && val > 0;
@@ -235,7 +239,7 @@ function renderGroupedRows(
               key={col.key}
               className={`px-2 py-2 text-right font-mono font-bold whitespace-nowrap ${
                 show ? "text-zinc-800 dark:text-zinc-100" : "text-zinc-500"
-              }`}
+              } ${isGroupBoundary(idx) ? GROUP_BOUNDARY_CLASSES : ""}`}
             >
               {show ? formatMetricValue(val, col) : ""}
             </td>
@@ -551,10 +555,12 @@ export function StatisticsPage() {
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[200px]">Description</th>
               <th className="text-center px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] w-8">URL</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[80px]">Send Info</th>
-              {METRIC_COLUMNS.map((col) => (
+              {METRIC_COLUMNS.map((col, idx) => (
                 <th
                   key={col.key}
-                  className="text-right px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] whitespace-nowrap"
+                  className={`text-right px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] whitespace-nowrap ${
+                    isGroupBoundary(idx) ? GROUP_BOUNDARY_CLASSES : ""
+                  }`}
                   title={col.formulaText}
                 >
                   {col.label}
@@ -615,8 +621,8 @@ export function StatisticsPage() {
                       )}
                     </button>
                   </td>
-                  {METRIC_COLUMNS.map((col) => (
-                    <MetricCell key={col.key} value={w.summary[col.key]} col={col} bold />
+                  {METRIC_COLUMNS.map((col, idx) => (
+                    <MetricCell key={col.key} value={w.summary[col.key]} col={col} bold boundary={isGroupBoundary(idx)} />
                   ))}
                 </tr>
 

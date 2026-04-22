@@ -118,6 +118,17 @@ export function columnsForGroup(group: MetricGroup): MetricColumn[] {
   return METRIC_COLUMNS.filter((c) => c.group === group);
 }
 
+/** True if this column is the first in its metric group (used to render
+ * a visible vertical separator between metric bands). */
+export function isGroupBoundary(colIndex: number): boolean {
+  if (colIndex === 0) return true;
+  return METRIC_COLUMNS[colIndex].group !== METRIC_COLUMNS[colIndex - 1].group;
+}
+
+/** Tailwind classes applied to the first cell of each metric group, so the
+ * Base/Delivery/Yes/Maybe/... bands are visually separated. */
+export const GROUP_BOUNDARY_CLASSES = "border-l-2 border-zinc-300 dark:border-zinc-700/60";
+
 /**
  * Format a metric value for table display.
  * null/undefined -> "\u2014" (em dash), numbers formatted per column spec.
