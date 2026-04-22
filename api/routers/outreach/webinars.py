@@ -1,7 +1,12 @@
 """Outreach sub-router: Webinars + Assignments CRUD + Account tracking."""
+import asyncio
+import csv
+import io
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import select, func as sa_func, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,11 +19,16 @@ from api.routers.outreach._helpers import (
 from api.schemas import WebinarCreate, WebinarUpdate, AssignRequest, AssignmentUpdate
 from db.models import (
     OutreachBucket, OutreachSender, Webinar, WebinarListAssignment, CopyUsageLog,
-    Contact,
+    Contact, WebinarListExportJob,
 )
-from db.session import get_db
+from db.session import AsyncSessionLocal, get_db
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Keep references so detached background tasks aren't garbage-collected
+_active_export_tasks: dict[str, asyncio.Task] = {}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -620,3 +630,238 @@ async def mark_contacts_used(
     await db.flush()
 
     return {"marked": result.rowcount}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# WEBINAR LIST EXPORT (background CSV of assigned contacts + list names)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _build_list_name_for_assignment(a: WebinarListAssignment) -> str:
+    """Compose the per-assignment list name used in the CSV.
+
+    Format: "{description} - {sender} - {title version} - {description version}"
+    Missing parts are omitted so we don't emit dangling separators.
+    """
+    parts: list[str] = []
+    if a.description:
+        parts.append(a.description)
+    if a.sender and a.sender.name:
+        parts.append(a.sender.name)
+    if a.title_copy is not None:
+        parts.append(f"V{a.title_copy.variant_index + 1}")
+    if a.desc_copy is not None:
+        parts.append(f"V{a.desc_copy.variant_index + 1}")
+    return " - ".join(parts)
+
+
+async def _run_webinar_list_export_job(job_id: str) -> None:
+    """Build the CSV for a webinar's assigned-lists and save it on the job row."""
+    async with AsyncSessionLocal() as db:
+        try:
+            job_result = await db.execute(
+                select(WebinarListExportJob).where(WebinarListExportJob.id == job_id)
+            )
+            job = job_result.scalar_one_or_none()
+            if not job:
+                logger.warning("Webinar list export job %s not found", job_id)
+                return
+
+            job.status = "processing"
+            job.started_at = datetime.now(timezone.utc)
+            job.error_message = None
+            await db.commit()
+
+            asgn_result = await db.execute(
+                select(WebinarListAssignment)
+                .where(
+                    WebinarListAssignment.webinar_id == job.webinar_id,
+                    WebinarListAssignment.user_id == job.user_id,
+                    WebinarListAssignment.is_nonjoiners.is_(False),
+                    WebinarListAssignment.is_no_list_data.is_(False),
+                )
+                .options(
+                    selectinload(WebinarListAssignment.sender),
+                    selectinload(WebinarListAssignment.title_copy),
+                    selectinload(WebinarListAssignment.desc_copy),
+                )
+            )
+            assignments = asgn_result.scalars().all()
+
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow(["Email", "List name"])
+
+            total = 0
+            for a in assignments:
+                list_name = _build_list_name_for_assignment(a)
+                contacts_result = await db.execute(
+                    select(Contact.email)
+                    .where(
+                        Contact.assignment_id == a.id,
+                        Contact.user_id == job.user_id,
+                        Contact.outreach_status.in_(("assigned", "used")),
+                        Contact.email.is_not(None),
+                    )
+                    .order_by(Contact.email)
+                )
+                for (email,) in contacts_result.all():
+                    if not email:
+                        continue
+                    writer.writerow([email, list_name])
+                    total += 1
+
+            job.csv_content = buf.getvalue()
+            job.contact_count = total
+            job.status = "ready"
+            job.completed_at = datetime.now(timezone.utc)
+            await db.commit()
+        except Exception as exc:
+            logger.exception("Webinar list export job %s failed", job_id)
+            try:
+                await db.rollback()
+                fail_result = await db.execute(
+                    select(WebinarListExportJob).where(WebinarListExportJob.id == job_id)
+                )
+                job = fail_result.scalar_one_or_none()
+                if job:
+                    job.status = "failed"
+                    job.error_message = str(exc)[:500]
+                    job.completed_at = datetime.now(timezone.utc)
+                    await db.commit()
+            except Exception:
+                logger.exception("Failed to mark export job %s as failed", job_id)
+        finally:
+            _active_export_tasks.pop(job_id, None)
+
+
+def _spawn_webinar_list_export_job(job_id: str) -> None:
+    task = asyncio.create_task(_run_webinar_list_export_job(job_id))
+    _active_export_tasks[job_id] = task
+
+
+def _export_job_dict(job: WebinarListExportJob) -> dict:
+    return {
+        "id": job.id,
+        "webinar_id": job.webinar_id,
+        "status": job.status,
+        "contact_count": job.contact_count,
+        "error_message": job.error_message,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+    }
+
+
+@router.post("/webinars/{webinar_id}/export-lists", status_code=202)
+async def start_webinar_list_export(
+    webinar_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Kick off a background CSV export of a webinar's assigned-list contacts.
+
+    If an in-flight job already exists, returns it instead of creating a new one.
+    """
+    w_result = await db.execute(
+        select(Webinar).where(Webinar.id == webinar_id, Webinar.user_id == LLOYD_USER_ID)
+    )
+    webinar = w_result.scalar_one_or_none()
+    if not webinar:
+        raise HTTPException(404, "Webinar not found")
+
+    existing_result = await db.execute(
+        select(WebinarListExportJob)
+        .where(
+            WebinarListExportJob.webinar_id == webinar_id,
+            WebinarListExportJob.user_id == LLOYD_USER_ID,
+            WebinarListExportJob.status.in_(("pending", "processing")),
+        )
+        .order_by(WebinarListExportJob.created_at.desc())
+        .limit(1)
+    )
+    existing = existing_result.scalar_one_or_none()
+    if existing:
+        return _export_job_dict(existing)
+
+    job = WebinarListExportJob(
+        user_id=LLOYD_USER_ID,
+        webinar_id=webinar_id,
+        status="pending",
+    )
+    db.add(job)
+    await db.flush()
+    await db.commit()
+
+    _spawn_webinar_list_export_job(job.id)
+    return _export_job_dict(job)
+
+
+@router.get("/webinars/{webinar_id}/export-lists/latest")
+async def get_latest_webinar_list_export(
+    webinar_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Return the most recent export job for a webinar (or null if none)."""
+    result = await db.execute(
+        select(WebinarListExportJob)
+        .where(
+            WebinarListExportJob.webinar_id == webinar_id,
+            WebinarListExportJob.user_id == LLOYD_USER_ID,
+        )
+        .order_by(WebinarListExportJob.created_at.desc())
+        .limit(1)
+    )
+    job = result.scalar_one_or_none()
+    return {"job": _export_job_dict(job) if job else None}
+
+
+@router.get("/webinars/export-lists/active")
+async def list_active_webinar_list_exports(
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Latest export job per webinar — used by Planning page to restore state."""
+    result = await db.execute(
+        select(WebinarListExportJob)
+        .where(WebinarListExportJob.user_id == LLOYD_USER_ID)
+        .order_by(WebinarListExportJob.created_at.desc())
+    )
+    rows = result.scalars().all()
+    latest: dict[str, WebinarListExportJob] = {}
+    for j in rows:
+        if j.webinar_id not in latest:
+            latest[j.webinar_id] = j
+    return {"jobs": [_export_job_dict(j) for j in latest.values()]}
+
+
+@router.get("/webinars/{webinar_id}/export-lists/{job_id}/download")
+async def download_webinar_list_export(
+    webinar_id: str,
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Stream the CSV for a completed export job."""
+    result = await db.execute(
+        select(WebinarListExportJob, Webinar.number)
+        .join(Webinar, Webinar.id == WebinarListExportJob.webinar_id)
+        .where(
+            WebinarListExportJob.id == job_id,
+            WebinarListExportJob.webinar_id == webinar_id,
+            WebinarListExportJob.user_id == LLOYD_USER_ID,
+        )
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(404, "Export job not found")
+    job, webinar_number = row
+    if job.status != "ready" or job.csv_content is None:
+        raise HTTPException(409, f"Export not ready (status: {job.status})")
+
+    filename = f"webinar-{webinar_number}-lists.csv"
+    return Response(
+        content=job.csv_content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

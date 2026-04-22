@@ -196,3 +196,31 @@ class BucketCopyGenerationJob(Base):
         Index("ix_copy_gen_jobs_bucket_type", "bucket_id", "copy_type"),
         Index("ix_copy_gen_jobs_status", "status"),
     )
+
+
+class WebinarListExportJob(Base):
+    """Tracks async CSV export of a webinar's assigned-lists contacts.
+
+    One row per export run. The CSV is stored inline on the row so the job
+    survives browser navigation: the frontend polls status, then downloads.
+    """
+    __tablename__ = "webinar_list_export_jobs"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    webinar_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("webinars.id", ondelete="CASCADE"), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="pending")
+    contact_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    csv_content: Mapped[Optional[str]] = mapped_column(Text)
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'processing', 'ready', 'failed')", name="ck_wle_jobs_status"),
+        Index("ix_wle_jobs_user", "user_id"),
+        Index("ix_wle_jobs_webinar", "webinar_id"),
+        Index("ix_wle_jobs_status", "status"),
+    )

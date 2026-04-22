@@ -10,8 +10,10 @@ import {
   deleteWebinar as apiDeleteWebinar, deleteCopy,
   createCopy as apiCreateCopy, updateCopy as apiUpdateCopy, regenerateCopy as apiRegenerateCopy,
   fetchCustomLists, fetchCustomListCopies, createCustomListCopy as apiCreateCustomListCopy,
+  startWebinarListExport, fetchActiveWebinarListExports, fetchLatestWebinarListExport,
+  downloadWebinarListExport,
   type ApiBucket, type ApiSender, type ApiWebinar, type ApiAssignment, type ApiCopy,
-  type ApiCustomList,
+  type ApiCustomList, type ApiWebinarListExportJob,
 } from "@/lib/api";
 import { VariationsModal, apiCopyToVariant, type CopyVariant } from "../shared/VariationsModal";
 
@@ -705,6 +707,87 @@ export function PlanningPage() {
       else listIds.forEach((id) => next.add(id));
       return next;
     });
+  };
+
+  /* ── Webinar list export: background CSV build + polling ──────────── */
+
+  const [exportJobs, setExportJobs] = useState<Map<string, ApiWebinarListExportJob>>(new Map());
+  const [downloadingJobIds, setDownloadingJobIds] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { jobs } = await fetchActiveWebinarListExports();
+        if (cancelled) return;
+        setExportJobs(() => {
+          const m = new Map<string, ApiWebinarListExportJob>();
+          for (const j of jobs) m.set(j.webinar_id, j);
+          return m;
+        });
+      } catch (e) {
+        console.error(e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    const hasActive = Array.from(exportJobs.values()).some(
+      (j) => j.status === "pending" || j.status === "processing",
+    );
+    if (!hasActive) return;
+
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      if (cancelled) return;
+      const active = Array.from(exportJobs.values()).filter(
+        (j) => j.status === "pending" || j.status === "processing",
+      );
+      try {
+        const updated = await Promise.all(
+          active.map((j) => fetchLatestWebinarListExport(j.webinar_id)),
+        );
+        if (cancelled) return;
+        setExportJobs((prev) => {
+          const next = new Map(prev);
+          for (const j of updated) {
+            if (j) next.set(j.webinar_id, j);
+          }
+          return next;
+        });
+      } catch (e) {
+        console.error(e);
+      }
+    }, 2000);
+
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [exportJobs]);
+
+  const handleStartExport = async (webinarId: string) => {
+    try {
+      const job = await startWebinarListExport(webinarId);
+      setExportJobs((prev) => {
+        const next = new Map(prev);
+        next.set(webinarId, job);
+        return next;
+      });
+    } catch (e) {
+      console.error(e);
+      alert("Failed to start export");
+    }
+  };
+
+  const handleDownloadExport = async (webinarId: string, webinarNumber: number, jobId: string) => {
+    setDownloadingJobIds((prev) => { const n = new Set(prev); n.add(jobId); return n; });
+    try {
+      await downloadWebinarListExport(webinarId, jobId, `webinar-${webinarNumber}-lists.csv`);
+    } catch (e) {
+      console.error(e);
+      alert("Failed to download export");
+    } finally {
+      setDownloadingJobIds((prev) => { const n = new Set(prev); n.delete(jobId); return n; });
+    }
   };
 
   const handleAssign = useCallback(async (webinarIdOverride?: string) => {
@@ -1553,9 +1636,55 @@ export function PlanningPage() {
                     <td className="px-2 py-2.5 text-right font-mono text-violet-400 font-bold">{wRemain > 0 ? wRemain.toLocaleString() : ""}</td>
                     <td className="px-2 py-2.5" colSpan={2}></td>
                     <td className="px-2 py-2.5 text-right font-mono text-emerald-400 font-bold">{wAccounts > 0 ? wAccounts : ""}</td>
-                    <td className="px-2 py-2.5"></td>
-                    <td className="px-2 py-2.5"></td>
-                    <td className="px-2 py-2.5"></td>
+                    <td className="px-2 py-2.5 text-right" colSpan={3} onClick={(e) => e.stopPropagation()}>
+                      {(() => {
+                        const job = exportJobs.get(w.id);
+                        const isActive = job?.status === "pending" || job?.status === "processing";
+                        const isReady = job?.status === "ready";
+                        const isFailed = job?.status === "failed";
+                        const isDownloading = job ? downloadingJobIds.has(job.id) : false;
+
+                        if (isActive) {
+                          return (
+                            <button
+                              disabled
+                              className="px-2 py-1 rounded text-[10px] font-semibold inline-flex items-center gap-1.5 bg-violet-500/10 text-violet-500 border border-violet-500/30 whitespace-nowrap cursor-wait"
+                              title="Building CSV in the background — you can leave this page"
+                            >
+                              <span className="w-3 h-3 border-2 border-violet-500 border-t-transparent rounded-full animate-spin inline-block" />
+                              Building…
+                            </button>
+                          );
+                        }
+                        if (isReady && job) {
+                          return (
+                            <button
+                              onClick={() => handleDownloadExport(w.id, w.number, job.id)}
+                              disabled={isDownloading}
+                              className="px-2 py-1 rounded text-[10px] font-semibold inline-flex items-center gap-1.5 bg-emerald-500/15 text-emerald-500 hover:bg-emerald-500/25 border border-emerald-500/30 whitespace-nowrap disabled:opacity-60"
+                              title={`Download CSV (${job.contact_count.toLocaleString()} contacts)`}
+                            >
+                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                              Download CSV
+                            </button>
+                          );
+                        }
+                        return (
+                          <button
+                            onClick={() => handleStartExport(w.id)}
+                            className={`px-2 py-1 rounded text-[10px] font-semibold inline-flex items-center gap-1.5 whitespace-nowrap border transition-colors ${
+                              isFailed
+                                ? "bg-red-500/10 text-red-500 hover:bg-red-500/20 border-red-500/30"
+                                : "bg-zinc-200/60 dark:bg-zinc-800/60 text-zinc-600 dark:text-zinc-400 hover:text-violet-500 hover:bg-violet-500/10 border-zinc-300 dark:border-zinc-700/50"
+                            }`}
+                            title={isFailed ? `Export failed: ${job?.error_message ?? "unknown error"} — click to retry` : "Export all assigned contacts as CSV (Email, List name)"}
+                          >
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            {isFailed ? "Retry export" : "Export lists"}
+                          </button>
+                        );
+                      })()}
+                    </td>
                   </tr>
 
                   {/* ── Assignment section (only for the active webinar) ── */}

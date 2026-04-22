@@ -283,6 +283,75 @@ export async function retryCopyGenerationJob(jobId: string): Promise<ApiCopyGenJ
   return res.json();
 }
 
+/* ── Webinar list export (background CSV build) ───────────────────────── */
+
+export type WebinarListExportStatus = "pending" | "processing" | "ready" | "failed";
+
+export interface ApiWebinarListExportJob {
+  id: string;
+  webinar_id: string;
+  status: WebinarListExportStatus;
+  contact_count: number;
+  error_message?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
+export async function startWebinarListExport(
+  webinarId: string,
+): Promise<ApiWebinarListExportJob> {
+  const res = await fetch(
+    `${API_URL}/outreach/webinars/${webinarId}/export-lists`,
+    { method: "POST", headers: authHeaders() },
+  );
+  if (!res.ok) throw new Error("Failed to start export");
+  return res.json();
+}
+
+export async function fetchLatestWebinarListExport(
+  webinarId: string,
+): Promise<ApiWebinarListExportJob | null> {
+  const res = await fetch(
+    `${API_URL}/outreach/webinars/${webinarId}/export-lists/latest`,
+    { headers: authHeaders() },
+  );
+  if (!res.ok) throw new Error("Failed to fetch export status");
+  const data = (await res.json()) as { job: ApiWebinarListExportJob | null };
+  return data.job;
+}
+
+export async function fetchActiveWebinarListExports(): Promise<{
+  jobs: ApiWebinarListExportJob[];
+}> {
+  const res = await fetch(`${API_URL}/outreach/webinars/export-lists/active`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to fetch export jobs");
+  return res.json();
+}
+
+export async function downloadWebinarListExport(
+  webinarId: string,
+  jobId: string,
+  filename: string,
+): Promise<void> {
+  const res = await fetch(
+    `${API_URL}/outreach/webinars/${webinarId}/export-lists/${jobId}/download`,
+    { headers: authHeaders() },
+  );
+  if (!res.ok) throw new Error("Failed to download export");
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 /* ── Bucket merge ──────────────────────────────────────────────────────── */
 
 export interface MergeBlockingBucket {
