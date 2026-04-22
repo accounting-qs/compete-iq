@@ -209,6 +209,23 @@ def _row_for_assignment(a: WebinarListAssignment, webinar_status: str) -> dict[s
         "accountsNeeded": a.accounts_used or 0,
         "invited": a.volume or 0,
     }
+
+    # Title + description copy variants chosen for this list
+    title_copy = None
+    if a.title_copy:
+        title_copy = {
+            "id": a.title_copy.id,
+            "text": a.title_copy.text,
+            "variantIndex": a.title_copy.variant_index,
+        }
+    desc_copy = None
+    if a.desc_copy:
+        desc_copy = {
+            "id": a.desc_copy.id,
+            "text": a.desc_copy.text,
+            "variantIndex": a.desc_copy.variant_index,
+        }
+
     return {
         "workbookRow": a.display_order or 0,
         "kind": _row_kind_from_assignment(a),
@@ -222,7 +239,9 @@ def _row_for_assignment(a: WebinarListAssignment, webinar_status: str) -> dict[s
         "bucketId": a.bucket_id,
         "bucketName": a.bucket.name if a.bucket else None,
         "descLabel": None,
-        "titleText": None,
+        "titleText": a.title_copy.text if a.title_copy else None,
+        "titleCopy": title_copy,
+        "descCopy": desc_copy,
         "createdDate": a.created_at.date().isoformat() if a.created_at else None,
         "industry": a.bucket.industry if a.bucket else None,
         "employeeRange": a.emp_range_override,
@@ -250,6 +269,10 @@ class GoHighLevelStatisticsSource:
                     .selectinload(WebinarListAssignment.bucket),
                     selectinload(Webinar.assignments)
                     .selectinload(WebinarListAssignment.sender),
+                    selectinload(Webinar.assignments)
+                    .selectinload(WebinarListAssignment.title_copy),
+                    selectinload(Webinar.assignments)
+                    .selectinload(WebinarListAssignment.desc_copy),
                 )
                 .order_by(Webinar.number.asc())
             )

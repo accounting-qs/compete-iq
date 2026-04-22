@@ -99,6 +99,12 @@ class StatisticsMetrics(BaseModel):
     qualPercent: float | None = None
 
 
+class StatisticsCopy(BaseModel):
+    id: str
+    text: str
+    variantIndex: int
+
+
 class ApiStatisticsRow(BaseModel):
     id: str
     webinarNumber: int
@@ -115,6 +121,8 @@ class ApiStatisticsRow(BaseModel):
     bucketName: str | None = None
     descLabel: str | None = None
     titleText: str | None = None
+    titleCopy: StatisticsCopy | None = None
+    descCopy: StatisticsCopy | None = None
     segmentName: str | None = None
     createdDate: str | None = None
     industry: str | None = None

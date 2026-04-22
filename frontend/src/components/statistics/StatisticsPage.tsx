@@ -23,7 +23,16 @@ import {
 
 /* ─── Identity columns (pinned left side of table) ────────────────────── */
 
-const IDENTITY_COL_COUNT = 7; // expand, webinar#, status, note, description, url, sendInfo
+const IDENTITY_COL_COUNT = 8; // expand, webinar#, status, note, description, copy, url, sendInfo
+
+// Sticky background classes per row type — needed because `position: sticky`
+// on a <td> requires an opaque bg or content bleeds through horizontally.
+const STICKY_DESC_BASE = "sticky left-0 z-20";
+const STICKY_DESC_HEADER = `${STICKY_DESC_BASE} z-30 bg-zinc-50 dark:bg-zinc-900`;
+const STICKY_DESC_PARENT = `${STICKY_DESC_BASE} bg-zinc-100 dark:bg-zinc-800`;
+const STICKY_DESC_GROUP = `${STICKY_DESC_BASE} bg-zinc-100 dark:bg-zinc-800/90`;
+const STICKY_DESC_LIST = `${STICKY_DESC_BASE} bg-white dark:bg-zinc-950`;
+const STICKY_DESC_SPECIAL = `${STICKY_DESC_BASE} bg-zinc-50 dark:bg-zinc-900`;
 
 /* ─── Status badge ────────────────────────────────────────────────────── */
 
@@ -61,6 +70,105 @@ function MetricCell({ value, col, bold, boundary }: { value: number | null | und
 
 /* ─── External link icon ──────────────────────────────────────────────── */
 
+/* ─── Copy (title + description) preview + modal ─────────────────────── */
+
+function VariantBadge({ idx, kind }: { idx: number; kind: "title" | "desc" }) {
+  const colors = kind === "title"
+    ? "bg-violet-500/15 text-violet-500 border-violet-500/30"
+    : "bg-sky-500/15 text-sky-500 border-sky-500/30";
+  return (
+    <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${colors}`}>
+      V{idx + 1}
+    </span>
+  );
+}
+
+function CopyCell({ row, onClick }: { row: ApiStatisticsRow; onClick: () => void }) {
+  const t = row.titleCopy;
+  const d = row.descCopy;
+  if (!t && !d) return <span className="text-zinc-600">—</span>;
+  return (
+    <div
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      className="cursor-pointer group/copy max-w-[260px]"
+      title="Click to view full title + description"
+    >
+      {t && (
+        <div className="flex items-center gap-1 mb-0.5">
+          <VariantBadge idx={t.variantIndex} kind="title" />
+          <span className="text-[10px] text-zinc-700 dark:text-zinc-300 truncate group-hover/copy:text-violet-500 dark:group-hover/copy:text-violet-400">
+            {t.text}
+          </span>
+        </div>
+      )}
+      {d && (
+        <div className="flex items-center gap-1">
+          <VariantBadge idx={d.variantIndex} kind="desc" />
+          <span className="text-[10px] text-zinc-600 dark:text-zinc-400 truncate group-hover/copy:text-sky-500 dark:group-hover/copy:text-sky-400">
+            {d.text.split("\n")[0]}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CopyModal({ row, onClose }: { row: ApiStatisticsRow; onClose: () => void }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-xl shadow-2xl max-w-2xl w-[90vw] max-h-[80vh] overflow-y-auto"
+      >
+        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-800">
+          <div>
+            <div className="text-xs text-zinc-500 uppercase tracking-wider font-semibold mb-0.5">Copy used for list</div>
+            <div className="text-sm font-bold text-zinc-900 dark:text-zinc-100">
+              {row.description ?? row.listName ?? "—"}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 transition-colors"
+            aria-label="Close"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M18 6L6 18M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+        <div className="px-6 py-4 space-y-4">
+          <section>
+            <div className="flex items-center gap-2 mb-2">
+              <VariantBadge idx={row.titleCopy?.variantIndex ?? 0} kind="title" />
+              <span className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Title</span>
+            </div>
+            {row.titleCopy ? (
+              <p className="text-sm text-zinc-800 dark:text-zinc-200 whitespace-pre-wrap">{row.titleCopy.text}</p>
+            ) : (
+              <p className="text-sm text-zinc-500 italic">No title copy set</p>
+            )}
+          </section>
+          <section>
+            <div className="flex items-center gap-2 mb-2">
+              <VariantBadge idx={row.descCopy?.variantIndex ?? 0} kind="desc" />
+              <span className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Description</span>
+            </div>
+            {row.descCopy ? (
+              <p className="text-sm text-zinc-800 dark:text-zinc-200 whitespace-pre-wrap">{row.descCopy.text}</p>
+            ) : (
+              <p className="text-sm text-zinc-500 italic">No description copy set</p>
+            )}
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ExternalLinkIcon() {
   return (
     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -96,6 +204,7 @@ function renderGroupedRows(
   w: ApiStatisticsWebinar,
   collapsedBuckets: Set<string>,
   toggleBucketGroup: (webinarId: string, groupKey: string) => void,
+  setCopyModalRow: (row: ApiStatisticsRow) => void,
 ): ReactNode[] {
   type Group = { bucketId: string; bucketName: string; lists: ApiStatisticsRow[] };
 
@@ -123,7 +232,9 @@ function renderGroupedRows(
   const multi = groups.filter((g) => g.lists.length >= 2);
   const single = groups.filter((g) => g.lists.length === 1).map((g) => g.lists[0]);
 
-  const renderListRow = (row: ApiStatisticsRow) => (
+  const renderListRow = (row: ApiStatisticsRow) => {
+    const stickyBg = row.kind !== "list" ? STICKY_DESC_SPECIAL : STICKY_DESC_LIST;
+    return (
     <tr
       key={row.id}
       className={`border-b border-zinc-200 dark:border-zinc-800/20 transition-colors ${
@@ -142,10 +253,13 @@ function renderGroupedRows(
           {row.note ?? ""}
         </span>
       </td>
-      <td className="px-2 py-1.5">
-        <span className={row.kind !== "list" ? "text-zinc-500" : "text-zinc-800 dark:text-zinc-300"}>
+      <td className={`px-2 py-1.5 min-w-[240px] max-w-[240px] ${stickyBg}`}>
+        <span className={`block truncate ${row.kind !== "list" ? "text-zinc-500" : "text-zinc-800 dark:text-zinc-300"}`} title={row.description ?? undefined}>
           {row.description ?? (row.kind === "nonjoiners" ? "Nonjoiners" : row.kind === "no_list_data" ? "NO LIST DATA" : "")}
         </span>
+      </td>
+      <td className="px-2 py-1.5 min-w-[260px] max-w-[260px]">
+        <CopyCell row={row} onClick={() => setCopyModalRow(row)} />
       </td>
       <td className="px-2 py-1.5 text-center">
         {row.listUrl && (
@@ -168,7 +282,8 @@ function renderGroupedRows(
         <MetricCell key={col.key} value={row.metrics[col.key]} col={col} boundary={isGroupBoundary(idx)} />
       ))}
     </tr>
-  );
+    );
+  };
 
   const renderGroupHeader = (groupKey: string, bucketName: string, lists: ApiStatisticsRow[], italic = false) => {
     const key = `${w.id}::${groupKey}`;
@@ -199,11 +314,11 @@ function renderGroupedRows(
         <td className="px-2 py-2"></td>
         <td className="px-2 py-2"></td>
         <td className="px-2 py-2"></td>
-        <td className="px-2 py-2">
+        <td className={`px-2 py-2 min-w-[240px] max-w-[240px] ${STICKY_DESC_GROUP}`}>
           <div className="flex items-center gap-2">
             <span
               title={bucketName}
-              className={`text-zinc-800 dark:text-zinc-100 text-xs font-bold truncate max-w-[280px] ${italic ? "italic" : ""}`}
+              className={`text-zinc-800 dark:text-zinc-100 text-xs font-bold truncate ${italic ? "italic" : ""}`}
             >
               {bucketName}
             </span>
@@ -212,6 +327,7 @@ function renderGroupedRows(
             </span>
           </div>
         </td>
+        <td className="px-2 py-2"></td>
         <td className="px-2 py-2"></td>
         <td className="px-2 py-2">
           <div className="flex items-center gap-1">
@@ -285,6 +401,7 @@ export function StatisticsPage() {
   const [meta, setMeta] = useState<StatisticsMeta | null>(null);
   const [syncingWebinar, setSyncingWebinar] = useState<number | null>(null);
   const [collapsedBuckets, setCollapsedBuckets] = useState<Set<string>>(new Set());
+  const [copyModalRow, setCopyModalRow] = useState<ApiStatisticsRow | null>(null);
 
   const toggleBucketGroup = (webinarId: string, groupKey: string) => {
     setCollapsedBuckets((prev) => {
@@ -552,7 +669,8 @@ export function StatisticsPage() {
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[140px]">Webinar #</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Status</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[120px]">Note</th>
-              <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[200px]">Description</th>
+              <th className={`text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[240px] max-w-[240px] ${STICKY_DESC_HEADER}`}>Description</th>
+              <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[260px] max-w-[260px]">Copy</th>
               <th className="text-center px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] w-8">URL</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[80px]">Send Info</th>
               {METRIC_COLUMNS.map((col, idx) => (
@@ -604,7 +722,7 @@ export function StatisticsPage() {
                   <td className="px-2 py-2.5 text-zinc-500 text-[10px]">
                     {listCount} lists
                   </td>
-                  <td className="px-2 py-2.5" colSpan={3}>
+                  <td className="px-2 py-2.5" colSpan={4}>
                     <button
                       onClick={(e) => handleWebinarSync(w.number, e)}
                       disabled={syncingWebinar !== null}
@@ -627,7 +745,7 @@ export function StatisticsPage() {
                 </tr>
 
                 {/* ── Child rows (bucket-grouped) ─────────────────── */}
-                {isExpanded && renderGroupedRows(w, collapsedBuckets, toggleBucketGroup)}
+                {isExpanded && renderGroupedRows(w, collapsedBuckets, toggleBucketGroup, setCopyModalRow)}
               </tbody>
             );
           })}
@@ -639,6 +757,11 @@ export function StatisticsPage() {
         <div className="text-center py-20 text-zinc-500">
           {searchQuery ? "No webinars match your search." : "No statistics data available."}
         </div>
+      )}
+
+      {/* ── Copy preview modal ─────────────────────────────────────── */}
+      {copyModalRow && (
+        <CopyModal row={copyModalRow} onClose={() => setCopyModalRow(null)} />
       )}
     </div>
   );

@@ -1087,6 +1087,12 @@ export interface StatisticsMetrics {
   [key: string]: number | null;
 }
 
+export interface StatisticsCopy {
+  id: string;
+  text: string;
+  variantIndex: number;
+}
+
 export interface ApiStatisticsRow {
   id: string;
   webinarNumber: number;
@@ -1103,6 +1109,8 @@ export interface ApiStatisticsRow {
   bucketName: string | null;
   descLabel: string | null;
   titleText: string | null;
+  titleCopy: StatisticsCopy | null;
+  descCopy: StatisticsCopy | null;
   segmentName: string | null;
   createdDate: string | null;
   industry: string | null;
