@@ -14,7 +14,7 @@ from api.auth import require_auth
 from db.models import GHLSyncRun, GHLSyncSettings
 from db.session import get_db
 from services import ghl_scheduler
-from services.ghl_sync import run_sync, run_webinar_sync
+from services.ghl_sync import run_sync, run_webinar_sync, run_webinar_sync_full
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ class SyncRunResponse(BaseModel):
     duration_seconds: int | None = None
     contacts_synced: int
     opportunities_synced: int
+    expected_total: int | None = None
     errors_count: int
     error_details: list | None = None
 
@@ -88,6 +89,7 @@ def _run_to_dict(r: GHLSyncRun) -> dict:
         "duration_seconds": r.duration_seconds,
         "contacts_synced": r.contacts_synced,
         "opportunities_synced": r.opportunities_synced,
+        "expected_total": r.expected_total,
         "errors_count": r.errors_count,
         "error_details": r.error_details,
     }
@@ -159,14 +161,27 @@ async def trigger_sync(
 @router.post("/trigger-webinar", response_model=SyncTriggerResponse, status_code=202)
 async def trigger_webinar_sync(
     n: int = Query(..., ge=1, le=9999, description="Webinar number to sync"),
+    phase: str = Query(
+        "full",
+        pattern="^(narrow|deep|full)$",
+        description="narrow = fast (~2 min, ~1.5k contacts), deep = GCal invited base (~3h, ~200k), full = narrow then deep",
+    ),
 ):
-    """Pull all GHL contacts whose custom fields reference this webinar number,
-    plus opportunities with webinar_source_number = N.
+    """Kick off a per-webinar sync.
 
-    Expensive: typical webinar pulls 100k-300k contacts. Runs as a background
-    task; poll GET /status or the run_id.
+    - phase=narrow (fast, default for quick stats)
+    - phase=deep (slow, backfills the 200k-row GCal-invited base)
+    - phase=full (narrow then deep, sequential; stats usable after narrow)
+
+    Returns immediately with the run_id of the phase that just started.
     """
-    task = asyncio.create_task(run_webinar_sync(n, trigger="manual"))  # type: ignore[arg-type]
+    if phase == "full":
+        task = asyncio.create_task(run_webinar_sync_full(n, trigger="manual"))  # type: ignore[arg-type]
+    elif phase == "deep":
+        task = asyncio.create_task(run_webinar_sync(n, trigger="manual", deep=True))  # type: ignore[arg-type]
+    else:
+        task = asyncio.create_task(run_webinar_sync(n, trigger="manual", deep=False))  # type: ignore[arg-type]
+
     try:
         await asyncio.sleep(0.2)
     except asyncio.CancelledError:

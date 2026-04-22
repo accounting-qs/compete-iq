@@ -28,7 +28,7 @@ from db.models.connectors import (  # noqa: F401
     ConnectorCredential, WebinarGeekWebinar, WebinarGeekSubscriber,
 )
 from db.models.ghl import (  # noqa: F401
-    GHLContact, GHLOpportunity, GHLSyncRun, GHLSyncSettings,
+    GHLContact, GHLOpportunity, GHLSyncRun, GHLSyncSettings, GHLWebinarStats,
 )
 
 # Re-export Base so `from db.models import Base` keeps working

@@ -17,7 +17,7 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import GHLContact, GHLOpportunity, GHLSyncRun, GHLSyncSettings
+from db.models import GHLContact, GHLOpportunity, GHLSyncRun, GHLSyncSettings, GHLWebinarStats
 from db.session import AsyncSessionLocal
 from integrations.ghl_client import (
     CONTACT_FIELD_BOOKED_CALL_WEBINAR_SERIES,
@@ -152,17 +152,23 @@ async def _upsert_opps_batch(db: AsyncSession, rows: list[dict]) -> None:
     await db.execute(stmt)
 
 
-async def _update_run_progress(run_id: str, contacts_synced: int, opps_synced: int) -> None:
+async def _update_run_progress(
+    run_id: str,
+    contacts_synced: int,
+    opps_synced: int,
+    expected_total: int | None = None,
+) -> None:
     """Persist live progress on the running sync_run row so the UI can poll it."""
     try:
         async with AsyncSessionLocal() as db:
+            values: dict = {
+                "contacts_synced": contacts_synced,
+                "opportunities_synced": opps_synced,
+            }
+            if expected_total is not None:
+                values["expected_total"] = expected_total
             await db.execute(
-                update(GHLSyncRun)
-                .where(GHLSyncRun.id == run_id)
-                .values(
-                    contacts_synced=contacts_synced,
-                    opportunities_synced=opps_synced,
-                )
+                update(GHLSyncRun).where(GHLSyncRun.id == run_id).values(**values)
             )
             await db.commit()
     except Exception as exc:
@@ -328,24 +334,48 @@ async def run_sync(sync_type: SyncType, trigger: SyncTrigger = "scheduled") -> s
         return run_id
 
 
-async def run_webinar_sync(webinar_number: int, trigger: SyncTrigger = "manual") -> str:
-    """Pull full contact rows (no updated_after filter) for everyone whose
-    custom fields reference this webinar number, plus every opportunity with
-    webinar_source_number = N.
+async def _upsert_webinar_stats(webinar_number: int, gcal_invited_count: int) -> None:
+    async with AsyncSessionLocal() as db:
+        stmt = pg_insert(GHLWebinarStats).values(
+            webinar_number=webinar_number,
+            gcal_invited_count=gcal_invited_count,
+            fetched_at=datetime.now(timezone.utc),
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["webinar_number"],
+            set_={
+                "gcal_invited_count": stmt.excluded.gcal_invited_count,
+                "fetched_at": stmt.excluded.fetched_at,
+            },
+        )
+        await db.execute(stmt)
+        await db.commit()
 
-    Uses the OR filter across:
-      - calendar_webinar_series_history contains "eN"  (GCal invited base)
-      - calendar_invite_response_history contains "eN" (Yes/Maybe responders)
-      - calendar_webinar_series_non_joiners contains "eN"
-      - booked_call_webinar_series = N
 
-    Expensive: typical webinar pulls 100k-300k contacts. Run manually per webinar.
+async def run_webinar_sync(
+    webinar_number: int,
+    trigger: SyncTrigger = "manual",
+    deep: bool = False,
+) -> str:
+    """Sync one phase of a per-webinar pull. Returns run_id.
+
+    Narrow phase (deep=False, default):
+      - gcal_invited_count captured in ghl_webinar_stats (drives gcalInvitedGhl)
+      - Contacts matching invite_response contains eN / non_joiners contains eN
+        / booked_call_webinar_series = N (~1,500 contacts for W136, ~2 min)
+      - Opportunities with webinar_source_number = N
+
+    Deep phase (deep=True):
+      - Contacts matching calendar_webinar_series_history contains eN (~200k
+        for W136, ~3 hours). Run after narrow so stats become usable quickly.
+      - Opportunities skipped (already synced in narrow).
     """
     if _sync_lock.locked():
         raise RuntimeError("A sync is already running")
 
     async with _sync_lock:
-        sync_type = f"webinar:{webinar_number}"
+        phase_label = "deep" if deep else "narrow"
+        sync_type = f"webinar:{webinar_number}:{phase_label}"
         async with AsyncSessionLocal() as db:
             run = GHLSyncRun(
                 sync_type=sync_type,
@@ -363,10 +393,37 @@ async def run_webinar_sync(webinar_number: int, trigger: SyncTrigger = "manual")
         contacts_synced = 0
         opps_synced = 0
         errors: list[dict] = []
-        contact_filter = GHLClient.webinar_number_filter(webinar_number)
 
         try:
-            # Contacts referencing this webinar — batched upserts
+            # Capture expected_total + (narrow only) gcal_invited_count
+            if deep:
+                contact_filter = GHLClient.gcal_invited_count_filter(webinar_number)
+                try:
+                    expected = await client.count_contacts_with_filter(contact_filter)
+                    await _update_run_progress(run_id, 0, 0, expected_total=expected)
+                    logger.info("W%d deep phase expects %d contacts", webinar_number, expected)
+                except Exception as exc:
+                    errors.append({"type": "expected_count", "error": str(exc)[:500]})
+            else:
+                contact_filter = GHLClient.webinar_number_filter(webinar_number, deep=False)
+                try:
+                    expected = await client.count_contacts_with_filter(contact_filter)
+                    await _update_run_progress(run_id, 0, 0, expected_total=expected)
+                    logger.info("W%d narrow phase expects %d contacts", webinar_number, expected)
+                except Exception as exc:
+                    errors.append({"type": "expected_count", "error": str(exc)[:500]})
+
+                # Also record the gcal_invited_count while we're making count calls
+                try:
+                    gcal_count = await client.count_contacts_with_filter(
+                        GHLClient.gcal_invited_count_filter(webinar_number)
+                    )
+                    await _upsert_webinar_stats(webinar_number, gcal_count)
+                    logger.info("W%d gcal_invited_count = %d", webinar_number, gcal_count)
+                except Exception as exc:
+                    errors.append({"type": "gcal_count", "error": str(exc)[:500]})
+
+            # Contacts — batched upserts
             async with AsyncSessionLocal() as db:
                 batch: list[dict] = []
                 async for c in client.stream_contacts(filters=contact_filter):
@@ -396,33 +453,34 @@ async def run_webinar_sync(webinar_number: int, trigger: SyncTrigger = "manual")
                         await db.rollback()
                 await _update_run_progress(run_id, contacts_synced, opps_synced)
 
-            # Opportunities with webinar_source_number = N
-            async with AsyncSessionLocal() as db:
-                batch = []
-                async for o in client.stream_opportunities():
-                    row = _build_opp_row(o)
-                    if row.get("webinar_source_number") != webinar_number:
-                        continue
-                    batch.append(row)
-                    if len(batch) >= 250:
+            # Opportunities (narrow phase only — deep skips)
+            if not deep:
+                async with AsyncSessionLocal() as db:
+                    batch = []
+                    async for o in client.stream_opportunities():
+                        row = _build_opp_row(o)
+                        if row.get("webinar_source_number") != webinar_number:
+                            continue
+                        batch.append(row)
+                        if len(batch) >= 250:
+                            try:
+                                await _upsert_opps_batch(db, batch)
+                                opps_synced += len(batch)
+                                await db.commit()
+                                await _update_run_progress(run_id, contacts_synced, opps_synced)
+                            except Exception as exc:
+                                errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
+                                await db.rollback()
+                            batch = []
+                    if batch:
                         try:
                             await _upsert_opps_batch(db, batch)
                             opps_synced += len(batch)
                             await db.commit()
-                            await _update_run_progress(run_id, contacts_synced, opps_synced)
                         except Exception as exc:
                             errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
                             await db.rollback()
-                        batch = []
-                if batch:
-                    try:
-                        await _upsert_opps_batch(db, batch)
-                        opps_synced += len(batch)
-                        await db.commit()
-                    except Exception as exc:
-                        errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
-                        await db.rollback()
-                await _update_run_progress(run_id, contacts_synced, opps_synced)
+                    await _update_run_progress(run_id, contacts_synced, opps_synced)
 
             status = "completed"
 
@@ -454,6 +512,19 @@ async def run_webinar_sync(webinar_number: int, trigger: SyncTrigger = "manual")
             run_id, webinar_number, trigger, status, contacts_synced, opps_synced, len(errors), duration,
         )
         return run_id
+
+
+async def run_webinar_sync_full(webinar_number: int, trigger: SyncTrigger = "manual") -> list[str]:
+    """Run both phases sequentially: narrow first (fast, metrics usable), then
+    deep (slow, backfills the 200k-row GCal-invited base).
+
+    Returns both run_ids. Each phase is recorded as a separate row in
+    ghl_sync_run so the history shows "webinar:136:narrow" and
+    "webinar:136:deep" with their own durations.
+    """
+    narrow_id = await run_webinar_sync(webinar_number, trigger=trigger, deep=False)
+    deep_id = await run_webinar_sync(webinar_number, trigger=trigger, deep=True)
+    return [narrow_id, deep_id]
 
 
 async def get_sync_settings() -> dict:

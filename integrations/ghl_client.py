@@ -85,10 +85,13 @@ class GHLClient:
         if not self._pipeline_id:
             raise RuntimeError("GHL_PIPELINE_ID not configured")
 
+        # /opportunities/search caps at limit=100 (returns 400 otherwise);
+        # /contacts/search accepts up to 500.
+        opp_page_size = min(self._page_size, 100)
         params: dict = {
             "location_id": self._location_id,
             "pipeline_id": self._pipeline_id,
-            "limit": self._page_size,
+            "limit": opp_page_size,
         }
         if updated_after:
             params["startAfter"] = int(updated_after.timestamp() * 1000)
@@ -115,7 +118,7 @@ class GHLClient:
 
                 meta = data.get("meta", {})
                 total = meta.get("total", 0)
-                fetched = (page - 1) * self._page_size + len(opps)
+                fetched = (page - 1) * opp_page_size + len(opps)
                 logger.info("GHL: fetched %d / %d opportunities", fetched, total)
 
                 cursor_id = meta.get("startAfterId")
@@ -151,19 +154,58 @@ class GHLClient:
         ]}]
 
     @staticmethod
-    def webinar_number_filter(webinar_number: int) -> list[dict]:
-        """OR across every field that references a webinar number for the
-        given N. Used for per-webinar manual sync.
+    def webinar_number_filter(webinar_number: int, deep: bool = False) -> list[dict]:
+        """OR across fields that reference a webinar number for the given N.
 
-        Captures: GCal invited (calendar_webinar_series_history contains eN),
-        Yes/Maybe responders, non-joiners, bookers."""
+        Fast mode (default, deep=False): narrow fields only — invite response,
+        non-joiners, booked_call_webinar_series. ~1500 contacts for W136.
+
+        Deep mode (deep=True): also includes calendar_webinar_series_history
+        (contains eN), which expands to ~200k contacts for a typical webinar.
+        We don't actually need those rows — the count is captured via
+        count_contacts_with_filter() and stored in ghl_webinar_stats.
+        """
         tok = f"e{webinar_number}"
-        return [{"group": "OR", "filters": [
-            {"field": f"customFields.{CONTACT_FIELD_CALENDAR_WEBINAR_SERIES_HISTORY}", "operator": "contains", "value": tok},
+        filters = [
             {"field": f"customFields.{CONTACT_FIELD_CALENDAR_INVITE_RESPONSE_HISTORY}", "operator": "contains", "value": tok},
             {"field": f"customFields.{CONTACT_FIELD_CALENDAR_WEBINAR_SERIES_NON_JOINERS}", "operator": "contains", "value": tok},
             {"field": f"customFields.{CONTACT_FIELD_BOOKED_CALL_WEBINAR_SERIES}", "operator": "eq", "value": webinar_number},
-        ]}]
+        ]
+        if deep:
+            filters.insert(0, {
+                "field": f"customFields.{CONTACT_FIELD_CALENDAR_WEBINAR_SERIES_HISTORY}",
+                "operator": "contains", "value": tok,
+            })
+        return [{"group": "OR", "filters": filters}]
+
+    @staticmethod
+    def gcal_invited_count_filter(webinar_number: int) -> list[dict]:
+        """Filter that matches contacts whose calendar_webinar_series_history
+        contains eN — i.e., everyone invited to webinar N via GCal.
+
+        Used with count_contacts_with_filter() to get gcal_invited_count
+        without syncing the ~200k matching rows.
+        """
+        return [{
+            "field": f"customFields.{CONTACT_FIELD_CALENDAR_WEBINAR_SERIES_HISTORY}",
+            "operator": "contains",
+            "value": f"e{webinar_number}",
+        }]
+
+    async def count_contacts_with_filter(self, filters: list[dict]) -> int:
+        """Return the total count matching a filter in a single request.
+
+        Uses pageLimit=1 so GHL only returns one contact but populates `total`.
+        Perfect for getting gcal_invited_count without syncing the rows.
+        """
+        body: dict = {
+            "locationId": self._location_id,
+            "pageLimit": 1,
+            "filters": filters,
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            data = await self._post(client, "/contacts/search", body)
+        return int(data.get("total") or 0)
 
     async def stream_contacts(
         self,

@@ -1074,7 +1074,7 @@ export async function fetchStatisticsWebinars(source: "auto" | "ghl" | "workbook
 
 export interface GhlSyncRun {
   id: string;
-  sync_type: "full" | "incremental";
+  sync_type: string; // "full" | "incremental" | "webinar:N:narrow" | "webinar:N:deep"
   trigger: "scheduled" | "manual";
   status: "running" | "completed" | "failed";
   started_at: string;
@@ -1082,6 +1082,7 @@ export interface GhlSyncRun {
   duration_seconds: number | null;
   contacts_synced: number;
   opportunities_synced: number;
+  expected_total: number | null;
   errors_count: number;
   error_details: unknown[] | null;
 }
@@ -1125,11 +1126,14 @@ export async function triggerGhlSync(syncType: "full" | "incremental"): Promise<
   return res.json();
 }
 
-export async function triggerGhlWebinarSync(webinarNumber: number): Promise<{ run_id: string; sync_type: string; status: string }> {
-  const res = await fetch(`${API_URL}/ghl-sync/trigger-webinar?n=${webinarNumber}`, {
-    method: "POST",
-    headers: authHeaders(),
-  });
+export async function triggerGhlWebinarSync(
+  webinarNumber: number,
+  phase: "narrow" | "deep" | "full" = "full",
+): Promise<{ run_id: string; sync_type: string; status: string }> {
+  const res = await fetch(
+    `${API_URL}/ghl-sync/trigger-webinar?n=${webinarNumber}&phase=${phase}`,
+    { method: "POST", headers: authHeaders() },
+  );
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail ?? "Failed to trigger webinar sync");

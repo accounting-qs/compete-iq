@@ -82,6 +82,7 @@ class GHLSyncRun(Base):
     duration_seconds: Mapped[Optional[int]] = mapped_column(Integer)
     contacts_synced: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     opportunities_synced: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    expected_total: Mapped[Optional[int]] = mapped_column(Integer)
     errors_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     error_details: Mapped[Optional[list]] = mapped_column(JSONB)
 
@@ -89,6 +90,14 @@ class GHLSyncRun(Base):
         Index("ix_ghl_sync_run_started", started_at.desc()),
         Index("ix_ghl_sync_run_status", "status"),
     )
+
+
+class GHLWebinarStats(Base):
+    __tablename__ = "ghl_webinar_stats"
+
+    webinar_number: Mapped[int] = mapped_column(Integer, primary_key=True)
+    gcal_invited_count: Mapped[Optional[int]] = mapped_column(Integer)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class GHLSyncSettings(Base):

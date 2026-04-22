@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from db.models import (
-    GHLContact, GHLOpportunity, OutreachSender, Webinar,
+    GHLContact, GHLOpportunity, GHLWebinarStats, OutreachSender, Webinar,
     WebinarGeekSubscriber, WebinarListAssignment,
 )
 from db.session import AsyncSessionLocal
@@ -48,20 +48,21 @@ QUALIFIED_SET = {LEAD_QUALITY_GREAT, LEAD_QUALITY_OK, LEAD_QUALITY_BARELY}
 # ---------------------------------------------------------------------------
 
 def _invite_response_regex(webinar_number: int, response: str) -> str:
-    """Regex to find e{N}-{Yes|Maybe} token in calendar_invite_response_history.
+    """PostgreSQL regex to find e{N}-{Yes|Maybe} token in
+    calendar_invite_response_history. Uses PG's `\\y` word-boundary (Python's
+    `\\b` is not supported by PG's regex engine) with case-insensitive flag.
 
-    Uses word boundaries and case-insensitive match. Prefix letter is literal "e".
+    Example value: "e119-Yes, e113-Maybe"
     """
-    # Example: "e119-Yes, e113-Maybe" — so we look for "e119-Yes" as a whole token
-    return rf"(?i)\be{webinar_number}-{response}\b"
+    return rf"\ye{webinar_number}-{response}\y"
 
 
 def _webinar_series_regex(webinar_number: int) -> str:
-    """Regex to find e{N} token in calendar_webinar_series_history.
+    """PostgreSQL regex to find e{N} token in calendar_webinar_series_history.
 
     Example value: "e136, e127, e121, e118, e114"
     """
-    return rf"(?i)\be{webinar_number}\b"
+    return rf"\ye{webinar_number}\y"
 
 
 # ---------------------------------------------------------------------------
@@ -323,10 +324,14 @@ class GoHighLevelStatisticsSource:
         base = await _webinar_summary_from_app(db, w.id)
         metrics.update(base)
 
-        # --- gcalInvitedGhl: contacts whose series history contains e{N} ---
-        metrics["gcalInvitedGhl"] = await _count_contact_field_match(
-            db, GHLContact.calendar_webinar_series_history, _webinar_series_regex(N)
+        # --- gcalInvitedGhl: read from ghl_webinar_stats cache (populated during sync) ---
+        # We don't sync the 200k contacts whose calendar_webinar_series_history
+        # contains eN by default — just record the count during the sync.
+        r = await db.execute(
+            select(GHLWebinarStats.gcal_invited_count)
+            .where(GHLWebinarStats.webinar_number == N)
         )
+        metrics["gcalInvitedGhl"] = r.scalar()
 
         # --- Yes / Maybe marked (contact count) ---
         yes_re = _invite_response_regex(N, "Yes")

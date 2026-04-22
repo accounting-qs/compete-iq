@@ -60,13 +60,41 @@ function formatRelative(iso: string | null): string {
  * Friendly label for sync_type:
  *   "incremental" -> "Incremental"
  *   "full" -> "Full"
- *   "webinar:136" -> "Webinar 136"
+ *   "webinar:136:narrow" -> "Webinar 136 · Narrow"
+ *   "webinar:136:deep"   -> "Webinar 136 · Deep"
+ *   "webinar:136"        -> "Webinar 136" (legacy)
  */
 function formatSyncType(raw: string): string {
   if (raw.startsWith("webinar:")) {
-    return `Webinar ${raw.slice(8)}`;
+    const rest = raw.slice(8); // "136" or "136:narrow" or "136:deep"
+    const [n, phase] = rest.split(":");
+    if (phase) {
+      return `Webinar ${n} · ${phase.charAt(0).toUpperCase() + phase.slice(1)}`;
+    }
+    return `Webinar ${n}`;
   }
   return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
+/** Estimate remaining seconds given elapsed time, synced count, and expected total. */
+function estimateEtaSeconds(
+  run: GhlSyncRun,
+): number | null {
+  if (run.status !== "running") return null;
+  if (!run.expected_total || run.expected_total <= 0) return null;
+  const synced = run.contacts_synced;
+  if (synced <= 0) return null;
+  const elapsedMs = Date.now() - new Date(run.started_at).getTime();
+  if (elapsedMs <= 0) return null;
+  const rate = synced / (elapsedMs / 1000); // per second
+  const remaining = run.expected_total - synced;
+  if (remaining <= 0) return 0;
+  return Math.round(remaining / rate);
+}
+
+function formatElapsed(startedAt: string): string {
+  const diffS = Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000);
+  return formatDuration(diffS);
 }
 
 function StatusPill({ status }: { status: string }) {
@@ -298,7 +326,13 @@ export function SyncPage() {
                 </tr>
               </thead>
               <tbody>
-                {history.map((r) => (
+                {history.map((r) => {
+                  const isRunning = r.status === "running";
+                  const eta = isRunning ? estimateEtaSeconds(r) : null;
+                  const progressPct = (isRunning && r.expected_total && r.expected_total > 0)
+                    ? Math.min(100, Math.round((r.contacts_synced / r.expected_total) * 100))
+                    : null;
+                  return (
                   <tr
                     key={r.id}
                     className={`border-t border-zinc-200 dark:border-zinc-800/20 ${r.errors_count > 0 ? "cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/30" : ""}`}
@@ -308,7 +342,7 @@ export function SyncPage() {
                       {formatTimestamp(r.started_at)}
                     </td>
                     <td className="px-4 py-2.5">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-semibold border whitespace-nowrap ${
                         r.sync_type.startsWith("webinar:")
                           ? "bg-violet-500/15 text-violet-400 border-violet-500/30"
                           : r.sync_type === "full"
@@ -320,14 +354,33 @@ export function SyncPage() {
                     </td>
                     <td className="px-4 py-2.5 text-zinc-600 dark:text-zinc-400 capitalize">{r.trigger}</td>
                     <td className="px-4 py-2.5"><StatusPill status={r.status} /></td>
-                    <td className="px-4 py-2.5 text-right font-mono text-zinc-700 dark:text-zinc-300">{formatDuration(r.duration_seconds)}</td>
-                    <td className="px-4 py-2.5 text-right font-mono text-zinc-700 dark:text-zinc-300">{r.contacts_synced.toLocaleString()}</td>
+                    <td className="px-4 py-2.5 text-right font-mono text-zinc-700 dark:text-zinc-300 whitespace-nowrap">
+                      {isRunning ? (
+                        <div className="text-right">
+                          <div>{formatElapsed(r.started_at)}</div>
+                          {eta !== null && (
+                            <div className="text-[9px] text-zinc-500">ETA {formatDuration(eta)}</div>
+                          )}
+                        </div>
+                      ) : formatDuration(r.duration_seconds)}
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-mono text-zinc-700 dark:text-zinc-300 whitespace-nowrap">
+                      {isRunning && r.expected_total ? (
+                        <div className="text-right">
+                          <div>{r.contacts_synced.toLocaleString()} / {r.expected_total.toLocaleString()}</div>
+                          {progressPct !== null && (
+                            <div className="text-[9px] text-violet-400">{progressPct}%</div>
+                          )}
+                        </div>
+                      ) : r.contacts_synced.toLocaleString()}
+                    </td>
                     <td className="px-4 py-2.5 text-right font-mono text-zinc-700 dark:text-zinc-300">{r.opportunities_synced.toLocaleString()}</td>
                     <td className={`px-4 py-2.5 text-right font-mono ${r.errors_count > 0 ? "text-red-400" : "text-zinc-500"}`}>
                       {r.errors_count}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           )}
