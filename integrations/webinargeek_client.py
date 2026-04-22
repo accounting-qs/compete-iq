@@ -99,6 +99,16 @@ async def list_webinars(api_key: str) -> list[dict[str, Any]]:
         return await _paged(client, "/webinars", api_key, items_key="webinars")
 
 
+async def list_broadcasts(api_key: str) -> list[dict[str, Any]]:
+    """
+    Fetch all broadcasts directly from /broadcasts (flat, paginated).
+    Response items do NOT include webinar_id or webinar title — enrich
+    via build_broadcast_meta(list_webinars(...)).
+    """
+    async with httpx.AsyncClient() as client:
+        return await _paged(client, "/broadcasts", api_key, items_key="broadcasts")
+
+
 async def list_subscriptions(api_key: str, broadcast_id: str | int) -> list[dict[str, Any]]:
     """All subscribers for one broadcast."""
     async with httpx.AsyncClient() as client:
@@ -123,24 +133,23 @@ def unix_to_dt(val: Any) -> Optional[datetime]:
         return None
 
 
-def extract_broadcasts(webinars: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_broadcast_meta(webinars: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """
-    Walk webinars[].episodes[].broadcasts[] and flatten, attaching webinar
-    metadata (title, internal_title, webinar_id) to each broadcast dict.
+    Walk webinars[].episodes[].broadcasts[] and return a
+    {broadcast_id (str) → {webinar_id, webinar_title, internal_title}} map.
+
+    Used to enrich the flat /broadcasts response with webinar metadata.
     """
-    out: list[dict[str, Any]] = []
+    out: dict[str, dict[str, Any]] = {}
     for w in webinars:
-        title = w.get("title") or ""
-        internal_title = w.get("internal_title") or ""
-        webinar_id = w.get("id")
+        meta = {
+            "webinar_id": w.get("id"),
+            "webinar_title": w.get("title") or "",
+            "internal_title": w.get("internal_title") or "",
+        }
         for ep in w.get("episodes", []) or []:
             for b in ep.get("broadcasts", []) or []:
-                if b.get("id") is None:
-                    continue
-                out.append({
-                    **b,
-                    "_webinar_id": webinar_id,
-                    "_webinar_title": title,
-                    "_internal_title": internal_title,
-                })
+                bid = b.get("id")
+                if bid is not None:
+                    out[str(bid)] = meta
     return out

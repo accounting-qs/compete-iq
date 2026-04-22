@@ -278,20 +278,34 @@ async def list_broadcasts(
 
 @router.post("/webinargeek/webinars/refresh", response_model=RefreshResponse)
 async def refresh_broadcasts(db: AsyncSession = Depends(get_db)):
+    """
+    Refresh strategy:
+      1) GET /webinars      → build {broadcast_id → webinar meta} map
+                              (gives us internal_title / "136", "137" etc.)
+      2) GET /broadcasts    → flat paginated list with all stats
+         Enrich each broadcast with its webinar meta, upsert.
+    """
     api_key = await _get_api_key(db)
     try:
         webinars = await wg.list_webinars(api_key)
+        broadcasts = await wg.list_broadcasts(api_key)
     except wg.WebinarGeekError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
+    meta = wg.build_broadcast_meta(webinars)
+    unknown_meta = {"webinar_id": None, "webinar_title": "", "internal_title": ""}
+
     total = 0
-    for b in wg.extract_broadcasts(webinars):
-        broadcast_id = str(b["id"])
+    for b in broadcasts:
+        broadcast_id = str(b.get("id") or "")
+        if not broadcast_id:
+            continue
+        m = meta.get(broadcast_id, unknown_meta)
         values = {
             "broadcast_id": broadcast_id,
-            "webinar_id": str(b.get("_webinar_id") or ""),
-            "name": b.get("_webinar_title") or f"Broadcast {broadcast_id}",
-            "internal_title": b.get("_internal_title"),
+            "webinar_id": str(m["webinar_id"]) if m["webinar_id"] is not None else None,
+            "name": m["webinar_title"] or f"Broadcast {broadcast_id}",
+            "internal_title": m["internal_title"] or None,
             "starts_at": wg.unix_to_dt(b.get("date")),
             "duration_seconds": b.get("duration"),
             "subscriptions_count": b.get("subscriptions_count") or 0,
