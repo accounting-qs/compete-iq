@@ -24,7 +24,7 @@ class WebinarGeekError(Exception):
 
 
 def _headers(api_key: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+    return {"Api-Token": api_key, "Accept": "application/json"}
 
 
 async def _paginated_get(client: httpx.AsyncClient, path: str, api_key: str) -> list[dict[str, Any]]:
