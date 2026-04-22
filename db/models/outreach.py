@@ -211,7 +211,7 @@ class WebinarListExportJob(Base):
     webinar_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("webinars.id", ondelete="CASCADE"), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="pending")
     contact_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    csv_content: Mapped[Optional[str]] = mapped_column(Text)
+    csv_content: Mapped[Optional[str]] = mapped_column(Text, deferred=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))

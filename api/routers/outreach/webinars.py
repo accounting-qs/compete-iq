@@ -10,7 +10,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import select, func as sa_func, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, undefer
 
 from api.auth import require_auth
 from api.routers.outreach._helpers import (
@@ -686,28 +686,29 @@ async def _run_webinar_list_export_job(job_id: str) -> None:
                 )
             )
             assignments = asgn_result.scalars().all()
+            list_name_by_aid = {a.id: _build_list_name_for_assignment(a) for a in assignments}
 
             buf = io.StringIO()
             writer = csv.writer(buf)
             writer.writerow(["Email", "List name"])
 
             total = 0
-            for a in assignments:
-                list_name = _build_list_name_for_assignment(a)
-                contacts_result = await db.execute(
-                    select(Contact.email)
+            if list_name_by_aid:
+                stream = await db.stream(
+                    select(Contact.email, Contact.assignment_id)
                     .where(
-                        Contact.assignment_id == a.id,
+                        Contact.assignment_id.in_(list(list_name_by_aid.keys())),
                         Contact.user_id == job.user_id,
                         Contact.outreach_status.in_(("assigned", "used")),
                         Contact.email.is_not(None),
                     )
-                    .order_by(Contact.email)
+                    .order_by(Contact.assignment_id, Contact.email)
+                    .execution_options(yield_per=5000)
                 )
-                for (email,) in contacts_result.all():
+                async for email, aid in stream:
                     if not email:
                         continue
-                    writer.writerow([email, list_name])
+                    writer.writerow([email, list_name_by_aid.get(aid, "")])
                     total += 1
 
             job.csv_content = buf.getvalue()
@@ -851,6 +852,7 @@ async def download_webinar_list_export(
             WebinarListExportJob.webinar_id == webinar_id,
             WebinarListExportJob.user_id == LLOYD_USER_ID,
         )
+        .options(undefer(WebinarListExportJob.csv_content))
     )
     row = result.first()
     if not row:
