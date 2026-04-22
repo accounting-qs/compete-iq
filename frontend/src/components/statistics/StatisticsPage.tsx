@@ -6,6 +6,7 @@ import {
   fetchWgWebinars,
   syncWgSubscribers,
   type ApiStatisticsWebinar,
+  type StatisticsMeta,
   type WgWebinar,
 } from "@/lib/api";
 import {
@@ -71,6 +72,7 @@ export function StatisticsPage() {
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(true);
+  const [meta, setMeta] = useState<StatisticsMeta | null>(null);
 
   /* ── WebinarGeek sync ──────────────────────────────────────────── */
   const [wgWebinars, setWgWebinars] = useState<WgWebinar[]>([]);
@@ -105,8 +107,9 @@ export function StatisticsPage() {
     let cancelled = false;
     async function load() {
       try {
-        const { webinars: data } = await fetchStatisticsWebinars();
+        const { webinars: data, meta } = await fetchStatisticsWebinars();
         if (cancelled) return;
+        setMeta(meta);
         // Sort descending by webinar number
         data.sort((a, b) => b.number - a.number);
         setWebinars(data);
@@ -179,6 +182,26 @@ export function StatisticsPage() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-6">
             <h1 className="text-lg font-bold text-zinc-900 dark:text-zinc-100 tracking-tight">Statistics</h1>
+            {meta && (
+              <span
+                className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                  meta.source === "ghl"
+                    ? "bg-violet-500/15 text-violet-400 border-violet-500/30"
+                    : "bg-zinc-500/15 text-zinc-400 border-zinc-500/30"
+                }`}
+                title={
+                  meta.source === "ghl" && meta.last_sync?.completed_at
+                    ? `Last synced: ${new Date(meta.last_sync.completed_at).toLocaleString()}`
+                    : meta.source === "ghl"
+                    ? "GHL sync running"
+                    : "Using workbook fixture (no GHL sync yet)"
+                }
+              >
+                {meta.source === "ghl"
+                  ? `GHL · synced ${meta.last_sync?.completed_at ? new Date(meta.last_sync.completed_at).toLocaleDateString() : "—"}`
+                  : "Workbook"}
+              </span>
+            )}
             <div className="flex gap-2">
               {[
                 { label: "Webinars", value: webinars.length, color: "text-zinc-800 dark:text-zinc-200" },

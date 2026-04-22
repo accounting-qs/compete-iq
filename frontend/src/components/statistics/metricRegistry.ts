@@ -20,6 +20,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   { key: "listRemain", label: "Remain", group: "Base", format: "number" },
   { key: "accountsNeeded", label: "Accts", group: "Base", format: "number", decimals: 1 },
   { key: "gcalInvited", label: "GCal Inv", group: "Base", format: "number" },
+  { key: "gcalInvitedGhl", label: "GCal Inv (GHL)", group: "Base", format: "number", formulaText: "count of GHL contacts with e{N} in Calendar webinar series history" },
 
   // ── Delivery ──
   { key: "invited", label: "Invited", group: "Delivery", format: "number" },

@@ -941,6 +941,7 @@ export interface StatisticsMetrics {
   listSize: number | null;
   listRemain: number | null;
   gcalInvited: number | null;
+  gcalInvitedGhl: number | null;
   accountsNeeded: number | null;
   invited: number | null;
   unsubscribes: number | null;
@@ -1048,11 +1049,98 @@ export interface ApiStatisticsWebinar {
   rows: ApiStatisticsRow[];
 }
 
-export async function fetchStatisticsWebinars(): Promise<{ webinars: ApiStatisticsWebinar[] }> {
-  const res = await fetch(`${API_URL}/statistics/webinars`, {
+export interface StatisticsMeta {
+  source: "ghl" | "workbook";
+  last_sync: {
+    run_id: string;
+    sync_type: string;
+    status: string;
+    started_at: string | null;
+    completed_at: string | null;
+    contacts_synced: number;
+    opportunities_synced: number;
+  } | null;
+}
+
+export async function fetchStatisticsWebinars(source: "auto" | "ghl" | "workbook" = "auto"): Promise<{ webinars: ApiStatisticsWebinar[]; meta: StatisticsMeta }> {
+  const res = await fetch(`${API_URL}/statistics/webinars?source=${source}`, {
     headers: authHeaders(),
   });
   if (!res.ok) throw new Error("Failed to fetch statistics");
+  return res.json();
+}
+
+/* ── GHL Sync ───────────────────────────────────────────────────────────── */
+
+export interface GhlSyncRun {
+  id: string;
+  sync_type: "full" | "incremental";
+  trigger: "scheduled" | "manual";
+  status: "running" | "completed" | "failed";
+  started_at: string;
+  completed_at: string | null;
+  duration_seconds: number | null;
+  contacts_synced: number;
+  opportunities_synced: number;
+  errors_count: number;
+  error_details: unknown[] | null;
+}
+
+export interface GhlSyncStatus {
+  latest: GhlSyncRun | null;
+  is_running: boolean;
+}
+
+export interface GhlSyncSettings {
+  incremental_enabled: boolean;
+  incremental_interval_hours: number;
+  weekly_full_enabled: boolean;
+  weekly_full_day_of_week: string;
+  weekly_full_hour_local: number;
+  weekly_full_timezone: string;
+  updated_at: string | null;
+}
+
+export async function fetchGhlSyncStatus(): Promise<GhlSyncStatus> {
+  const res = await fetch(`${API_URL}/ghl-sync/status`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to fetch sync status");
+  return res.json();
+}
+
+export async function fetchGhlSyncHistory(limit = 50): Promise<{ runs: GhlSyncRun[] }> {
+  const res = await fetch(`${API_URL}/ghl-sync/history?limit=${limit}`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to fetch sync history");
+  return res.json();
+}
+
+export async function triggerGhlSync(syncType: "full" | "incremental"): Promise<{ run_id: string; sync_type: string; status: string }> {
+  const res = await fetch(`${API_URL}/ghl-sync/trigger?sync_type=${syncType}`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to trigger sync");
+  }
+  return res.json();
+}
+
+export async function fetchGhlSyncSettings(): Promise<GhlSyncSettings> {
+  const res = await fetch(`${API_URL}/ghl-sync/settings`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to fetch sync settings");
+  return res.json();
+}
+
+export async function updateGhlSyncSettings(payload: Partial<GhlSyncSettings>): Promise<GhlSyncSettings> {
+  const res = await fetch(`${API_URL}/ghl-sync/settings`, {
+    method: "PATCH",
+    headers: jsonHeaders(),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to update settings");
+  }
   return res.json();
 }
 
@@ -1066,9 +1154,31 @@ export interface WgCredentialStatus {
 export interface WgWebinar {
   broadcast_id: string;
   name: string;
+  internal_title: string | null;
   starts_at: string | null;
+  duration_seconds: number | null;
+  subscriptions_count: number;
+  live_viewers_count: number;
+  replay_viewers_count: number;
+  has_ended: boolean;
+  cancelled: boolean;
   last_synced_at: string | null;
-  subscriber_count: number;
+  synced_subscriber_count: number;
+}
+
+export interface WgSubscriber {
+  id: string;
+  broadcast_id: string;
+  email: string;
+  first_name: string | null;
+  last_name: string | null;
+  registration_source: string | null;
+  subscribed_at: string | null;
+  watched_live: boolean | null;
+  watched_replay: boolean | null;
+  minutes_viewing: number | null;
+  viewing_device: string | null;
+  viewing_country: string | null;
 }
 
 export async function fetchWgStatus(): Promise<WgCredentialStatus> {
@@ -1095,9 +1205,16 @@ export async function deleteWgApiKey(): Promise<void> {
   if (!res.ok) throw new Error("Failed to delete API key");
 }
 
-export async function fetchWgWebinars(): Promise<{ webinars: WgWebinar[] }> {
-  const res = await fetch(`${API_URL}/connectors/webinargeek/webinars`, { headers: authHeaders() });
-  if (!res.ok) throw new Error("Failed to fetch webinars");
+export async function fetchWgWebinars(opts?: { limit?: number; offset?: number; q?: string }): Promise<{ broadcasts: WgWebinar[]; total: number }> {
+  const params = new URLSearchParams();
+  if (opts?.limit != null) params.set("limit", String(opts.limit));
+  if (opts?.offset != null) params.set("offset", String(opts.offset));
+  if (opts?.q) params.set("q", opts.q);
+  const res = await fetch(
+    `${API_URL}/connectors/webinargeek/webinars${params.toString() ? `?${params}` : ""}`,
+    { headers: authHeaders() }
+  );
+  if (!res.ok) throw new Error("Failed to fetch broadcasts");
   return res.json();
 }
 
@@ -1106,14 +1223,12 @@ export async function refreshWgWebinars(): Promise<{ count: number }> {
     method: "POST",
     headers: authHeaders(),
   });
-  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to refresh webinars"));
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to refresh broadcasts"));
   return res.json();
 }
 
 export async function syncWgSubscribers(broadcastId: string): Promise<{
   broadcast_id: string;
-  inserted: number;
-  updated: number;
   total: number;
 }> {
   const res = await fetch(
@@ -1122,4 +1237,43 @@ export async function syncWgSubscribers(broadcastId: string): Promise<{
   );
   if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to sync subscribers"));
   return res.json();
+}
+
+export async function syncAllWgSubscribers(): Promise<{
+  broadcasts_synced: number;
+  total_subscribers: number;
+  errors: string[];
+}> {
+  const res = await fetch(`${API_URL}/connectors/webinargeek/webinars/sync-all`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to sync all"));
+  return res.json();
+}
+
+export async function fetchWgSubscribers(opts: {
+  broadcast_id?: string;
+  q?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{ subscribers: WgSubscriber[]; total: number }> {
+  const params = new URLSearchParams();
+  if (opts.broadcast_id) params.set("broadcast_id", opts.broadcast_id);
+  if (opts.q) params.set("q", opts.q);
+  if (opts.limit != null) params.set("limit", String(opts.limit));
+  if (opts.offset != null) params.set("offset", String(opts.offset));
+  const res = await fetch(
+    `${API_URL}/connectors/webinargeek/subscribers?${params}`,
+    { headers: authHeaders() }
+  );
+  if (!res.ok) throw new Error("Failed to fetch subscribers");
+  return res.json();
+}
+
+export function wgSubscribersCsvUrl(opts: { broadcast_id?: string; q?: string }): string {
+  const params = new URLSearchParams();
+  if (opts.broadcast_id) params.set("broadcast_id", opts.broadcast_id);
+  if (opts.q) params.set("q", opts.q);
+  return `${API_URL}/connectors/webinargeek/subscribers/export?${params}`;
 }

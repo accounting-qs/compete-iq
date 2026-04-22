@@ -27,6 +27,9 @@ from db.models.costs import CostLog  # noqa: F401
 from db.models.connectors import (  # noqa: F401
     ConnectorCredential, WebinarGeekWebinar, WebinarGeekSubscriber,
 )
+from db.models.ghl import (  # noqa: F401
+    GHLContact, GHLOpportunity, GHLSyncRun, GHLSyncSettings,
+)
 
 # Re-export Base so `from db.models import Base` keeps working
 from db.base import Base  # noqa: F401

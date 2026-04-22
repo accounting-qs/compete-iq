@@ -223,12 +223,47 @@ def _build_segment_name(row: dict[str, Any]) -> str | None:
 # Public API
 # ---------------------------------------------------------------------------
 
-_source: StatisticsSource = WorkbookMockStatisticsSource()
+_workbook_source: StatisticsSource = WorkbookMockStatisticsSource()
 
 
-async def get_statistics_webinars() -> list[dict[str, Any]]:
-    """Return fully processed statistics webinars with derived metrics."""
-    raw_webinars = await _source.get_raw_webinars()
+def _get_source(use_ghl: bool) -> StatisticsSource:
+    if use_ghl:
+        # Imported lazily so the workbook source still works if GHL deps missing
+        from services.ghl_statistics_source import GoHighLevelStatisticsSource
+        return GoHighLevelStatisticsSource()
+    return _workbook_source
+
+
+async def _has_ghl_data() -> bool:
+    """Return True if at least one completed GHL sync has landed data in the DB."""
+    try:
+        from sqlalchemy import func, select
+        from db.models import GHLSyncRun
+        from db.session import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            r = await db.execute(
+                select(func.count(GHLSyncRun.id)).where(GHLSyncRun.status == "completed")
+            )
+            return int(r.scalar() or 0) > 0
+    except Exception:
+        return False
+
+
+async def get_statistics_webinars(source: str = "auto") -> list[dict[str, Any]]:
+    """Return fully processed statistics webinars with derived metrics.
+
+    source: "auto" (use GHL if any completed sync, else workbook),
+            "ghl", or "workbook".
+    """
+    if source == "workbook":
+        use_ghl = False
+    elif source == "ghl":
+        use_ghl = True
+    else:
+        use_ghl = await _has_ghl_data()
+
+    src = _get_source(use_ghl)
+    raw_webinars = await src.get_raw_webinars()
     result: list[dict[str, Any]] = []
 
     for w in raw_webinars:

@@ -22,6 +22,7 @@ class StatisticsMetrics(BaseModel):
     listSize: float | None = None
     listRemain: float | None = None
     gcalInvited: float | None = None
+    gcalInvitedGhl: float | None = None
     accountsNeeded: float | None = None
     invited: float | None = None
     unsubscribes: float | None = None
@@ -129,8 +130,14 @@ class ApiStatisticsWebinar(BaseModel):
     rows: list[ApiStatisticsRow]
 
 
+class StatisticsMetaResponse(BaseModel):
+    source: str  # "ghl" | "workbook"
+    last_sync: dict | None = None
+
+
 class StatisticsResponse(BaseModel):
     webinars: list[ApiStatisticsWebinar]
+    meta: StatisticsMetaResponse
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +145,27 @@ class StatisticsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.get("/webinars", response_model=StatisticsResponse)
-async def list_statistics_webinars():
-    """Return all statistics webinars with derived metrics."""
-    webinars = await stats_svc.get_statistics_webinars()
-    return {"webinars": webinars}
+async def list_statistics_webinars(source: str = "auto"):
+    """Return all statistics webinars with derived metrics.
+
+    source: "auto" (default), "ghl", or "workbook".
+    """
+    webinars = await stats_svc.get_statistics_webinars(source=source)
+
+    # Resolve which source was actually used for the UI badge
+    if source == "workbook":
+        used = "workbook"
+    elif source == "ghl":
+        used = "ghl"
+    else:
+        used = "ghl" if await stats_svc._has_ghl_data() else "workbook"
+
+    last_sync = None
+    if used == "ghl":
+        from services.ghl_statistics_source import get_last_sync_summary
+        last_sync = await get_last_sync_summary()
+
+    return {
+        "webinars": webinars,
+        "meta": {"source": used, "last_sync": last_sync},
+    }
