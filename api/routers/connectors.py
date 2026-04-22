@@ -2,22 +2,33 @@
 Connectors router — WebinarGeek integration.
 
 Endpoints:
-  GET    /connectors/webinargeek           -> {configured: bool, api_key_masked}
-  PUT    /connectors/webinargeek           -> set/update API key
-  DELETE /connectors/webinargeek           -> remove API key
-  POST   /connectors/webinargeek/webinars/refresh -> fetch broadcasts from WG API
-  GET    /connectors/webinargeek/webinars  -> cached list for dropdown
-  POST   /connectors/webinargeek/webinars/{broadcast_id}/sync -> sync subscribers
+  Credentials:
+    GET    /connectors/webinargeek
+    PUT    /connectors/webinargeek
+    DELETE /connectors/webinargeek
+
+  Broadcasts (cached):
+    GET    /connectors/webinargeek/webinars?limit=&offset=&q=
+    POST   /connectors/webinargeek/webinars/refresh
+    POST   /connectors/webinargeek/webinars/sync-all   (sync subscribers for all)
+    POST   /connectors/webinargeek/webinars/{broadcast_id}/sync
+
+  Subscribers (cached):
+    GET    /connectors/webinargeek/subscribers?broadcast_id=&q=&limit=&offset=
+    GET    /connectors/webinargeek/subscribers/export?broadcast_id=   (CSV)
 """
 from __future__ import annotations
 
+import csv
+import io
 import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, or_, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,16 +56,24 @@ class SetCredentialRequest(BaseModel):
     api_key: str
 
 
-class WebinarOut(BaseModel):
+class BroadcastOut(BaseModel):
     broadcast_id: str
     name: str
+    internal_title: Optional[str] = None
     starts_at: Optional[datetime] = None
+    duration_seconds: Optional[int] = None
+    subscriptions_count: int = 0
+    live_viewers_count: int = 0
+    replay_viewers_count: int = 0
+    has_ended: bool = False
+    cancelled: bool = False
     last_synced_at: Optional[datetime] = None
-    subscriber_count: int = 0
+    synced_subscriber_count: int = 0
 
 
-class WebinarListResponse(BaseModel):
-    webinars: list[WebinarOut]
+class BroadcastListResponse(BaseModel):
+    broadcasts: list[BroadcastOut]
+    total: int
 
 
 class RefreshResponse(BaseModel):
@@ -63,8 +82,32 @@ class RefreshResponse(BaseModel):
 
 class SyncResponse(BaseModel):
     broadcast_id: str
-    inserted: int
-    updated: int
+    total: int
+
+
+class SyncAllResponse(BaseModel):
+    broadcasts_synced: int
+    total_subscribers: int
+    errors: list[str] = []
+
+
+class SubscriberOut(BaseModel):
+    id: str
+    broadcast_id: str
+    email: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    registration_source: Optional[str] = None
+    subscribed_at: Optional[datetime] = None
+    watched_live: Optional[bool] = None
+    watched_replay: Optional[bool] = None
+    minutes_viewing: Optional[int] = None
+    viewing_device: Optional[str] = None
+    viewing_country: Optional[str] = None
+
+
+class SubscriberListResponse(BaseModel):
+    subscribers: list[SubscriberOut]
     total: int
 
 
@@ -86,8 +129,56 @@ async def _get_api_key(db: AsyncSession) -> str:
     return row.api_key
 
 
+def _subscriber_values(broadcast_id: str, s: dict) -> dict:
+    """Map WebinarGeek subscription record → our column layout."""
+    wd = s.get("watch_duration")
+    minutes = int(wd // 60) if isinstance(wd, (int, float)) else None
+    return {
+        "broadcast_id": broadcast_id,
+        "subscriber_id": str(s.get("id")) if s.get("id") is not None else None,
+        "email": (s.get("email") or "").strip(),
+        "first_name": s.get("firstname"),
+        "last_name": s.get("surname"),
+        "company": s.get("company"),
+        "job_title": s.get("job_title"),
+        "phone": s.get("phone"),
+        "city": s.get("city"),
+        "country": s.get("country"),
+        "timezone": s.get("time_zone"),
+        "registration_source": s.get("registration_source"),
+        "subscribed_at": wg.unix_to_dt(s.get("created_at")),
+        "unsubscribed_at": wg.unix_to_dt(s.get("unsubscribed_at")),
+        "unsubscribe_source": s.get("unsubscription_source"),
+        "watched_live": s.get("watched_live"),
+        "watched_replay": s.get("watched_replay"),
+        "start_time": wg.unix_to_dt(s.get("watch_start")),
+        "end_time": wg.unix_to_dt(s.get("watch_end")),
+        "minutes_viewing": minutes,
+        "viewing_country": s.get("viewing_country"),
+        "viewing_device": s.get("viewing_device"),
+        "watch_link": s.get("watch_link"),
+        "raw": s,
+        "synced_at": datetime.now(timezone.utc),
+    }
+
+
+async def _sync_one_broadcast(db: AsyncSession, api_key: str, broadcast_id: str) -> int:
+    subs = await wg.list_subscriptions(api_key, broadcast_id)
+    for s in subs:
+        values = _subscriber_values(broadcast_id, s)
+        if not values["email"]:
+            continue
+        stmt = pg_insert(WebinarGeekSubscriber).values(**values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["broadcast_id", "email"],
+            set_={k: v for k, v in values.items() if k not in ("broadcast_id", "email")},
+        )
+        await db.execute(stmt)
+    return len(subs)
+
+
 # ---------------------------------------------------------------------------
-# Credential endpoints
+# Credentials
 # ---------------------------------------------------------------------------
 @router.get("/webinargeek", response_model=CredentialStatus)
 async def get_credential_status(db: AsyncSession = Depends(get_db)):
@@ -104,7 +195,6 @@ async def set_credential(body: SetCredentialRequest, db: AsyncSession = Depends(
     api_key = body.api_key.strip()
     if not api_key:
         raise HTTPException(status_code=400, detail="api_key is required")
-
     try:
         ok = await wg.verify_api_key(api_key)
     except wg.WebinarGeekError as e:
@@ -128,148 +218,239 @@ async def delete_credential(db: AsyncSession = Depends(get_db)):
 
 
 # ---------------------------------------------------------------------------
-# Webinars list
+# Broadcasts
 # ---------------------------------------------------------------------------
-@router.get("/webinargeek/webinars", response_model=WebinarListResponse)
-async def list_cached_webinars(db: AsyncSession = Depends(get_db)):
+@router.get("/webinargeek/webinars", response_model=BroadcastListResponse)
+async def list_broadcasts(
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    q: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    base = select(WebinarGeekWebinar)
+    count_base = select(func.count()).select_from(WebinarGeekWebinar)
+    if q:
+        like = f"%{q}%"
+        base = base.where(or_(
+            WebinarGeekWebinar.name.ilike(like),
+            WebinarGeekWebinar.internal_title.ilike(like),
+            WebinarGeekWebinar.broadcast_id.ilike(like),
+        ))
+        count_base = count_base.where(or_(
+            WebinarGeekWebinar.name.ilike(like),
+            WebinarGeekWebinar.internal_title.ilike(like),
+            WebinarGeekWebinar.broadcast_id.ilike(like),
+        ))
+
+    total = (await db.execute(count_base)).scalar_one()
+
     rows = (await db.execute(
-        select(WebinarGeekWebinar).order_by(WebinarGeekWebinar.starts_at.desc().nullslast())
+        base.order_by(WebinarGeekWebinar.starts_at.desc().nullslast())
+            .limit(limit).offset(offset)
     )).scalars().all()
 
-    counts = dict((await db.execute(
+    synced_counts = dict((await db.execute(
         select(WebinarGeekSubscriber.broadcast_id, func.count())
         .group_by(WebinarGeekSubscriber.broadcast_id)
     )).all())
 
-    return WebinarListResponse(webinars=[
-        WebinarOut(
-            broadcast_id=r.broadcast_id,
-            name=r.name,
-            starts_at=r.starts_at,
-            last_synced_at=r.last_synced_at,
-            subscriber_count=counts.get(r.broadcast_id, 0),
-        )
-        for r in rows
-    ])
+    return BroadcastListResponse(
+        broadcasts=[
+            BroadcastOut(
+                broadcast_id=r.broadcast_id,
+                name=r.name,
+                internal_title=r.internal_title,
+                starts_at=r.starts_at,
+                duration_seconds=r.duration_seconds,
+                subscriptions_count=r.subscriptions_count,
+                live_viewers_count=r.live_viewers_count,
+                replay_viewers_count=r.replay_viewers_count,
+                has_ended=r.has_ended,
+                cancelled=r.cancelled,
+                last_synced_at=r.last_synced_at,
+                synced_subscriber_count=synced_counts.get(r.broadcast_id, 0),
+            )
+            for r in rows
+        ],
+        total=total,
+    )
 
 
 @router.post("/webinargeek/webinars/refresh", response_model=RefreshResponse)
-async def refresh_webinars(db: AsyncSession = Depends(get_db)):
+async def refresh_broadcasts(db: AsyncSession = Depends(get_db)):
     api_key = await _get_api_key(db)
-
     try:
         webinars = await wg.list_webinars(api_key)
     except wg.WebinarGeekError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
     total = 0
-    for w in webinars:
-        webinar_id = w.get("id")
-        name = w.get("title") or w.get("name") or f"Webinar {webinar_id}"
-        if not webinar_id:
-            continue
-        try:
-            broadcasts = await wg.list_broadcasts(api_key, webinar_id)
-        except wg.WebinarGeekError as e:
-            logger.warning("Failed to fetch broadcasts for webinar %s: %s", webinar_id, e)
-            continue
-
-        for b in broadcasts:
-            broadcast_id = str(b.get("id") or "")
-            if not broadcast_id:
-                continue
-            starts_at = wg.parse_dt(b.get("starts_at") or b.get("start_date") or b.get("start_at"))
-            stmt = pg_insert(WebinarGeekWebinar).values(
-                broadcast_id=broadcast_id,
-                webinar_id=str(webinar_id),
-                name=name,
-                starts_at=starts_at,
-                raw=b,
-            )
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["broadcast_id"],
-                set_={
-                    "webinar_id": str(webinar_id),
-                    "name": name,
-                    "starts_at": starts_at,
-                    "raw": b,
-                    "updated_at": datetime.now(timezone.utc),
-                },
-            )
-            await db.execute(stmt)
-            total += 1
+    for b in wg.extract_broadcasts(webinars):
+        broadcast_id = str(b["id"])
+        values = {
+            "broadcast_id": broadcast_id,
+            "webinar_id": str(b.get("_webinar_id") or ""),
+            "name": b.get("_webinar_title") or f"Broadcast {broadcast_id}",
+            "internal_title": b.get("_internal_title"),
+            "starts_at": wg.unix_to_dt(b.get("date")),
+            "duration_seconds": b.get("duration"),
+            "subscriptions_count": b.get("subscriptions_count") or 0,
+            "live_viewers_count": b.get("live_viewers_count") or 0,
+            "replay_viewers_count": b.get("replay_viewers_count") or 0,
+            "has_ended": bool(b.get("has_ended")),
+            "cancelled": bool(b.get("cancelled")),
+            "raw": b,
+            "updated_at": datetime.now(timezone.utc),
+        }
+        stmt = pg_insert(WebinarGeekWebinar).values(**values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["broadcast_id"],
+            set_={k: v for k, v in values.items() if k != "broadcast_id"},
+        )
+        await db.execute(stmt)
+        total += 1
 
     return RefreshResponse(count=total)
 
 
-# ---------------------------------------------------------------------------
-# Subscriber sync
-# ---------------------------------------------------------------------------
 @router.post("/webinargeek/webinars/{broadcast_id}/sync", response_model=SyncResponse)
-async def sync_subscribers(broadcast_id: str, db: AsyncSession = Depends(get_db)):
+async def sync_broadcast_subscribers(broadcast_id: str, db: AsyncSession = Depends(get_db)):
     api_key = await _get_api_key(db)
-
     wb = (await db.execute(
         select(WebinarGeekWebinar).where(WebinarGeekWebinar.broadcast_id == broadcast_id)
     )).scalar_one_or_none()
     if not wb:
-        raise HTTPException(status_code=404, detail="Broadcast not found — refresh webinars first")
+        raise HTTPException(status_code=404, detail="Broadcast not cached — refresh first")
 
     try:
-        subs = await wg.list_subscribers(api_key, broadcast_id)
+        await _sync_one_broadcast(db, api_key, broadcast_id)
     except wg.WebinarGeekError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    inserted = 0
-    updated = 0
-    for s in subs:
-        email = (s.get("email") or "").strip()
-        if not email:
-            continue
-
-        values = {
-            "broadcast_id": broadcast_id,
-            "subscriber_id": str(s.get("id")) if s.get("id") is not None else None,
-            "email": email,
-            "first_name": s.get("first_name"),
-            "last_name": s.get("last_name"),
-            "company": s.get("company"),
-            "job_title": s.get("job_title") or s.get("function"),
-            "phone": s.get("phone"),
-            "city": s.get("city"),
-            "country": s.get("country"),
-            "timezone": s.get("timezone"),
-            "registration_source": s.get("registration_source") or s.get("source"),
-            "subscribed_at": wg.parse_dt(s.get("subscribed_at") or s.get("created_at")),
-            "unsubscribed_at": wg.parse_dt(s.get("unsubscribed_at")),
-            "unsubscribe_source": s.get("unsubscription_source") or s.get("unsubscribe_source"),
-            "watched_live": wg.coerce_bool(s.get("watched_live") or s.get("watched")),
-            "watched_replay": wg.coerce_bool(s.get("watched_replay")),
-            "start_time": wg.parse_dt(s.get("start_time") or s.get("join_time")),
-            "end_time": wg.parse_dt(s.get("end_time") or s.get("leave_time")),
-            "minutes_viewing": s.get("minutes_viewing_time") or s.get("minutes_viewing"),
-            "viewing_country": s.get("viewing_country"),
-            "viewing_device": s.get("viewing_device"),
-            "watch_link": s.get("watch_link"),
-            "raw": s,
-            "synced_at": datetime.now(timezone.utc),
-        }
-
-        stmt = pg_insert(WebinarGeekSubscriber).values(**values)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["broadcast_id", "email"],
-            set_={k: v for k, v in values.items() if k not in ("broadcast_id", "email")},
-        )
-        result = await db.execute(stmt)
-        # result.rowcount is 1 for both insert & update in PG upsert; use returning for better metrics if needed
-        if result.rowcount and result.rowcount > 0:
-            # Can't reliably distinguish; count all as processed
-            inserted += 1
-
     wb.last_synced_at = datetime.now(timezone.utc)
-
     total = (await db.execute(
         select(func.count()).where(WebinarGeekSubscriber.broadcast_id == broadcast_id)
     )).scalar_one()
+    return SyncResponse(broadcast_id=broadcast_id, total=total)
 
-    return SyncResponse(broadcast_id=broadcast_id, inserted=inserted, updated=updated, total=total)
+
+@router.post("/webinargeek/webinars/sync-all", response_model=SyncAllResponse)
+async def sync_all_broadcasts(db: AsyncSession = Depends(get_db)):
+    api_key = await _get_api_key(db)
+    rows = (await db.execute(select(WebinarGeekWebinar))).scalars().all()
+
+    errors: list[str] = []
+    synced = 0
+    total_subs = 0
+    now = datetime.now(timezone.utc)
+    for r in rows:
+        try:
+            count = await _sync_one_broadcast(db, api_key, r.broadcast_id)
+            r.last_synced_at = now
+            synced += 1
+            total_subs += count
+        except wg.WebinarGeekError as e:
+            errors.append(f"{r.broadcast_id}: {e}")
+            logger.warning("sync-all: broadcast %s failed: %s", r.broadcast_id, e)
+
+    return SyncAllResponse(
+        broadcasts_synced=synced,
+        total_subscribers=total_subs,
+        errors=errors[:20],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Subscribers
+# ---------------------------------------------------------------------------
+def _subscriber_query(broadcast_id: Optional[str], q: Optional[str]):
+    stmt = select(WebinarGeekSubscriber)
+    count_stmt = select(func.count()).select_from(WebinarGeekSubscriber)
+    if broadcast_id:
+        stmt = stmt.where(WebinarGeekSubscriber.broadcast_id == broadcast_id)
+        count_stmt = count_stmt.where(WebinarGeekSubscriber.broadcast_id == broadcast_id)
+    if q:
+        like = f"%{q}%"
+        cond = or_(
+            WebinarGeekSubscriber.email.ilike(like),
+            WebinarGeekSubscriber.first_name.ilike(like),
+            WebinarGeekSubscriber.last_name.ilike(like),
+        )
+        stmt = stmt.where(cond)
+        count_stmt = count_stmt.where(cond)
+    return stmt, count_stmt
+
+
+@router.get("/webinargeek/subscribers", response_model=SubscriberListResponse)
+async def list_subscribers(
+    broadcast_id: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt, count_stmt = _subscriber_query(broadcast_id, q)
+    total = (await db.execute(count_stmt)).scalar_one()
+    rows = (await db.execute(
+        stmt.order_by(WebinarGeekSubscriber.subscribed_at.desc().nullslast())
+            .limit(limit).offset(offset)
+    )).scalars().all()
+    return SubscriberListResponse(
+        subscribers=[
+            SubscriberOut(
+                id=r.id,
+                broadcast_id=r.broadcast_id,
+                email=r.email,
+                first_name=r.first_name,
+                last_name=r.last_name,
+                registration_source=r.registration_source,
+                subscribed_at=r.subscribed_at,
+                watched_live=r.watched_live,
+                watched_replay=r.watched_replay,
+                minutes_viewing=r.minutes_viewing,
+                viewing_device=r.viewing_device,
+                viewing_country=r.viewing_country,
+            )
+            for r in rows
+        ],
+        total=total,
+    )
+
+
+@router.get("/webinargeek/subscribers/export")
+async def export_subscribers(
+    broadcast_id: Optional[str] = None,
+    q: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    stmt, _ = _subscriber_query(broadcast_id, q)
+    rows = (await db.execute(
+        stmt.order_by(WebinarGeekSubscriber.subscribed_at.desc().nullslast())
+    )).scalars().all()
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([
+        "email", "first_name", "last_name", "broadcast_id",
+        "registered_at", "source", "watched_live", "watched_replay",
+        "minutes_viewing", "device", "country", "timezone", "company", "job_title",
+    ])
+    for r in rows:
+        w.writerow([
+            r.email, r.first_name or "", r.last_name or "", r.broadcast_id,
+            r.subscribed_at.isoformat() if r.subscribed_at else "",
+            r.registration_source or "",
+            "" if r.watched_live is None else ("yes" if r.watched_live else "no"),
+            "" if r.watched_replay is None else ("yes" if r.watched_replay else "no"),
+            r.minutes_viewing if r.minutes_viewing is not None else "",
+            r.viewing_device or "", r.viewing_country or "",
+            r.timezone or "", r.company or "", r.job_title or "",
+        ])
+
+    buf.seek(0)
+    fn = f"webinargeek_subscribers_{broadcast_id or 'all'}.csv"
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fn}"'},
+    )

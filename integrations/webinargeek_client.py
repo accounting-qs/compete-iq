@@ -1,14 +1,19 @@
 """
-WebinarGeek API client.
+WebinarGeek API v2 client.
 
-Docs: https://app.webinargeek.com/api_docs
-Auth: Bearer API key in Authorization header.
 Base URL: https://app.webinargeek.com/api/v2
+Auth:     Api-Token: <key> header
+
+Key endpoints:
+  GET /webinars                                 → paginated, items under "webinars"
+                                                  each item: episodes[].broadcasts[]
+  GET /broadcasts/{id}                          → single broadcast record
+  GET /subscriptions?broadcast_id={id}          → paginated, items under "subscriptions"
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
@@ -27,31 +32,37 @@ def _headers(api_key: str) -> dict[str, str]:
     return {"Api-Token": api_key, "Accept": "application/json"}
 
 
-async def _paginated_get(client: httpx.AsyncClient, path: str, api_key: str) -> list[dict[str, Any]]:
-    """Fetch all pages of a WebinarGeek list endpoint."""
+async def _paged(
+    client: httpx.AsyncClient,
+    path: str,
+    api_key: str,
+    params: Optional[dict[str, Any]] = None,
+    items_key: Optional[str] = None,
+) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     page = 1
+    base_params = dict(params or {})
     while True:
         resp = await client.get(
             f"{BASE_URL}{path}",
             headers=_headers(api_key),
-            params={"page": page, "per_page": PAGE_SIZE},
+            params={**base_params, "page": page, "per_page": PAGE_SIZE},
             timeout=30,
         )
         if resp.status_code == 401:
             raise WebinarGeekError("Invalid API key")
         if resp.status_code != 200:
-            raise WebinarGeekError(f"WebinarGeek {path} returned {resp.status_code}: {resp.text[:200]}")
+            raise WebinarGeekError(f"{path} returned {resp.status_code}: {resp.text[:200]}")
 
         data = resp.json()
-        # WebinarGeek wraps lists under a key (e.g. "webinars", "subscribers") or returns a bare list.
-        items: list[dict[str, Any]]
         if isinstance(data, list):
             items = data
         elif isinstance(data, dict):
-            # Find the first list value
-            list_keys = [k for k, v in data.items() if isinstance(v, list)]
-            items = data[list_keys[0]] if list_keys else []
+            if items_key and items_key in data:
+                items = data[items_key]
+            else:
+                list_keys = [k for k, v in data.items() if isinstance(v, list)]
+                items = data[list_keys[0]] if list_keys else []
         else:
             items = []
 
@@ -61,14 +72,13 @@ async def _paginated_get(client: httpx.AsyncClient, path: str, api_key: str) -> 
         if len(items) < PAGE_SIZE:
             break
         page += 1
-        if page > 500:  # safety
-            logger.warning("WebinarGeek pagination exceeded 500 pages for %s", path)
+        if page > 500:
+            logger.warning("WG pagination exceeded 500 pages for %s", path)
             break
     return results
 
 
 async def verify_api_key(api_key: str) -> bool:
-    """Quick check that the key works. Hits /webinars with per_page=1."""
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{BASE_URL}/webinars",
@@ -79,54 +89,58 @@ async def verify_api_key(api_key: str) -> bool:
         if resp.status_code == 401:
             return False
         if resp.status_code >= 400:
-            raise WebinarGeekError(f"WebinarGeek verify returned {resp.status_code}: {resp.text[:200]}")
+            raise WebinarGeekError(f"verify returned {resp.status_code}: {resp.text[:200]}")
         return True
 
 
 async def list_webinars(api_key: str) -> list[dict[str, Any]]:
-    """Fetch all webinars (which contain broadcasts)."""
+    """Fetch all webinars with embedded episodes + broadcasts."""
     async with httpx.AsyncClient() as client:
-        return await _paginated_get(client, "/webinars", api_key)
+        return await _paged(client, "/webinars", api_key, items_key="webinars")
 
 
-async def list_broadcasts(api_key: str, webinar_id: str | int) -> list[dict[str, Any]]:
-    """Fetch broadcasts for a given webinar."""
+async def list_subscriptions(api_key: str, broadcast_id: str | int) -> list[dict[str, Any]]:
+    """All subscribers for one broadcast."""
     async with httpx.AsyncClient() as client:
-        return await _paginated_get(client, f"/webinars/{webinar_id}/broadcasts", api_key)
-
-
-async def list_subscribers(api_key: str, broadcast_id: str | int) -> list[dict[str, Any]]:
-    """Fetch all subscribers for a broadcast."""
-    async with httpx.AsyncClient() as client:
-        return await _paginated_get(client, f"/broadcasts/{broadcast_id}/subscribers", api_key)
+        return await _paged(
+            client,
+            "/subscriptions",
+            api_key,
+            params={"broadcast_id": broadcast_id},
+            items_key="subscriptions",
+        )
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Field helpers
 # ---------------------------------------------------------------------------
-def parse_dt(val: Any) -> Optional[datetime]:
-    """Best-effort ISO-8601 parse. WebinarGeek returns ISO timestamps."""
-    if not val or not isinstance(val, str):
+def unix_to_dt(val: Any) -> Optional[datetime]:
+    if val is None or val == "":
         return None
     try:
-        # Handles both "2026-04-21T10:00:00Z" and "2026-04-21T10:00:00+00:00"
-        return datetime.fromisoformat(val.replace("Z", "+00:00"))
-    except (ValueError, TypeError):
+        return datetime.fromtimestamp(int(val), tz=timezone.utc)
+    except (TypeError, ValueError):
         return None
 
 
-def coerce_bool(val: Any) -> Optional[bool]:
-    """Handles 'Yes'/'No'/'Unsubscribed'/True/False/None from WG."""
-    if val is None:
-        return None
-    if isinstance(val, bool):
-        return val
-    if isinstance(val, str):
-        s = val.strip().lower()
-        if s in ("yes", "true", "1"):
-            return True
-        if s in ("no", "false", "0", ""):
-            return False
-        if s == "unsubscribed":
-            return None
-    return None
+def extract_broadcasts(webinars: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Walk webinars[].episodes[].broadcasts[] and flatten, attaching webinar
+    metadata (title, internal_title, webinar_id) to each broadcast dict.
+    """
+    out: list[dict[str, Any]] = []
+    for w in webinars:
+        title = w.get("title") or ""
+        internal_title = w.get("internal_title") or ""
+        webinar_id = w.get("id")
+        for ep in w.get("episodes", []) or []:
+            for b in ep.get("broadcasts", []) or []:
+                if b.get("id") is None:
+                    continue
+                out.append({
+                    **b,
+                    "_webinar_id": webinar_id,
+                    "_webinar_title": title,
+                    "_internal_title": internal_title,
+                })
+    return out

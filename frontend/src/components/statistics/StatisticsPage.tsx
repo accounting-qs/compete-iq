@@ -75,16 +75,41 @@ export function StatisticsPage() {
   const [meta, setMeta] = useState<StatisticsMeta | null>(null);
 
   /* ── WebinarGeek sync ──────────────────────────────────────────── */
-  const [wgWebinars, setWgWebinars] = useState<WgWebinar[]>([]);
+  const WG_PAGE = 5;
+  const [wgBroadcasts, setWgBroadcasts] = useState<WgWebinar[]>([]);
+  const [wgTotal, setWgTotal] = useState(0);
+  const [wgOffset, setWgOffset] = useState(0);
   const [wgSelected, setWgSelected] = useState<string>("");
   const [wgSyncing, setWgSyncing] = useState(false);
+  const [wgLoadingMore, setWgLoadingMore] = useState(false);
   const [wgMessage, setWgMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchWgWebinars()
-      .then(({ webinars }) => setWgWebinars(webinars))
+    fetchWgWebinars({ limit: WG_PAGE, offset: 0 })
+      .then(({ broadcasts, total }) => {
+        setWgBroadcasts(broadcasts);
+        setWgTotal(total);
+        setWgOffset(broadcasts.length);
+      })
       .catch(() => { /* connector not configured — silently skip */ });
   }, []);
+
+  async function loadMoreWg() {
+    if (wgLoadingMore || wgOffset >= wgTotal) return;
+    setWgLoadingMore(true);
+    try {
+      const { broadcasts } = await fetchWgWebinars({ limit: WG_PAGE, offset: wgOffset });
+      setWgBroadcasts((prev) => [...prev, ...broadcasts]);
+      setWgOffset((prev) => prev + broadcasts.length);
+    } finally {
+      setWgLoadingMore(false);
+    }
+  }
+
+  function formatWgDate(iso: string | null): string {
+    if (!iso) return "—";
+    return new Date(iso).toLocaleDateString();
+  }
 
   async function handleWgSync() {
     if (!wgSelected) return;
@@ -93,8 +118,6 @@ export function StatisticsPage() {
     try {
       const res = await syncWgSubscribers(wgSelected);
       setWgMessage(`Synced ${res.total} subscribers.`);
-      const { webinars } = await fetchWgWebinars();
-      setWgWebinars(webinars);
     } catch (e) {
       setWgMessage(e instanceof Error ? e.message : "Sync failed");
     } finally {
@@ -218,19 +241,32 @@ export function StatisticsPage() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            {wgWebinars.length > 0 && (
+            {wgBroadcasts.length > 0 && (
               <div className="flex items-center gap-2">
                 <select
                   value={wgSelected}
-                  onChange={(e) => { setWgSelected(e.target.value); setWgMessage(null); }}
-                  className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-2 py-1.5 text-xs text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-violet-500 max-w-[260px]"
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === "__load_more__") {
+                      loadMoreWg();
+                      return;
+                    }
+                    setWgSelected(v);
+                    setWgMessage(null);
+                  }}
+                  className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-2 py-1.5 text-xs text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-violet-500 max-w-[320px]"
                 >
                   <option value="">WebinarGeek: select broadcast…</option>
-                  {wgWebinars.map((w) => (
+                  {wgBroadcasts.map((w) => (
                     <option key={w.broadcast_id} value={w.broadcast_id}>
-                      {w.name} — {w.broadcast_id}
+                      {w.internal_title ? `${w.internal_title} · ` : ""}{formatWgDate(w.starts_at)} · {w.broadcast_id}
                     </option>
                   ))}
+                  {wgOffset < wgTotal && (
+                    <option value="__load_more__">
+                      {wgLoadingMore ? "Loading…" : `↓ Load more (${wgOffset}/${wgTotal})`}
+                    </option>
+                  )}
                 </select>
                 <button
                   onClick={handleWgSync}
