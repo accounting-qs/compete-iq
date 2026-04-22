@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from db.models import (
-    GHLContact, GHLOpportunity, GHLWebinarStats, OutreachSender, Webinar,
+    Contact, GHLContact, GHLOpportunity, GHLWebinarStats, OutreachSender, Webinar,
     WebinarGeekSubscriber, WebinarListAssignment,
 )
 from db.session import AsyncSessionLocal
@@ -257,9 +257,15 @@ class GoHighLevelStatisticsSource:
 
         raw_webinars: list[dict[str, Any]] = []
 
+        from datetime import timedelta
         for idx, w in enumerate(webinars):
+            # For self-reg and unsub windows, default to 30 days before the
+            # webinar date when there's no prior webinar in the DB (otherwise
+            # those metrics are always null for the first/only webinar).
             prev_date = webinars[idx - 1].date if idx > 0 else None
             current_date = w.date
+            if prev_date is None and current_date is not None:
+                prev_date = current_date - timedelta(days=30)
 
             # Per-list child rows (sorted by display_order, then id)
             assignments = sorted(
@@ -268,12 +274,18 @@ class GoHighLevelStatisticsSource:
             )
             rows = [_row_for_assignment(a, w.status) for a in assignments]
 
-            # Compute webinar-wide summary (base aggregated from lists +
-            # everything else from GHL/WG)
             async with AsyncSessionLocal() as db:
+                # Compute webinar-wide summary
                 summary = await self._compute_webinar_summary(
                     db, w, assignments, prev_date, current_date,
                 )
+                # Compute per-list GHL metrics and merge into each row
+                per_list = await self._compute_per_list_metrics(
+                    db, w, assignments, prev_date, current_date,
+                )
+                for r, a in zip(rows, assignments):
+                    extra = per_list.get(a.id, {})
+                    r["metrics"].update(extra)
 
             raw_webinars.append({
                 "number": w.number,
@@ -287,6 +299,194 @@ class GoHighLevelStatisticsSource:
 
         raw_webinars.reverse()  # descending by number for the UI
         return raw_webinars
+
+    async def _compute_per_list_metrics(
+        self,
+        db: AsyncSession,
+        w: Webinar,
+        assignments: list[WebinarListAssignment],
+        prev_date,
+        current_date,
+    ) -> dict[str, dict[str, float | None]]:
+        """Return {assignment_id: partial_metrics_dict} with GHL/WG metrics
+        filtered to the planning contacts of each list.
+
+        Uses Planning `contacts.assignment_id` to map Planning emails → list.
+        Joins to ghl_contact via lowercase email. Only lists whose planned
+        contacts actually exist in GHL will show counts > 0.
+        """
+        from sqlalchemy import text as sa_text
+
+        N = w.number
+        broadcast_id = w.broadcast_id
+        yes_re = _invite_response_regex(N, "Yes")
+        maybe_re = _invite_response_regex(N, "Maybe")
+        series_re = _webinar_series_regex(N)
+        wid = w.id
+
+        out: dict[str, dict[str, float | None]] = {a.id: {} for a in assignments}
+
+        async def _group_count(sql: str, **params) -> dict[str, int]:
+            r = await db.execute(sa_text(sql).bindparams(webinar_id=wid, **params))
+            # Cast assignment_id to str — Planning assignments use str-uuid ids,
+            # raw SQL returns UUID objects which won't match dict lookups.
+            return {str(row[0]): int(row[1]) for row in r.fetchall() if row[0] is not None}
+
+        # ── GHL-only counts (no broadcast needed) ────────────────────────
+        # yesMarked / maybeMarked — filter on calendar_invite_response_history
+        for key, regex in [("yesMarked", yes_re), ("maybeMarked", maybe_re)]:
+            counts = await _group_count("""
+                SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
+                FROM contacts c
+                JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
+                JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
+                WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
+                  AND g.calendar_invite_response_history ~* :regex
+                GROUP BY c.assignment_id
+            """, regex=regex)
+            for aid, cnt in counts.items():
+                if aid in out:
+                    out[aid][key] = cnt
+
+        # gcalInvitedGhl per list — calendar_webinar_series_history contains eN
+        counts = await _group_count("""
+            SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
+            FROM contacts c
+            JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
+            JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
+            WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
+              AND g.calendar_webinar_series_history ~* :regex
+            GROUP BY c.assignment_id
+        """, regex=series_re)
+        for aid, cnt in counts.items():
+            if aid in out:
+                out[aid]["gcalInvitedGhl"] = cnt
+
+        # yesBookings / maybeBookings — invite_response matches AND booked_call = N
+        for key, regex in [("yesBookings", yes_re), ("maybeBookings", maybe_re)]:
+            counts = await _group_count("""
+                SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
+                FROM contacts c
+                JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
+                JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
+                WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
+                  AND g.calendar_invite_response_history ~* :regex
+                  AND g.booked_call_webinar_series = :N
+                GROUP BY c.assignment_id
+            """, regex=regex, N=N)
+            for aid, cnt in counts.items():
+                if aid in out:
+                    out[aid][key] = cnt
+
+        # selfRegMarked / selfRegBookings — Webinar_Registration_in_form_date window
+        if prev_date and current_date:
+            counts = await _group_count("""
+                SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
+                FROM contacts c
+                JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
+                JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
+                WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
+                  AND g.webinar_registration_in_form_date >= :start
+                  AND g.webinar_registration_in_form_date < :end
+                GROUP BY c.assignment_id
+            """, start=prev_date, end=current_date)
+            for aid, cnt in counts.items():
+                if aid in out:
+                    out[aid]["selfRegMarked"] = cnt
+                    out[aid]["lpRegs"] = cnt  # same formula per user
+
+            counts = await _group_count("""
+                SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
+                FROM contacts c
+                JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
+                JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
+                WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
+                  AND g.webinar_registration_in_form_date >= :start
+                  AND g.webinar_registration_in_form_date < :end
+                  AND g.booked_call_webinar_series = :N
+                GROUP BY c.assignment_id
+            """, start=prev_date, end=current_date, N=N)
+            for aid, cnt in counts.items():
+                if aid in out:
+                    out[aid]["selfRegBookings"] = cnt
+
+            counts = await _group_count("""
+                SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
+                FROM contacts c
+                JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
+                JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
+                WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
+                  AND g.cold_calendar_unsubscribe_date >= :start
+                  AND g.cold_calendar_unsubscribe_date < :end
+                GROUP BY c.assignment_id
+            """, start=prev_date, end=current_date)
+            for aid, cnt in counts.items():
+                if aid in out:
+                    out[aid]["unsubscribes"] = cnt
+
+        # totalBookings per list — opportunities with webinar_source_number = N
+        counts = await _group_count("""
+            SELECT c.assignment_id, COUNT(DISTINCT o.ghl_opportunity_id)
+            FROM contacts c
+            JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
+            JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
+            JOIN ghl_opportunity o ON o.ghl_contact_id = g.ghl_contact_id
+            WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
+              AND o.webinar_source_number = :N
+            GROUP BY c.assignment_id
+        """, N=N)
+        for aid, cnt in counts.items():
+            if aid in out:
+                out[aid]["totalBookings"] = cnt
+
+        # Attendance metrics — need broadcast_id + WebinarGeek subscribers
+        if broadcast_id:
+            counts = await _group_count("""
+                SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
+                FROM contacts c
+                JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
+                JOIN webinargeek_subscribers wgs ON LOWER(wgs.email) = LOWER(c.email)
+                WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
+                  AND wgs.broadcast_id = :bid
+                GROUP BY c.assignment_id
+            """, bid=broadcast_id)
+            for aid, cnt in counts.items():
+                if aid in out:
+                    out[aid]["totalRegs"] = cnt
+
+            # totalAttended — watched_live OR minutes_viewing > 0
+            counts = await _group_count("""
+                SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
+                FROM contacts c
+                JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
+                JOIN webinargeek_subscribers wgs ON LOWER(wgs.email) = LOWER(c.email)
+                WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
+                  AND wgs.broadcast_id = :bid
+                  AND (wgs.watched_live = TRUE OR wgs.minutes_viewing > 0)
+                GROUP BY c.assignment_id
+            """, bid=broadcast_id)
+            for aid, cnt in counts.items():
+                if aid in out:
+                    out[aid]["totalAttended"] = cnt
+
+            for key, min_minutes in [("total10MinPlus", 10), ("total30MinPlus", 30)]:
+                counts = await _group_count("""
+                    SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
+                    FROM contacts c
+                    JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
+                    JOIN webinargeek_subscribers wgs ON LOWER(wgs.email) = LOWER(c.email)
+                    WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
+                      AND wgs.broadcast_id = :bid
+                      AND (wgs.watched_live = TRUE OR wgs.minutes_viewing > 0)
+                      AND wgs.minutes_viewing >= :mm
+                    GROUP BY c.assignment_id
+                """, bid=broadcast_id, mm=min_minutes)
+                for aid, cnt in counts.items():
+                    if aid in out:
+                        out[aid][key] = cnt
+
+        return out
+
 
     async def _compute_webinar_summary(
         self,
@@ -406,7 +606,10 @@ class GoHighLevelStatisticsSource:
                     GHLContact.webinar_registration_in_form_date < current_date,
                 )
             )
-            metrics["selfRegMarked"] = int(r.scalar() or 0)
+            self_reg_marked = int(r.scalar() or 0)
+            metrics["selfRegMarked"] = self_reg_marked
+            # Per user: lpRegs uses the same formula as selfRegMarked.
+            metrics["lpRegs"] = self_reg_marked
 
             if broadcast_id:
                 metrics["selfRegAttended"] = await _count_attended_for_broadcast_filtered(
@@ -507,7 +710,8 @@ class GoHighLevelStatisticsSource:
 
         # --- Skipped ---
         metrics["ghlPageViews"] = None
-        metrics["lpRegs"] = None
+        # lpRegs is populated above when prev_date/current_date exist.
+        metrics.setdefault("lpRegs", None)
 
         return metrics
 
