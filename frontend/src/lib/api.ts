@@ -1125,6 +1125,18 @@ export async function triggerGhlSync(syncType: "full" | "incremental"): Promise<
   return res.json();
 }
 
+export async function triggerGhlWebinarSync(webinarNumber: number): Promise<{ run_id: string; sync_type: string; status: string }> {
+  const res = await fetch(`${API_URL}/ghl-sync/trigger-webinar?n=${webinarNumber}`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to trigger webinar sync");
+  }
+  return res.json();
+}
+
 export async function fetchGhlSyncSettings(): Promise<GhlSyncSettings> {
   const res = await fetch(`${API_URL}/ghl-sync/settings`, { headers: authHeaders() });
   if (!res.ok) throw new Error("Failed to fetch sync settings");

@@ -130,25 +130,66 @@ class GHLClient:
     # Contacts
     # ------------------------------------------------------------------
 
+    # GHL filter presets ---------------------------------------------------
+
+    @staticmethod
+    def narrow_webinar_filter() -> list[dict]:
+        """OR of narrow webinar custom fields — excludes the huge
+        calendar_webinar_series_history field (4.2M rows).
+
+        Captures contacts who: responded Yes/Maybe, are non-joiners, have
+        booked a call, self-registered, unsubscribed, or have Is_Booked_call.
+        ~54K contacts total against this location.
+        """
+        return [{"group": "OR", "filters": [
+            {"field": f"customFields.{CONTACT_FIELD_CALENDAR_INVITE_RESPONSE_HISTORY}", "operator": "exists"},
+            {"field": f"customFields.{CONTACT_FIELD_CALENDAR_WEBINAR_SERIES_NON_JOINERS}", "operator": "exists"},
+            {"field": f"customFields.{CONTACT_FIELD_BOOKED_CALL_WEBINAR_SERIES}", "operator": "exists"},
+            {"field": f"customFields.{CONTACT_FIELD_IS_BOOKED_CALL}", "operator": "exists"},
+            {"field": f"customFields.{CONTACT_FIELD_WEBINAR_REGISTRATION_IN_FORM_DATE}", "operator": "exists"},
+            {"field": f"customFields.{CONTACT_FIELD_COLD_CALENDAR_UNSUBSCRIBE_DATE}", "operator": "exists"},
+        ]}]
+
+    @staticmethod
+    def webinar_number_filter(webinar_number: int) -> list[dict]:
+        """OR across every field that references a webinar number for the
+        given N. Used for per-webinar manual sync.
+
+        Captures: GCal invited (calendar_webinar_series_history contains eN),
+        Yes/Maybe responders, non-joiners, bookers."""
+        tok = f"e{webinar_number}"
+        return [{"group": "OR", "filters": [
+            {"field": f"customFields.{CONTACT_FIELD_CALENDAR_WEBINAR_SERIES_HISTORY}", "operator": "contains", "value": tok},
+            {"field": f"customFields.{CONTACT_FIELD_CALENDAR_INVITE_RESPONSE_HISTORY}", "operator": "contains", "value": tok},
+            {"field": f"customFields.{CONTACT_FIELD_CALENDAR_WEBINAR_SERIES_NON_JOINERS}", "operator": "contains", "value": tok},
+            {"field": f"customFields.{CONTACT_FIELD_BOOKED_CALL_WEBINAR_SERIES}", "operator": "eq", "value": webinar_number},
+        ]}]
+
     async def stream_contacts(
-        self, updated_after: datetime | None = None
+        self,
+        updated_after: datetime | None = None,
+        filters: list[dict] | None = None,
     ) -> AsyncGenerator[dict, None]:
         """Yield raw GHL contact dicts. Uses POST /contacts/search with cursor paging.
 
         updated_after: if set, narrows results to contacts touched after this ts.
+        filters: extra filter clauses ANDed with the dateUpdated filter.
+                 Use narrow_webinar_filter() or webinar_number_filter(n).
         """
         body: dict = {
             "locationId": self._location_id,
             "pageLimit": self._page_size,
         }
+
+        combined: list[dict] = list(filters) if filters else []
         if updated_after:
-            body["filters"] = [
-                {
-                    "field": "dateUpdated",
-                    "operator": "gt",
-                    "value": int(updated_after.timestamp() * 1000),
-                }
-            ]
+            combined.append({
+                "field": "dateUpdated",
+                "operator": "gt",
+                "value": int(updated_after.timestamp() * 1000),
+            })
+        if combined:
+            body["filters"] = combined
 
         search_after: list | None = None
         page = 0

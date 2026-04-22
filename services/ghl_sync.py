@@ -198,11 +198,20 @@ async def run_sync(sync_type: SyncType, trigger: SyncTrigger = "scheduled") -> s
         opps_synced = 0
         errors: list[dict] = []
 
+        # Scheduled sync uses the narrow filter — excludes the 4.2M-row
+        # calendar_webinar_series_history wildcard. Per-webinar sync (run_webinar_sync)
+        # handles the wide case on demand.
+        contact_filter = GHLClient.narrow_webinar_filter()
+        contact_updated_after = updated_after if sync_type_effective == "incremental" else None
+        opp_updated_after = updated_after if sync_type_effective == "incremental" else None
+
         try:
             # Sync contacts
             async with AsyncSessionLocal() as db:
                 batch = 0
-                async for c in client.stream_contacts(updated_after if sync_type_effective == "incremental" else None):
+                async for c in client.stream_contacts(
+                    updated_after=contact_updated_after, filters=contact_filter,
+                ):
                     try:
                         await _upsert_contact(db, _build_contact_row(c))
                         contacts_synced += 1
@@ -218,7 +227,7 @@ async def run_sync(sync_type: SyncType, trigger: SyncTrigger = "scheduled") -> s
             # Sync opportunities
             async with AsyncSessionLocal() as db:
                 batch = 0
-                async for o in client.stream_opportunities(updated_after if sync_type_effective == "incremental" else None):
+                async for o in client.stream_opportunities(opp_updated_after):
                     try:
                         await _upsert_opp(db, _build_opp_row(o))
                         opps_synced += 1
@@ -260,6 +269,112 @@ async def run_sync(sync_type: SyncType, trigger: SyncTrigger = "scheduled") -> s
         logger.info(
             "Sync %s (%s/%s): status=%s, contacts=%d, opps=%d, errors=%d, %ds",
             run_id, sync_type, trigger, status, contacts_synced, opps_synced, len(errors), duration,
+        )
+        return run_id
+
+
+async def run_webinar_sync(webinar_number: int, trigger: SyncTrigger = "manual") -> str:
+    """Pull full contact rows (no updated_after filter) for everyone whose
+    custom fields reference this webinar number, plus every opportunity with
+    webinar_source_number = N.
+
+    Uses the OR filter across:
+      - calendar_webinar_series_history contains "eN"  (GCal invited base)
+      - calendar_invite_response_history contains "eN" (Yes/Maybe responders)
+      - calendar_webinar_series_non_joiners contains "eN"
+      - booked_call_webinar_series = N
+
+    Expensive: typical webinar pulls 100k-300k contacts. Run manually per webinar.
+    """
+    if _sync_lock.locked():
+        raise RuntimeError("A sync is already running")
+
+    async with _sync_lock:
+        sync_type = f"webinar:{webinar_number}"
+        async with AsyncSessionLocal() as db:
+            run = GHLSyncRun(
+                sync_type=sync_type,
+                trigger=trigger,
+                status="running",
+                started_at=datetime.now(timezone.utc),
+            )
+            db.add(run)
+            await db.commit()
+            await db.refresh(run)
+            run_id = run.id
+            run_started_at = run.started_at
+
+        client = GHLClient()
+        contacts_synced = 0
+        opps_synced = 0
+        errors: list[dict] = []
+        contact_filter = GHLClient.webinar_number_filter(webinar_number)
+
+        try:
+            # Contacts referencing this webinar
+            async with AsyncSessionLocal() as db:
+                batch = 0
+                async for c in client.stream_contacts(filters=contact_filter):
+                    try:
+                        await _upsert_contact(db, _build_contact_row(c))
+                        contacts_synced += 1
+                        batch += 1
+                        if batch >= 100:
+                            await db.commit()
+                            batch = 0
+                    except Exception as exc:
+                        errors.append({"type": "contact", "id": c.get("id"), "error": str(exc)[:500]})
+                        logger.exception("Failed to upsert contact %s", c.get("id"))
+                await db.commit()
+
+            # Opportunities with webinar_source_number = N
+            # (stream all opps, filter client-side — the sales pipeline is small)
+            async with AsyncSessionLocal() as db:
+                batch = 0
+                async for o in client.stream_opportunities():
+                    row = _build_opp_row(o)
+                    if row.get("webinar_source_number") != webinar_number:
+                        continue
+                    try:
+                        await _upsert_opp(db, row)
+                        opps_synced += 1
+                        batch += 1
+                        if batch >= 100:
+                            await db.commit()
+                            batch = 0
+                    except Exception as exc:
+                        errors.append({"type": "opportunity", "id": o.get("id"), "error": str(exc)[:500]})
+                        logger.exception("Failed to upsert opportunity %s", o.get("id"))
+                await db.commit()
+
+            status = "completed"
+
+        except Exception as exc:
+            logger.exception("Webinar sync failed")
+            errors.append({"type": "fatal", "error": str(exc)[:500]})
+            status = "failed"
+
+        completed = datetime.now(timezone.utc)
+        duration = int((completed - run_started_at).total_seconds())
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                update(GHLSyncRun)
+                .where(GHLSyncRun.id == run_id)
+                .values(
+                    status=status,
+                    completed_at=completed,
+                    duration_seconds=duration,
+                    contacts_synced=contacts_synced,
+                    opportunities_synced=opps_synced,
+                    errors_count=len(errors),
+                    error_details=errors or None,
+                )
+            )
+            await db.commit()
+
+        logger.info(
+            "Webinar sync %s (W%d/%s): status=%s, contacts=%d, opps=%d, errors=%d, %ds",
+            run_id, webinar_number, trigger, status, contacts_synced, opps_synced, len(errors), duration,
         )
         return run_id
 

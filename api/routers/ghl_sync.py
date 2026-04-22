@@ -14,7 +14,7 @@ from api.auth import require_auth
 from db.models import GHLSyncRun, GHLSyncSettings
 from db.session import get_db
 from services import ghl_scheduler
-from services.ghl_sync import run_sync
+from services.ghl_sync import run_sync, run_webinar_sync
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +154,37 @@ async def trigger_sync(
         raise HTTPException(status_code=500, detail="Failed to start sync")
 
     return {"run_id": run.id, "sync_type": sync_type, "status": run.status}
+
+
+@router.post("/trigger-webinar", response_model=SyncTriggerResponse, status_code=202)
+async def trigger_webinar_sync(
+    n: int = Query(..., ge=1, le=9999, description="Webinar number to sync"),
+):
+    """Pull all GHL contacts whose custom fields reference this webinar number,
+    plus opportunities with webinar_source_number = N.
+
+    Expensive: typical webinar pulls 100k-300k contacts. Runs as a background
+    task; poll GET /status or the run_id.
+    """
+    task = asyncio.create_task(run_webinar_sync(n, trigger="manual"))  # type: ignore[arg-type]
+    try:
+        await asyncio.sleep(0.2)
+    except asyncio.CancelledError:
+        raise
+
+    from db.session import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(GHLSyncRun).order_by(GHLSyncRun.started_at.desc()).limit(1)
+        )
+        run = result.scalar_one_or_none()
+
+    if run is None:
+        if task.done() and task.exception():
+            raise HTTPException(status_code=409, detail=str(task.exception()))
+        raise HTTPException(status_code=500, detail="Failed to start webinar sync")
+
+    return {"run_id": run.id, "sync_type": run.sync_type, "status": run.status}
 
 
 @router.get("/settings", response_model=SyncSettingsResponse)
