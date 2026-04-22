@@ -25,14 +25,64 @@ import {
 
 const IDENTITY_COL_COUNT = 8; // expand, webinar#, status, note, description, copy, url, sendInfo
 
-// Sticky background classes per row type — needed because `position: sticky`
-// on a <td> requires an opaque bg or content bleeds through horizontally.
-const STICKY_DESC_BASE = "sticky left-0 z-20";
-const STICKY_DESC_HEADER = `${STICKY_DESC_BASE} z-30 bg-zinc-50 dark:bg-zinc-900`;
-const STICKY_DESC_PARENT = `${STICKY_DESC_BASE} bg-zinc-100 dark:bg-zinc-800`;
-const STICKY_DESC_GROUP = `${STICKY_DESC_BASE} bg-zinc-100 dark:bg-zinc-800/90`;
-const STICKY_DESC_LIST = `${STICKY_DESC_BASE} bg-white dark:bg-zinc-950`;
-const STICKY_DESC_SPECIAL = `${STICKY_DESC_BASE} bg-zinc-50 dark:bg-zinc-900`;
+/* ─── Sticky identity columns ─────────────────────────────────────────────
+ * Description, Copy, URL, and Send Info stay visible while the wide metric
+ * band scrolls horizontally. Each column is a fixed width; left offsets
+ * are cumulative so they line up as a single frozen panel:
+ *   Description: 240px wide  @ left-0
+ *   Copy:        260px wide  @ left-[240px]
+ *   URL:          32px wide  @ left-[500px]
+ *   Send Info:   120px wide  @ left-[532px]
+ *   (total sticky pane: 652px)
+ * Each row type gets its own background so scrolling content doesn't
+ * bleed through the sticky cells. */
+
+// z-index: header stacks above rows; list/parent/group stack above metrics
+const Z_HEADER = "z-30";
+const Z_ROW = "z-20";
+
+// Row-type backgrounds (must be opaque so scroll doesn't bleed through)
+const BG_HEADER = "bg-zinc-50 dark:bg-zinc-900";
+const BG_PARENT = "bg-zinc-100 dark:bg-zinc-800";
+const BG_GROUP = "bg-zinc-100 dark:bg-zinc-800";
+const BG_LIST = "bg-white dark:bg-zinc-950";
+const BG_SPECIAL = "bg-zinc-50 dark:bg-zinc-900";
+
+// Sticky left offsets — full class strings so Tailwind can pick them up
+const L_DESC = "sticky left-0";
+const L_COPY = "sticky left-[240px]";
+const L_URL = "sticky left-[500px]";
+const L_SEND = "sticky left-[532px]";
+
+// Fixed widths — use w-[] to lock each sticky column
+const W_DESC = "w-[240px] min-w-[240px] max-w-[240px]";
+const W_COPY = "w-[260px] min-w-[260px] max-w-[260px]";
+const W_URL = "w-[32px] min-w-[32px] max-w-[32px]";
+const W_SEND = "w-[120px] min-w-[120px] max-w-[120px]";
+
+// Composite classes (left + z + bg) per row type / column
+const sDescH = `${L_DESC} ${Z_HEADER} ${BG_HEADER}`;
+const sCopyH = `${L_COPY} ${Z_HEADER} ${BG_HEADER}`;
+const sUrlH = `${L_URL} ${Z_HEADER} ${BG_HEADER}`;
+const sSendH = `${L_SEND} ${Z_HEADER} ${BG_HEADER}`;
+
+const sDescP = `${L_DESC} ${Z_ROW} ${BG_PARENT}`;
+// (parent-row's colSpan={4} cell spans Desc+Copy+URL+Send, one sticky cell)
+
+const sDescG = `${L_DESC} ${Z_ROW} ${BG_GROUP}`;
+const sCopyG = `${L_COPY} ${Z_ROW} ${BG_GROUP}`;
+const sUrlG = `${L_URL} ${Z_ROW} ${BG_GROUP}`;
+const sSendG = `${L_SEND} ${Z_ROW} ${BG_GROUP}`;
+
+const sDescL = `${L_DESC} ${Z_ROW} ${BG_LIST}`;
+const sCopyL = `${L_COPY} ${Z_ROW} ${BG_LIST}`;
+const sUrlL = `${L_URL} ${Z_ROW} ${BG_LIST}`;
+const sSendL = `${L_SEND} ${Z_ROW} ${BG_LIST}`;
+
+const sDescSp = `${L_DESC} ${Z_ROW} ${BG_SPECIAL}`;
+const sCopySp = `${L_COPY} ${Z_ROW} ${BG_SPECIAL}`;
+const sUrlSp = `${L_URL} ${Z_ROW} ${BG_SPECIAL}`;
+const sSendSp = `${L_SEND} ${Z_ROW} ${BG_SPECIAL}`;
 
 /* ─── Status badge ────────────────────────────────────────────────────── */
 
@@ -233,12 +283,16 @@ function renderGroupedRows(
   const single = groups.filter((g) => g.lists.length === 1).map((g) => g.lists[0]);
 
   const renderListRow = (row: ApiStatisticsRow) => {
-    const stickyBg = row.kind !== "list" ? STICKY_DESC_SPECIAL : STICKY_DESC_LIST;
+    const isSpecial = row.kind !== "list";
+    const desc = isSpecial ? sDescSp : sDescL;
+    const copy = isSpecial ? sCopySp : sCopyL;
+    const url = isSpecial ? sUrlSp : sUrlL;
+    const send = isSpecial ? sSendSp : sSendL;
     return (
     <tr
       key={row.id}
       className={`border-b border-zinc-200 dark:border-zinc-800/20 transition-colors ${
-        row.kind !== "list"
+        isSpecial
           ? "bg-zinc-50 dark:bg-zinc-900/20 text-zinc-500 italic"
           : "hover:bg-zinc-100 dark:hover:bg-zinc-800/20"
       }`}
@@ -246,22 +300,22 @@ function renderGroupedRows(
       <td className="px-2 py-1.5"></td>
       <td className="px-2 py-1.5"></td>
       <td className="px-2 py-1.5">
-        {row.kind === "list" && <StatusBadge status={row.status} />}
+        {!isSpecial && <StatusBadge status={row.status} />}
       </td>
       <td className="px-2 py-1.5">
-        <span className={row.kind !== "list" ? "text-zinc-500" : "text-zinc-700 dark:text-zinc-300"}>
+        <span className={isSpecial ? "text-zinc-500" : "text-zinc-700 dark:text-zinc-300"}>
           {row.note ?? ""}
         </span>
       </td>
-      <td className={`px-2 py-1.5 min-w-[240px] max-w-[240px] ${stickyBg}`}>
-        <span className={`block truncate ${row.kind !== "list" ? "text-zinc-500" : "text-zinc-800 dark:text-zinc-300"}`} title={row.description ?? undefined}>
+      <td className={`px-2 py-1.5 ${W_DESC} ${desc}`}>
+        <span className={`block truncate ${isSpecial ? "text-zinc-500" : "text-zinc-800 dark:text-zinc-300"}`} title={row.description ?? undefined}>
           {row.description ?? (row.kind === "nonjoiners" ? "Nonjoiners" : row.kind === "no_list_data" ? "NO LIST DATA" : "")}
         </span>
       </td>
-      <td className="px-2 py-1.5 min-w-[260px] max-w-[260px]">
+      <td className={`px-2 py-1.5 ${W_COPY} ${copy}`}>
         <CopyCell row={row} onClick={() => setCopyModalRow(row)} />
       </td>
-      <td className="px-2 py-1.5 text-center">
+      <td className={`px-2 py-1.5 text-center ${W_URL} ${url}`}>
         {row.listUrl && (
           <a
             href={row.listUrl}
@@ -275,8 +329,10 @@ function renderGroupedRows(
           </a>
         )}
       </td>
-      <td className="px-2 py-1.5 text-zinc-600 dark:text-zinc-400">
-        {row.sendInfo ?? ""}
+      <td className={`px-2 py-1.5 text-zinc-600 dark:text-zinc-400 ${W_SEND} ${send}`}>
+        <span className="block truncate" title={row.sendInfo ?? undefined}>
+          {row.sendInfo ?? ""}
+        </span>
       </td>
       {METRIC_COLUMNS.map((col, idx) => (
         <MetricCell key={col.key} value={row.metrics[col.key]} col={col} boundary={isGroupBoundary(idx)} />
@@ -314,7 +370,7 @@ function renderGroupedRows(
         <td className="px-2 py-2"></td>
         <td className="px-2 py-2"></td>
         <td className="px-2 py-2"></td>
-        <td className={`px-2 py-2 min-w-[240px] max-w-[240px] ${STICKY_DESC_GROUP}`}>
+        <td className={`px-2 py-2 ${W_DESC} ${sDescG}`}>
           <div className="flex items-center gap-2">
             <span
               title={bucketName}
@@ -327,9 +383,9 @@ function renderGroupedRows(
             </span>
           </div>
         </td>
-        <td className="px-2 py-2"></td>
-        <td className="px-2 py-2"></td>
-        <td className="px-2 py-2">
+        <td className={`px-2 py-2 ${W_COPY} ${sCopyG}`}></td>
+        <td className={`px-2 py-2 ${W_URL} ${sUrlG}`}></td>
+        <td className={`px-2 py-2 ${W_SEND} ${sSendG}`}>
           <div className="flex items-center gap-1">
             {uniqSenders.slice(0, 2).map((s) => (
               <span
@@ -652,7 +708,7 @@ export function StatisticsPage() {
           <thead>
             {/* Row 1: Group spans */}
             <tr className="bg-zinc-50 dark:bg-zinc-900/90 border-b border-zinc-100 dark:border-zinc-800/20">
-              <th colSpan={IDENTITY_COL_COUNT} className="px-2 py-1"></th>
+              <th colSpan={IDENTITY_COL_COUNT} className={`px-2 py-1 ${L_DESC} ${Z_HEADER} ${BG_HEADER}`}></th>
               {METRIC_GROUPS.map((g) => (
                 <th
                   key={g}
@@ -669,10 +725,10 @@ export function StatisticsPage() {
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[140px]">Webinar #</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Status</th>
               <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[120px]">Note</th>
-              <th className={`text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[240px] max-w-[240px] ${STICKY_DESC_HEADER}`}>Description</th>
-              <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[260px] max-w-[260px]">Copy</th>
-              <th className="text-center px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] w-8">URL</th>
-              <th className="text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] min-w-[80px]">Send Info</th>
+              <th className={`text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] ${W_DESC} ${sDescH}`}>Description</th>
+              <th className={`text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] ${W_COPY} ${sCopyH}`}>Copy</th>
+              <th className={`text-center px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] ${W_URL} ${sUrlH}`}>URL</th>
+              <th className={`text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] ${W_SEND} ${sSendH}`}>Send Info</th>
               {METRIC_COLUMNS.map((col, idx) => (
                 <th
                   key={col.key}
@@ -722,7 +778,7 @@ export function StatisticsPage() {
                   <td className="px-2 py-2.5 text-zinc-500 text-[10px]">
                     {listCount} lists
                   </td>
-                  <td className="px-2 py-2.5" colSpan={4}>
+                  <td className={`px-2 py-2.5 ${sDescP}`} colSpan={4}>
                     <button
                       onClick={(e) => handleWebinarSync(w.number, e)}
                       disabled={syncingWebinar !== null}
