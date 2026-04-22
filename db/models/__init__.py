@@ -24,6 +24,9 @@ from db.models.uploads import (  # noqa: F401
     UploadHistory, ContactCustomField, Contact,
 )
 from db.models.costs import CostLog  # noqa: F401
+from db.models.connectors import (  # noqa: F401
+    ConnectorCredential, WebinarGeekWebinar, WebinarGeekSubscriber,
+)
 
 # Re-export Base so `from db.models import Base` keeps working
 from db.base import Base  # noqa: F401

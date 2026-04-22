@@ -1055,3 +1055,71 @@ export async function fetchStatisticsWebinars(): Promise<{ webinars: ApiStatisti
   if (!res.ok) throw new Error("Failed to fetch statistics");
   return res.json();
 }
+
+/* ── Connectors: WebinarGeek ───────────────────────────────────────────── */
+
+export interface WgCredentialStatus {
+  configured: boolean;
+  api_key_masked?: string | null;
+}
+
+export interface WgWebinar {
+  broadcast_id: string;
+  name: string;
+  starts_at: string | null;
+  last_synced_at: string | null;
+  subscriber_count: number;
+}
+
+export async function fetchWgStatus(): Promise<WgCredentialStatus> {
+  const res = await fetch(`${API_URL}/connectors/webinargeek`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to fetch WebinarGeek status");
+  return res.json();
+}
+
+export async function saveWgApiKey(api_key: string): Promise<WgCredentialStatus> {
+  const res = await fetch(`${API_URL}/connectors/webinargeek`, {
+    method: "PUT",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ api_key }),
+  });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to save API key"));
+  return res.json();
+}
+
+export async function deleteWgApiKey(): Promise<void> {
+  const res = await fetch(`${API_URL}/connectors/webinargeek`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to delete API key");
+}
+
+export async function fetchWgWebinars(): Promise<{ webinars: WgWebinar[] }> {
+  const res = await fetch(`${API_URL}/connectors/webinargeek/webinars`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to fetch webinars");
+  return res.json();
+}
+
+export async function refreshWgWebinars(): Promise<{ count: number }> {
+  const res = await fetch(`${API_URL}/connectors/webinargeek/webinars/refresh`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to refresh webinars"));
+  return res.json();
+}
+
+export async function syncWgSubscribers(broadcastId: string): Promise<{
+  broadcast_id: string;
+  inserted: number;
+  updated: number;
+  total: number;
+}> {
+  const res = await fetch(
+    `${API_URL}/connectors/webinargeek/webinars/${encodeURIComponent(broadcastId)}/sync`,
+    { method: "POST", headers: authHeaders() }
+  );
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to sync subscribers"));
+  return res.json();
+}

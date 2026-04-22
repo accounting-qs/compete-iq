@@ -3,7 +3,10 @@
 import { useState, useMemo, useEffect } from "react";
 import {
   fetchStatisticsWebinars,
+  fetchWgWebinars,
+  syncWgSubscribers,
   type ApiStatisticsWebinar,
+  type WgWebinar,
 } from "@/lib/api";
 import {
   METRIC_COLUMNS,
@@ -68,6 +71,34 @@ export function StatisticsPage() {
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(true);
+
+  /* ── WebinarGeek sync ──────────────────────────────────────────── */
+  const [wgWebinars, setWgWebinars] = useState<WgWebinar[]>([]);
+  const [wgSelected, setWgSelected] = useState<string>("");
+  const [wgSyncing, setWgSyncing] = useState(false);
+  const [wgMessage, setWgMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchWgWebinars()
+      .then(({ webinars }) => setWgWebinars(webinars))
+      .catch(() => { /* connector not configured — silently skip */ });
+  }, []);
+
+  async function handleWgSync() {
+    if (!wgSelected) return;
+    setWgSyncing(true);
+    setWgMessage(null);
+    try {
+      const res = await syncWgSubscribers(wgSelected);
+      setWgMessage(`Synced ${res.total} subscribers.`);
+      const { webinars } = await fetchWgWebinars();
+      setWgWebinars(webinars);
+    } catch (e) {
+      setWgMessage(e instanceof Error ? e.message : "Sync failed");
+    } finally {
+      setWgSyncing(false);
+    }
+  }
 
   /* ── Load data ──────────────────────────────────────────────────── */
   useEffect(() => {
@@ -164,6 +195,34 @@ export function StatisticsPage() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            {wgWebinars.length > 0 && (
+              <div className="flex items-center gap-2">
+                <select
+                  value={wgSelected}
+                  onChange={(e) => { setWgSelected(e.target.value); setWgMessage(null); }}
+                  className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-2 py-1.5 text-xs text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-violet-500 max-w-[260px]"
+                >
+                  <option value="">WebinarGeek: select broadcast…</option>
+                  {wgWebinars.map((w) => (
+                    <option key={w.broadcast_id} value={w.broadcast_id}>
+                      {w.name} — {w.broadcast_id}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={handleWgSync}
+                  disabled={!wgSelected || wgSyncing}
+                  className="px-3 py-1.5 text-xs rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {wgSyncing ? "Syncing..." : "Sync"}
+                </button>
+                {wgMessage && (
+                  <span className="text-[10px] text-zinc-500 max-w-[180px] truncate" title={wgMessage}>
+                    {wgMessage}
+                  </span>
+                )}
+              </div>
+            )}
             <input
               type="text"
               value={searchQuery}

@@ -10,6 +10,7 @@ const NAV_LINKS = [
   { href: "/upload", label: "List Upload" },
   { href: "/library", label: "Library" },
   { href: "/statistics", label: "Statistics" },
+  { href: "/connectors", label: "Connectors" },
 ];
 
 export function TopNav() {
