@@ -120,26 +120,30 @@ export function ConnectorsPage() {
         </h1>
       </div>
 
-      {/* Tabs */}
-      <div className="grid grid-cols-3 gap-2 p-1 rounded-lg bg-zinc-100 dark:bg-zinc-900/60 mb-6">
+      {/* Tabs — segmented control with purple ring on active */}
+      <div className="grid grid-cols-3 p-1.5 rounded-xl bg-zinc-100 dark:bg-zinc-900/60 mb-6">
         {([
           { key: "config", label: "Configuration" },
           { key: "broadcasts", label: "Broadcasts" },
           { key: "subscribers", label: "Subscribers" },
-        ] as const).map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            disabled={!status?.configured && t.key !== "config"}
-            className={`py-2 rounded-md text-xs font-semibold transition-colors ${
-              tab === t.key
-                ? "bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 shadow-sm"
-                : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
+        ] as const).map((t) => {
+          const active = tab === t.key;
+          const disabled = !status?.configured && t.key !== "config";
+          return (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              disabled={disabled}
+              className={`py-3 rounded-lg text-sm font-semibold transition-all ${
+                active
+                  ? "bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 ring-2 ring-violet-500 shadow-sm"
+                  : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              }`}
+            >
+              {t.label}
+            </button>
+          );
+        })}
       </div>
 
       {error && (
