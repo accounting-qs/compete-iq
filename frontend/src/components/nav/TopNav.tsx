@@ -9,6 +9,7 @@ const NAV_LINKS = [
   { href: "/copy-generator", label: "Copy Generator" },
   { href: "/upload", label: "List Upload" },
   { href: "/library", label: "Library" },
+  { href: "/statistics", label: "Statistics" },
 ];
 
 export function TopNav() {
