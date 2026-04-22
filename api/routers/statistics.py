@@ -148,18 +148,12 @@ class StatisticsResponse(BaseModel):
 async def list_statistics_webinars(source: str = "auto"):
     """Return all statistics webinars with derived metrics.
 
-    source: "auto" (default), "ghl", or "workbook".
+    source: "auto" (default — DB-backed: Planning + WebinarGeek + synced GHL),
+            "workbook" (legacy fixture, dev only).
     """
     webinars = await stats_svc.get_statistics_webinars(source=source)
 
-    # Resolve which source was actually used for the UI badge
-    if source == "workbook":
-        used = "workbook"
-    elif source == "ghl":
-        used = "ghl"
-    else:
-        used = "ghl" if await stats_svc._has_ghl_data() else "workbook"
-
+    used = "workbook" if source == "workbook" else "ghl"
     last_sync = None
     if used == "ghl":
         from services.ghl_statistics_source import get_last_sync_summary

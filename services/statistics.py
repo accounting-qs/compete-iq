@@ -252,18 +252,13 @@ async def _has_ghl_data() -> bool:
 async def get_statistics_webinars(source: str = "auto") -> list[dict[str, Any]]:
     """Return fully processed statistics webinars with derived metrics.
 
-    source: "auto" (use GHL if any completed sync, else workbook),
-            "ghl", or "workbook".
+    source: "auto" (default = DB-backed: Planning + WebinarGeek + synced GHL),
+            "workbook" (dev-only legacy fixture).
     """
-    if source == "workbook":
-        use_ghl = False
-    elif source == "ghl":
-        use_ghl = True
-    else:
-        use_ghl = await _has_ghl_data()
-
+    use_ghl = source != "workbook"  # default to DB-backed source
     src = _get_source(use_ghl)
     raw_webinars = await src.get_raw_webinars()
+    source_label = "ghl" if use_ghl else "workbook_mock"
     result: list[dict[str, Any]] = []
 
     for w in raw_webinars:
@@ -282,9 +277,14 @@ async def get_statistics_webinars(source: str = "auto") -> list[dict[str, Any]]:
                 }
             )
 
-        # Aggregate parent summary from raw child metrics, then derive
-        agg_raw = aggregate_parent_summary(raw_metrics_for_agg)
-        summary = compute_derived_metrics(agg_raw)
+        # If the source pre-computed a summary (DB-backed source does this so
+        # it can blend aggregated list bases with webinar-wide GHL/WG metrics),
+        # use it. Otherwise aggregate child rows.
+        if "summary" in w:
+            summary = compute_derived_metrics(w["summary"])
+        else:
+            agg_raw = aggregate_parent_summary(raw_metrics_for_agg)
+            summary = compute_derived_metrics(agg_raw)
 
         result.append(
             {
@@ -292,16 +292,16 @@ async def get_statistics_webinars(source: str = "auto") -> list[dict[str, Any]]:
                 "number": w["number"],
                 "date": w.get("date"),
                 "title": w.get("title"),
-                "workbookRow": w["workbookRow"],
-                "source": "workbook_mock",
+                "workbookRow": w.get("workbookRow", 0),
+                "source": source_label,
                 "summary": summary,
                 "rows": [
                     {
-                        "id": f"stat-w{w['number']}-r{r['workbookRow']}",
+                        "id": f"stat-w{w['number']}-r{r.get('workbookRow', i)}",
                         "webinarNumber": w["number"],
                         **r,
                     }
-                    for r in processed_rows
+                    for i, r in enumerate(processed_rows)
                 ],
             }
         )

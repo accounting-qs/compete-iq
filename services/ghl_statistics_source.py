@@ -16,11 +16,13 @@ import logging
 import re
 from typing import Any
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from db.models import (
-    GHLContact, GHLOpportunity, Webinar, WebinarGeekSubscriber, WebinarListAssignment,
+    GHLContact, GHLOpportunity, OutreachSender, Webinar,
+    WebinarGeekSubscriber, WebinarListAssignment,
 )
 from db.session import AsyncSessionLocal
 
@@ -181,59 +183,130 @@ async def _count_broadcast_attendees(
 # Main source class
 # ---------------------------------------------------------------------------
 
+def _row_kind_from_assignment(a: WebinarListAssignment) -> str:
+    if a.is_nonjoiners:
+        return "nonjoiners"
+    if a.is_no_list_data:
+        return "no_list_data"
+    return "list"
+
+
+def _row_for_assignment(a: WebinarListAssignment, webinar_status: str) -> dict[str, Any]:
+    """Build a child row dict from a Planning WebinarListAssignment.
+
+    Base metrics (listSize / listRemain / gcalInvited / accountsNeeded / invited)
+    are attributed to this list. GHL / WebinarGeek metrics are left null on the
+    list row since they don't decompose per list — they're computed per-webinar
+    and shown in the summary.
+    """
+    sender_name = a.sender.name if a.sender else None
+    metrics: dict[str, float | None] = {
+        "listSize": a.volume or 0,
+        "listRemain": a.remaining or 0,
+        "gcalInvited": a.gcal_invited or 0,
+        "accountsNeeded": a.accounts_used or 0,
+        "invited": a.volume or 0,
+    }
+    return {
+        "workbookRow": a.display_order or 0,
+        "kind": _row_kind_from_assignment(a),
+        "status": webinar_status,
+        "note": None,
+        "listUrl": a.list_url,
+        "description": a.description,
+        "listName": a.list_name,
+        "sendInfo": sender_name,
+        "descLabel": None,
+        "titleText": None,
+        "createdDate": a.created_at.date().isoformat() if a.created_at else None,
+        "industry": a.bucket.industry if a.bucket else None,
+        "employeeRange": a.emp_range_override,
+        "country": a.countries_override,
+        "metrics": metrics,
+    }
+
+
 class GoHighLevelStatisticsSource:
-    """Compute per-webinar metrics from synced GHL tables + webinargeek + planning."""
+    """Compute per-webinar metrics from Planning assignments + WebinarGeek
+    subscribers + synced GHL contacts/opportunities.
+
+    Returns per-list child rows (one per WebinarListAssignment) with base
+    metrics + a pre-computed summary dict combining aggregated list bases
+    and webinar-wide GHL/WG metrics.
+    """
 
     async def get_raw_webinars(self) -> list[dict[str, Any]]:
         async with AsyncSessionLocal() as db:
-            # Load all webinars ordered by number ascending (we'll sort desc in UI)
+            # Load webinars with their assignments (+bucket, +sender) in one go
             result = await db.execute(
-                select(Webinar).order_by(Webinar.number.asc())
+                select(Webinar)
+                .options(
+                    selectinload(Webinar.assignments)
+                    .selectinload(WebinarListAssignment.bucket),
+                    selectinload(Webinar.assignments)
+                    .selectinload(WebinarListAssignment.sender),
+                )
+                .order_by(Webinar.number.asc())
             )
-            webinars = list(result.scalars().all())
+            webinars = list(result.unique().scalars().all())
 
         raw_webinars: list[dict[str, Any]] = []
-        webinar_numbers = [w.number for w in webinars]
 
         for idx, w in enumerate(webinars):
-            # Find the previous webinar date for self-reg window
-            prev_date = None
-            if idx > 0:
-                prev_date = webinars[idx - 1].date
+            prev_date = webinars[idx - 1].date if idx > 0 else None
             current_date = w.date
 
+            # Per-list child rows (sorted by display_order, then id)
+            assignments = sorted(
+                w.assignments,
+                key=lambda a: (a.display_order or 0, a.created_at or 0),
+            )
+            rows = [_row_for_assignment(a, w.status) for a in assignments]
+
+            # Compute webinar-wide summary (base aggregated from lists +
+            # everything else from GHL/WG)
             async with AsyncSessionLocal() as db:
-                metrics = await self._compute_webinar_metrics(
-                    db, w, prev_date, current_date
+                summary = await self._compute_webinar_summary(
+                    db, w, assignments, prev_date, current_date,
                 )
 
             raw_webinars.append({
                 "number": w.number,
                 "date": w.date.isoformat() if w.date else None,
                 "title": w.main_title,
-                "workbookRow": 0,  # not applicable for GHL source
-                "rows": [{
-                    "workbookRow": 0,
-                    "kind": "list",
-                    "status": w.status,
-                    "note": None,
-                    "listUrl": None,
-                    "description": f"Webinar {w.number}",
-                    "listName": None,
-                    "sendInfo": None,
-                    "descLabel": None,
-                    "titleText": w.main_title,
-                    "createdDate": None,
-                    "industry": None,
-                    "employeeRange": None,
-                    "country": None,
-                    "metrics": metrics,
-                }],
+                "workbookRow": 0,
+                "rows": rows,
+                "summary": summary,
+                "status": w.status,
             })
 
-        # Return descending by number (most recent first) to match UI expectation
-        raw_webinars.reverse()
+        raw_webinars.reverse()  # descending by number for the UI
         return raw_webinars
+
+    async def _compute_webinar_summary(
+        self,
+        db: AsyncSession,
+        w: Webinar,
+        assignments: list[WebinarListAssignment],
+        prev_date,
+        current_date,
+    ) -> dict[str, float | None]:
+        """Aggregated base metrics (sum over lists) + webinar-wide GHL/WG metrics."""
+        summary: dict[str, float | None] = {
+            # Base — aggregate from lists
+            "listSize": sum((a.volume or 0) for a in assignments),
+            "listRemain": sum((a.remaining or 0) for a in assignments),
+            "gcalInvited": sum((a.gcal_invited or 0) for a in assignments),
+            "accountsNeeded": sum((a.accounts_used or 0) for a in assignments),
+            "invited": sum((a.volume or 0) for a in assignments),
+        }
+
+        # Fold in webinar-wide GHL/WG metrics (overwrites any base keys they share — none)
+        webinar_wide = await self._compute_webinar_metrics(db, w, prev_date, current_date)
+        for k, v in webinar_wide.items():
+            if k not in summary:  # keep our summed base values
+                summary[k] = v
+        return summary
 
     async def _compute_webinar_metrics(
         self,
