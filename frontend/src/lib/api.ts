@@ -933,3 +933,125 @@ export async function markContactsUsed(
   if (!res.ok) throw new Error("Failed to mark contacts as used");
   return res.json();
 }
+
+/* ── Statistics ─────────────────────────────────────────────────────────── */
+
+export interface StatisticsMetrics {
+  // Raw source fields
+  listSize: number | null;
+  listRemain: number | null;
+  gcalInvited: number | null;
+  accountsNeeded: number | null;
+  invited: number | null;
+  unsubscribes: number | null;
+  ghlPageViews: number | null;
+  lpRegs: number | null;
+  yesMarked: number | null;
+  yesAttended: number | null;
+  yes10MinPlus: number | null;
+  yesAttendBySmsClick: number | null;
+  yesBookings: number | null;
+  maybeMarked: number | null;
+  maybeAttended: number | null;
+  maybe10MinPlus: number | null;
+  maybeAttendBySmsClick: number | null;
+  maybeBookings: number | null;
+  selfRegMarked: number | null;
+  selfRegAttended: number | null;
+  selfReg10MinPlus: number | null;
+  selfRegBookings: number | null;
+  totalRegs: number | null;
+  totalAttended: number | null;
+  attendBySmsReminder: number | null;
+  total10MinPlus: number | null;
+  total30MinPlus: number | null;
+  totalBookings: number | null;
+  totalCallsDatePassed: number | null;
+  confirmed: number | null;
+  shows: number | null;
+  noShows: number | null;
+  canceled: number | null;
+  won: number | null;
+  disqualified: number | null;
+  qualified: number | null;
+  leadQualityGreat: number | null;
+  leadQualityOk: number | null;
+  leadQualityBarelyPassable: number | null;
+  leadQualityBadDq: number | null;
+  avgProjectedDealSize: number | null;
+  avgClosedDealValue: number | null;
+  // Derived fields
+  unsubPercent: number | null;
+  ctrPercent: number | null;
+  lpRegPercent: number | null;
+  yesPer1kInv: number | null;
+  yesPercent: number | null;
+  yesAttendPercent: number | null;
+  yesStay10MinPercent: number | null;
+  yesAttendBySmsClickPercent: number | null;
+  yesBookingsPer1kInv: number | null;
+  maybePer1kInv: number | null;
+  maybeAttendPercent: number | null;
+  maybeStay10MinPercent: number | null;
+  maybeAttendBySmsClickPercent: number | null;
+  maybeBookingsPer1kInv: number | null;
+  selfRegPer1kInv: number | null;
+  selfRegAttendPercent: number | null;
+  selfRegStay10MinPercent: number | null;
+  selfRegBookingsPer1kInv: number | null;
+  invitedToRegPercent: number | null;
+  regToAttendPercent: number | null;
+  invitedToAttendPercent: number | null;
+  totalAttendedPer1kInv: number | null;
+  attendBySmsReminderPercent: number | null;
+  total10MinPlusPer1kInv: number | null;
+  attend10MinPercent: number | null;
+  total30MinPlusPer1kInv: number | null;
+  attend30MinPercent: number | null;
+  bookingsPerAttended: number | null;
+  bookingsPerPast10Min: number | null;
+  totalBookingsPer1kInv: number | null;
+  showPercent: number | null;
+  closeRatePercent: number | null;
+  qualPercent: number | null;
+  [key: string]: number | null;
+}
+
+export interface ApiStatisticsRow {
+  id: string;
+  webinarNumber: number;
+  workbookRow: number;
+  kind: "list" | "nonjoiners" | "no_list_data";
+  status: string | null;
+  note: string | null;
+  listUrl: string | null;
+  description: string | null;
+  sendInfo: string | null;
+  descLabel: string | null;
+  titleText: string | null;
+  segmentName: string | null;
+  createdDate: string | null;
+  industry: string | null;
+  employeeRange: string | null;
+  country: string | null;
+  metrics: StatisticsMetrics;
+}
+
+export interface ApiStatisticsWebinar {
+  id: string;
+  number: number;
+  date: string | null;
+  title: string | null;
+  workbookRow: number;
+  source: string;
+  summary: StatisticsMetrics;
+  rows: ApiStatisticsRow[];
+}
+
+export async function fetchStatisticsWebinars(): Promise<{ webinars: ApiStatisticsWebinar[] }> {
+  const res = await fetch(`${API_URL}/statistics/webinars`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to fetch statistics");
+  return res.json();
+}
