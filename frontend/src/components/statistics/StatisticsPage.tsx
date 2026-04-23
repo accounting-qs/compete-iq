@@ -129,6 +129,30 @@ function MetricInfoModal({ col, onClose }: { col: MetricColumn; onClose: () => v
             </section>
           )}
 
+          <section>
+            <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">Scope (webinar-level vs. per-list)</div>
+            <div className="space-y-2 text-xs text-zinc-700 dark:text-zinc-300 leading-relaxed">
+              <p>
+                <span className="font-semibold text-zinc-900 dark:text-zinc-100">Webinar summary row</span>:
+                the filters below are applied directly to all records in the relevant table (GHL contacts,
+                opportunities, or WebinarGeek subscribers) — no Planning join.
+              </p>
+              <p>
+                <span className="font-semibold text-zinc-900 dark:text-zinc-100">Per-list (child) row</span>:
+                the same filters are additionally joined to the Planning list so only contacts assigned
+                to that specific list are counted. The join path is
+                <code className="mx-1 px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-[11px] text-zinc-700 dark:text-zinc-300 font-mono">
+                  contacts.assignment_id → webinar_list_assignments.id
+                </code>
+                with the contact matched to GHL by
+                <code className="mx-1 px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-[11px] text-zinc-700 dark:text-zinc-300 font-mono">
+                  LOWER(planning_contact.email) = LOWER(ghl_contact.email)
+                </code>.
+                This scoping is implicit — it applies to every metric below.
+              </p>
+            </div>
+          </section>
+
           {col.formulaText && (
             <section>
               <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">Formula</div>
