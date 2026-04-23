@@ -656,7 +656,8 @@ async def mark_contacts_used(
             WebinarListAssignment.user_id == LLOYD_USER_ID,
         )
     )
-    if not asgn_result.scalar_one_or_none():
+    assignment = asgn_result.scalar_one_or_none()
+    if not assignment:
         raise HTTPException(404, "Assignment not found")
 
     now = datetime.now(timezone.utc)
@@ -670,9 +671,12 @@ async def mark_contacts_used(
         )
         .values(outreach_status="used", used_at=now)
     )
+    marked = result.rowcount or 0
+    if marked:
+        assignment.remaining = max(0, (assignment.remaining or 0) - marked)
     await db.flush()
 
-    return {"marked": result.rowcount}
+    return {"marked": marked, "remaining": assignment.remaining}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
