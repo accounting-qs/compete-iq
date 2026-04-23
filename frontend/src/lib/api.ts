@@ -1513,3 +1513,22 @@ export async function deleteBlocklistEntry(entryId: string): Promise<void> {
     throw new Error(err.detail ?? "Failed to remove entry");
   }
 }
+
+export interface BlocklistBackfillResult {
+  wg_scanned: number;
+  wg_added: number;
+  ghl_scanned: number;
+  ghl_added: number;
+}
+
+export async function backfillBlocklist(): Promise<BlocklistBackfillResult> {
+  const res = await fetch(`${API_URL}/blocklist/backfill`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to backfill blocklist");
+  }
+  return res.json();
+}

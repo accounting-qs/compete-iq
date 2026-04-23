@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addBlocklistEntry,
+  backfillBlocklist,
   bulkAddBlocklist,
   deleteBlocklistEntry,
   fetchBlocklist,
@@ -52,6 +53,9 @@ export function BlocklistPage() {
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [backfilling, setBackfilling] = useState(false);
+  const [backfillResult, setBackfillResult] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -116,6 +120,22 @@ export function BlocklistPage() {
     }
   }, [load]);
 
+  const handleBackfill = useCallback(async () => {
+    setBackfilling(true);
+    setBackfillResult(null);
+    try {
+      const r = await backfillBlocklist();
+      setBackfillResult(
+        `WebinarGeek: +${r.wg_added} new (scanned ${r.wg_scanned}) · GHL: +${r.ghl_added} new (scanned ${r.ghl_scanned})`
+      );
+      await load();
+    } catch (err) {
+      setBackfillResult(err instanceof Error ? err.message : "Backfill failed");
+    } finally {
+      setBackfilling(false);
+    }
+  }, [load]);
+
   const handleDelete = useCallback(async (id: string, email: string) => {
     if (!confirm(`Remove ${email} from the blocklist?`)) return;
     try {
@@ -151,11 +171,32 @@ export function BlocklistPage() {
               assigning buckets and hidden on the list contacts tab.
             </p>
           </div>
-          <div className="text-right">
-            <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Total</div>
-            <div className="text-2xl font-mono text-zinc-900 dark:text-zinc-100">{total.toLocaleString()}</div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleBackfill}
+              disabled={backfilling}
+              title="Scan already-synced WebinarGeek subscribers and GHL contacts for unsubscribes and add any missing ones to the blocklist."
+              className="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 disabled:cursor-wait text-white text-xs font-semibold rounded-md transition-colors inline-flex items-center gap-1.5"
+            >
+              {backfilling && (
+                <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+              )}
+              {backfilling ? "Backfilling…" : "Backfill from syncs"}
+            </button>
+            <div className="text-right">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Total</div>
+              <div className="text-2xl font-mono text-zinc-900 dark:text-zinc-100">{total.toLocaleString()}</div>
+            </div>
           </div>
         </div>
+        {backfillResult && (
+          <div className="mb-4 text-xs text-violet-700 dark:text-violet-300 bg-violet-50 dark:bg-violet-500/10 border border-violet-200 dark:border-violet-500/20 rounded-md px-3 py-2">
+            {backfillResult}
+          </div>
+        )}
 
         {/* ── Source breakdown ──────────────────────────────────────── */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">

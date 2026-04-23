@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import require_auth
 from api.routers.outreach._helpers import LLOYD_USER_ID
-from db.models import BlocklistEntry
+from db.models import BlocklistEntry, GHLContact, WebinarGeekSubscriber
 from db.session import get_db
 
 logger = logging.getLogger(__name__)
@@ -164,3 +164,81 @@ async def delete_blocklist_entry(
     )
     if result.rowcount == 0:
         raise HTTPException(404, "Entry not found")
+
+
+@router.post("/backfill")
+async def backfill_blocklist(
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Scan already-synced WebinarGeek subscribers + GHL contacts and upsert
+    any unsubscribes/DNDs into the blocklist. Idempotent — existing entries
+    keep their original source/created_at via ON CONFLICT DO NOTHING.
+    """
+    added_wg = 0
+    added_ghl = 0
+
+    # WebinarGeek unsubscribes
+    wg_rows = (await db.execute(
+        select(
+            WebinarGeekSubscriber.email,
+            WebinarGeekSubscriber.unsubscribe_source,
+            WebinarGeekSubscriber.subscriber_id,
+        ).where(WebinarGeekSubscriber.unsubscribed_at.isnot(None))
+    )).all()
+    wg_payload: list[dict] = []
+    seen_wg: set[str] = set()
+    for email, unsub_source, sub_id in wg_rows:
+        e = _normalize(email or "")
+        if not _valid_email(e) or e in seen_wg:
+            continue
+        seen_wg.add(e)
+        wg_payload.append({
+            "user_id": LLOYD_USER_ID,
+            "email": e,
+            "source": "wg_unsub",
+            "reason": unsub_source or "WebinarGeek unsubscribed",
+            "source_ref": sub_id,
+        })
+    if wg_payload:
+        stmt = pg_insert(BlocklistEntry).values(wg_payload).on_conflict_do_nothing(
+            index_elements=["user_id", "email"]
+        )
+        result = await db.execute(stmt)
+        added_wg = result.rowcount or 0
+
+    # GHL cold-calendar unsubscribes
+    ghl_rows = (await db.execute(
+        select(GHLContact.email, GHLContact.ghl_contact_id)
+        .where(
+            GHLContact.cold_calendar_unsubscribe_date.isnot(None),
+            GHLContact.email.isnot(None),
+        )
+    )).all()
+    ghl_payload: list[dict] = []
+    seen_ghl: set[str] = set()
+    for email, contact_id in ghl_rows:
+        e = _normalize(email or "")
+        if not _valid_email(e) or e in seen_ghl:
+            continue
+        seen_ghl.add(e)
+        ghl_payload.append({
+            "user_id": LLOYD_USER_ID,
+            "email": e,
+            "source": "ghl_dnd",
+            "reason": "GHL cold calendar unsubscribe",
+            "source_ref": contact_id,
+        })
+    if ghl_payload:
+        stmt = pg_insert(BlocklistEntry).values(ghl_payload).on_conflict_do_nothing(
+            index_elements=["user_id", "email"]
+        )
+        result = await db.execute(stmt)
+        added_ghl = result.rowcount or 0
+
+    return {
+        "wg_scanned": len(wg_rows),
+        "wg_added": added_wg,
+        "ghl_scanned": len(ghl_rows),
+        "ghl_added": added_ghl,
+    }
