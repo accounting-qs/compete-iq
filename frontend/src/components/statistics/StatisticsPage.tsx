@@ -86,20 +86,29 @@ const sSendSp = `${L_SEND} ${Z_ROW} ${BG_SPECIAL}`;
 
 /* ─── Metric info modal ──────────────────────────────────────────────── */
 
+const ENTITY_COLOR: Record<string, string> = {
+  "GHL Contact": "bg-violet-500/15 text-violet-500 border-violet-500/30",
+  "GHL Opportunity": "bg-sky-500/15 text-sky-500 border-sky-500/30",
+  "WebinarGeek Subscriber": "bg-emerald-500/15 text-emerald-500 border-emerald-500/30",
+  "Planning Assignment": "bg-amber-500/15 text-amber-500 border-amber-500/30",
+  "Webinar": "bg-zinc-500/15 text-zinc-400 border-zinc-500/30",
+  "Computed": "bg-zinc-500/15 text-zinc-400 border-zinc-500/30",
+};
+
 function MetricInfoModal({ col, onClose }: { col: MetricColumn; onClose: () => void }) {
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4 py-8"
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-xl shadow-2xl max-w-xl w-[90vw] max-h-[80vh] overflow-y-auto"
+        className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-xl shadow-2xl max-w-3xl w-full max-h-[85vh] overflow-y-auto"
       >
-        <div className="flex items-start justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-800">
+        <div className="flex items-start justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-800 sticky top-0 bg-white dark:bg-zinc-900 z-10">
           <div>
             <div className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold mb-0.5">{col.group}</div>
-            <div className="text-sm font-bold text-zinc-900 dark:text-zinc-100">{col.label}</div>
+            <div className="text-base font-bold text-zinc-900 dark:text-zinc-100">{col.label}</div>
             <div className="text-[10px] font-mono text-zinc-500 mt-0.5">{col.key}</div>
           </div>
           <button
@@ -112,29 +121,70 @@ function MetricInfoModal({ col, onClose }: { col: MetricColumn; onClose: () => v
             </svg>
           </button>
         </div>
-        <div className="px-6 py-4 space-y-4 text-sm">
+        <div className="px-6 py-5 space-y-5 text-sm">
           {col.description && (
             <section>
-              <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-1">What it tracks</div>
-              <p className="text-zinc-800 dark:text-zinc-200">{col.description}</p>
+              <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">What it tracks</div>
+              <p className="text-zinc-800 dark:text-zinc-200 leading-relaxed">{col.description}</p>
             </section>
           )}
+
           {col.formulaText && (
             <section>
-              <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-1">Formula</div>
-              <code className="block bg-zinc-100 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700/50 rounded px-3 py-2 text-xs text-zinc-800 dark:text-zinc-200 font-mono">
+              <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">Formula</div>
+              <code className="block bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-700/50 rounded-lg px-4 py-3 text-sm text-zinc-900 dark:text-zinc-100 font-mono overflow-x-auto whitespace-pre">
                 {col.formulaText}
               </code>
             </section>
           )}
+
+          {col.fieldsUsed && col.fieldsUsed.length > 0 && (
+            <section>
+              <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-2">Data fields used</div>
+              <div className="rounded-lg border border-zinc-200 dark:border-zinc-800/60 overflow-hidden">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="bg-zinc-50 dark:bg-zinc-900/60 border-b border-zinc-200 dark:border-zinc-800/60">
+                      <th className="text-left px-3 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Entity</th>
+                      <th className="text-left px-3 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Field</th>
+                      <th className="text-left px-3 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">Filter</th>
+                      <th className="text-left px-3 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px]">GHL ID</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {col.fieldsUsed.map((f, i) => (
+                      <tr key={i} className="border-t border-zinc-200 dark:border-zinc-800/40">
+                        <td className="px-3 py-2 align-top">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-semibold border whitespace-nowrap ${ENTITY_COLOR[f.entity] ?? "bg-zinc-500/15 text-zinc-400 border-zinc-500/30"}`}>
+                            {f.entity}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 font-mono text-[11px] text-zinc-800 dark:text-zinc-200 align-top">
+                          {f.field}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-[11px] text-zinc-600 dark:text-zinc-400 align-top">
+                          {f.filter ?? "—"}
+                        </td>
+                        <td className="px-3 py-2 font-mono text-[10px] text-zinc-500 align-top">
+                          {f.fieldId ?? "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
           {col.source && (
             <section>
-              <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-1">Data source / filter</div>
+              <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">Notes</div>
               <p className="text-zinc-700 dark:text-zinc-300 text-xs leading-relaxed whitespace-pre-wrap">{col.source}</p>
             </section>
           )}
+
           <section>
-            <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-1">Display</div>
+            <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-1.5">Display</div>
             <p className="text-zinc-700 dark:text-zinc-300 text-xs">
               Format: <code className="font-mono text-zinc-500">{col.format}</code>
               {col.decimals != null && <> · decimals: <code className="font-mono text-zinc-500">{col.decimals}</code></>}
