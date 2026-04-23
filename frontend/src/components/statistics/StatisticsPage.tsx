@@ -666,9 +666,9 @@ export function StatisticsPage() {
   }
 
   return (
-    <div>
+    <div className="flex flex-col" style={{ height: "calc(100vh - 48px)" }}>
       {/* ── Sticky header ──────────────────────────────────────────── */}
-      <div className="sticky top-12 z-40 bg-white dark:bg-zinc-950/90 backdrop-blur-md border-b border-zinc-200 dark:border-zinc-800/40 px-6 py-3">
+      <div className="flex-none z-40 bg-white dark:bg-zinc-950/90 backdrop-blur-md border-b border-zinc-200 dark:border-zinc-800/40 px-6 py-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-6">
             <h1 className="text-lg font-bold text-zinc-900 dark:text-zinc-100 tracking-tight">Statistics</h1>
@@ -761,9 +761,9 @@ export function StatisticsPage() {
       </div>
 
       {/* ── Table ──────────────────────────────────────────────────── */}
-      <div className="overflow-x-auto">
+      <div className="flex-1 overflow-auto">
         <table className="w-full text-xs min-w-[3200px]">
-          <thead>
+          <thead className="sticky top-0 z-30">
             {/* Row 1: Group spans */}
             <tr className="bg-zinc-50 dark:bg-zinc-900/90 border-b border-zinc-100 dark:border-zinc-800/20">
               <th colSpan={IDENTITY_COL_COUNT} className={`px-2 py-1 ${L_DESC} ${Z_HEADER} ${BG_HEADER}`}></th>
