@@ -2112,7 +2112,7 @@ export function PlanningPage() {
                         {l.title ? (
                           <div
                             className="max-w-[240px] cursor-pointer group/title"
-                            onClick={() => l.titleVariants && l.titleVariants.length > 0 && openVariationsModal(l.id, w.id, "title")}
+                            onClick={() => openVariationsModal(l.id, w.id, "title")}
                           >
                             {(() => {
                               const selectedTitle = l.titleVariants?.find(v => v.selected);
@@ -2127,6 +2127,16 @@ export function PlanningPage() {
                               {l.titleVariants && l.titleVariants.length > 1 ? `${l.titleVariants.length} variations` : "View →"}
                             </span>
                           </div>
+                        ) : (l.bucketId || l.sourceUploadId) ? (
+                          // No title selected yet — let the user open the modal
+                          // to pick a variant manually (can happen when the bucket
+                          // has no primary copy set at assignment time).
+                          <button
+                            onClick={() => openVariationsModal(l.id, w.id, "title")}
+                            className="text-[10px] font-semibold px-2 py-1 rounded border border-dashed border-zinc-400 dark:border-zinc-700 text-zinc-500 hover:text-violet-500 hover:border-violet-400 dark:hover:border-violet-500 transition-colors"
+                          >
+                            + Pick title
+                          </button>
                         ) : <span className="text-zinc-600">—</span>}
                       </td>
                       <td className="px-2 py-1.5">
@@ -2136,7 +2146,7 @@ export function PlanningPage() {
                           return descText ? (
                             <div
                               className="max-w-[240px] cursor-pointer group/desc"
-                              onClick={() => l.descVariants && l.descVariants.length > 0 && openVariationsModal(l.id, w.id, "description")}
+                              onClick={() => openVariationsModal(l.id, w.id, "description")}
                             >
                               {selectedDesc && l.descVariants && l.descVariants.length > 1 && (
                                 <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400 inline-block mb-0.5">
@@ -2148,6 +2158,13 @@ export function PlanningPage() {
                                 {l.descVariants && l.descVariants.length > 1 ? `${l.descVariants.length} variations` : "View →"}
                               </span>
                             </div>
+                          ) : (l.bucketId || l.sourceUploadId) ? (
+                            <button
+                              onClick={() => openVariationsModal(l.id, w.id, "description")}
+                              className="text-[10px] font-semibold px-2 py-1 rounded border border-dashed border-zinc-400 dark:border-zinc-700 text-zinc-500 hover:text-blue-500 hover:border-blue-400 dark:hover:border-blue-500 transition-colors"
+                            >
+                              + Pick description
+                            </button>
                           ) : <span className="text-zinc-600">—</span>;
                         })()}
                       </td>

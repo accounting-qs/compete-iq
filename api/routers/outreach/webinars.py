@@ -266,20 +266,27 @@ async def assign_bucket(
         available_count = available_count_result.scalar() or 0
         desc_str = upload.custom_list_name or upload.file_name
 
-        # Find primary copies for this custom list (by upload_id)
+        # Copies for this custom list (by upload_id). Prefer primary; fall
+        # back to the lowest variant_index so every assignment has a default
+        # selection the user can override via the Variations modal.
         from db.models import BucketCopy
         copies_result = await db.execute(
             select(BucketCopy).where(
                 BucketCopy.upload_id == body.upload_id,
                 BucketCopy.deleted_at.is_(None),
-                BucketCopy.is_primary.is_(True),
             )
         )
-        for c in copies_result.scalars():
-            if c.copy_type == "title" and not title_copy:
-                title_copy = c
-            elif c.copy_type == "description" and not desc_copy:
-                desc_copy = c
+        all_copies = list(copies_result.scalars())
+        for copy_type in ("title", "description"):
+            candidates = [c for c in all_copies if c.copy_type == copy_type]
+            if not candidates:
+                continue
+            chosen = next((c for c in candidates if c.is_primary), None) \
+                or min(candidates, key=lambda c: (c.variant_index, c.created_at))
+            if copy_type == "title":
+                title_copy = chosen
+            else:
+                desc_copy = chosen
     else:
         # Validate bucket
         b_result = await db.execute(
@@ -300,9 +307,19 @@ async def assign_bucket(
         )
         available_count = available_count_result.scalar() or 0
 
-        # Find primary copies for this bucket
-        title_copy = next((c for c in (bucket.copies or []) if c.copy_type == "title" and c.is_primary and not c.deleted_at), None)
-        desc_copy = next((c for c in (bucket.copies or []) if c.copy_type == "description" and c.is_primary and not c.deleted_at), None)
+        # Prefer the primary copy; fall back to any non-deleted copy
+        # (lowest variant_index) so every assignment has a default selection
+        # the user can override via the Variations modal's "Pick for list".
+        def _pick_copy(copy_type: str):
+            candidates = [c for c in (bucket.copies or []) if c.copy_type == copy_type and not c.deleted_at]
+            if not candidates:
+                return None
+            primary = next((c for c in candidates if c.is_primary), None)
+            if primary:
+                return primary
+            return min(candidates, key=lambda c: (c.variant_index, c.created_at))
+        title_copy = _pick_copy("title")
+        desc_copy = _pick_copy("description")
 
         countries = body.countries_override or ", ".join(bucket.countries or [])
         emp = body.emp_range_override or bucket.emp_range or ""
