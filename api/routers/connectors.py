@@ -33,7 +33,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import require_auth
-from db.models import ConnectorCredential, WebinarGeekWebinar, WebinarGeekSubscriber
+from api.routers.outreach._helpers import LLOYD_USER_ID
+from db.models import BlocklistEntry, ConnectorCredential, WebinarGeekWebinar, WebinarGeekSubscriber
 from db.session import get_db
 from integrations import webinargeek_client as wg
 
@@ -164,6 +165,7 @@ def _subscriber_values(broadcast_id: str, s: dict) -> dict:
 
 async def _sync_one_broadcast(db: AsyncSession, api_key: str, broadcast_id: str) -> int:
     subs = await wg.list_subscriptions(api_key, broadcast_id)
+    blocklist_rows: list[dict] = []
     for s in subs:
         values = _subscriber_values(broadcast_id, s)
         if not values["email"]:
@@ -174,6 +176,29 @@ async def _sync_one_broadcast(db: AsyncSession, api_key: str, broadcast_id: str)
             set_={k: v for k, v in values.items() if k not in ("broadcast_id", "email")},
         )
         await db.execute(stmt)
+        if values.get("unsubscribed_at"):
+            blocklist_rows.append({
+                "user_id": LLOYD_USER_ID,
+                "email": values["email"].lower(),
+                "source": "wg_unsub",
+                "reason": values.get("unsubscribe_source") or "WebinarGeek unsubscribed",
+                "source_ref": values.get("subscriber_id"),
+            })
+    if blocklist_rows:
+        seen: set[str] = set()
+        deduped = []
+        for r in blocklist_rows:
+            if r["email"] in seen:
+                continue
+            seen.add(r["email"])
+            deduped.append(r)
+        bl_stmt = pg_insert(BlocklistEntry).values(deduped).on_conflict_do_nothing(
+            index_elements=["user_id", "email"]
+        )
+        try:
+            await db.execute(bl_stmt)
+        except Exception as exc:
+            logger.warning("Failed to upsert blocklist from WG broadcast %s: %s", broadcast_id, exc)
     return len(subs)
 
 

@@ -14,10 +14,16 @@ type StatusFilter = "assigned" | "used" | "all";
 
 /* ─── Main Component ──────────────────────────────────────────────────────── */
 
-export function ContactsPage({ assignmentId }: { assignmentId: string }) {
+export function ContactsPage({
+  assignmentId,
+  initialTab = "assigned",
+}: {
+  assignmentId: string;
+  initialTab?: StatusFilter;
+}) {
   const [data, setData] = useState<AssignmentContactsResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<StatusFilter>("assigned");
+  const [filter, setFilter] = useState<StatusFilter>(initialTab);
   const [selectCount, setSelectCount] = useState<number>(0);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [copying, setCopying] = useState(false);

@@ -17,7 +17,7 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import GHLContact, GHLOpportunity, GHLSyncRun, GHLSyncSettings, GHLWebinarStats
+from db.models import BlocklistEntry, GHLContact, GHLOpportunity, GHLSyncRun, GHLSyncSettings, GHLWebinarStats
 from db.session import AsyncSessionLocal
 from integrations.ghl_client import (
     CONTACT_FIELD_BOOK_CAMPAIGN_MEDIUM,
@@ -170,6 +170,33 @@ async def _upsert_contacts_batch(db: AsyncSession, rows: list[dict]) -> None:
         index_elements=["ghl_contact_id"], set_=update_cols,
     )
     await db.execute(stmt)
+    await _upsert_blocklist_from_ghl_batch(db, rows)
+
+
+async def _upsert_blocklist_from_ghl_batch(db: AsyncSession, rows: list[dict]) -> None:
+    """Push GHL DND contacts (cold_calendar_unsubscribe_date set) into blocklist."""
+    from api.routers.outreach._helpers import LLOYD_USER_ID
+
+    dnd_rows = [
+        {
+            "user_id": LLOYD_USER_ID,
+            "email": r["email"],
+            "source": "ghl_dnd",
+            "reason": "GHL cold calendar unsubscribe",
+            "source_ref": r.get("ghl_contact_id"),
+        }
+        for r in rows
+        if r.get("email") and r.get("cold_calendar_unsubscribe_date")
+    ]
+    if not dnd_rows:
+        return
+    stmt = pg_insert(BlocklistEntry).values(dnd_rows).on_conflict_do_nothing(
+        index_elements=["user_id", "email"]
+    )
+    try:
+        await db.execute(stmt)
+    except Exception as exc:
+        logger.warning("Failed to upsert blocklist from GHL batch: %s", exc)
 
 
 async def _upsert_opps_batch(db: AsyncSession, rows: list[dict]) -> None:

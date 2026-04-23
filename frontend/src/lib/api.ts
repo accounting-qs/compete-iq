@@ -55,8 +55,13 @@ export interface ApiBucket {
   id: string;
   name: string;
   industry: string | null;
+  // Legit counts (raw minus blocklisted); raw counts available as *_raw
   total_contacts: number;
   remaining_contacts: number;
+  total_contacts_raw?: number;
+  remaining_contacts_raw?: number;
+  blocklisted_total?: number;
+  blocklisted_available?: number;
   countries: string[];
   emp_range: string | null;
   source_file: string | null;
@@ -116,8 +121,13 @@ export interface ApiAssignment {
   sender: { id: string; name: string; color: string | null } | null;
   description: string | null;
   list_url: string | null;
+  // Legit counts (raw minus blocklisted); raw counts available as *_raw
   volume: number;
   remaining: number;
+  volume_raw?: number;
+  remaining_raw?: number;
+  blocklisted_total?: number;
+  blocklisted_assigned?: number;
   gcal_invited: number;
   accounts_used: number;
   send_per_account: number | null;
@@ -1421,4 +1431,85 @@ export function wgSubscribersCsvUrl(opts: { broadcast_id?: string; q?: string })
   if (opts.broadcast_id) params.set("broadcast_id", opts.broadcast_id);
   if (opts.q) params.set("q", opts.q);
   return `${API_URL}/connectors/webinargeek/subscribers/export?${params}`;
+}
+
+/* ── Blocklist ─────────────────────────────────────────────────────────── */
+
+export type BlocklistSource = "ghl_dnd" | "wg_unsub" | "manual" | "csv";
+
+export interface BlocklistEntry {
+  id: string;
+  email: string;
+  source: BlocklistSource;
+  reason: string | null;
+  source_ref: string | null;
+  created_at: string | null;
+}
+
+export interface BlocklistListResponse {
+  entries: BlocklistEntry[];
+  total: number;
+  by_source: Partial<Record<BlocklistSource, number>>;
+}
+
+export async function fetchBlocklist(opts: {
+  q?: string;
+  source?: BlocklistSource;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<BlocklistListResponse> {
+  const params = new URLSearchParams();
+  if (opts.q) params.set("q", opts.q);
+  if (opts.source) params.set("source", opts.source);
+  if (opts.limit != null) params.set("limit", String(opts.limit));
+  if (opts.offset != null) params.set("offset", String(opts.offset));
+  const qs = params.toString();
+  const res = await fetch(`${API_URL}/blocklist${qs ? `?${qs}` : ""}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to fetch blocklist");
+  return res.json();
+}
+
+export async function addBlocklistEntry(data: {
+  email: string;
+  reason?: string;
+}): Promise<BlocklistEntry> {
+  const res = await fetch(`${API_URL}/blocklist`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to add entry");
+  }
+  return res.json();
+}
+
+export async function bulkAddBlocklist(data: {
+  emails: string[];
+  reason?: string;
+}): Promise<{ added: number; skipped: number; invalid: number }> {
+  const res = await fetch(`${API_URL}/blocklist/bulk`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to import emails");
+  }
+  return res.json();
+}
+
+export async function deleteBlocklistEntry(entryId: string): Promise<void> {
+  const res = await fetch(`${API_URL}/blocklist/${entryId}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to remove entry");
+  }
 }

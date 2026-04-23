@@ -30,6 +30,7 @@ from db.models.connectors import (  # noqa: F401
 from db.models.ghl import (  # noqa: F401
     GHLContact, GHLOpportunity, GHLSyncRun, GHLSyncSettings, GHLWebinarStats,
 )
+from db.models.blocklist import BlocklistEntry  # noqa: F401
 
 # Re-export Base so `from db.models import Base` keeps working
 from db.base import Base  # noqa: F401

@@ -1,27 +1,121 @@
 """
 Shared constants and serialization helpers for outreach sub-routers.
 """
-from db.models import OutreachBucket, BucketCopy, OutreachSender, Webinar, WebinarListAssignment
+from sqlalchemy import and_, func as sa_func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from db.models import (
+    BlocklistEntry, BucketCopy, Contact, OutreachBucket, OutreachSender,
+    Webinar, WebinarListAssignment,
+)
 
 # Hardcoded to Lloyd's user_id — single-tenant for now
 LLOYD_USER_ID = "9baf8117-db65-4f30-87a5-a76cf4f23d82"
 
 
+# ── Blocklist helpers ─────────────────────────────────────────────────────
+
+def _blocklist_email_subquery():
+    """A scalar subquery yielding every blocklisted email for the current user.
+
+    Blocklist emails are stored already lowercased, so callers should
+    compare against LOWER(Contact.email).
+    """
+    return (
+        select(BlocklistEntry.email)
+        .where(BlocklistEntry.user_id == LLOYD_USER_ID)
+        .scalar_subquery()
+    )
+
+
+async def compute_blocklist_counts_per_bucket(
+    db: AsyncSession, bucket_ids: list[str]
+) -> dict[str, dict]:
+    """Return {bucket_id: {"total": N, "available": M}} of blocklisted contacts.
+
+    - total: blocklisted contacts in the bucket, any status.
+    - available: blocklisted contacts still in outreach_status='available'.
+    """
+    if not bucket_ids:
+        return {}
+    blocklisted_expr = sa_func.lower(Contact.email).in_(_blocklist_email_subquery())
+    result = await db.execute(
+        select(
+            Contact.bucket_id,
+            sa_func.count().filter(blocklisted_expr).label("total"),
+            sa_func.count().filter(
+                and_(Contact.outreach_status == "available", blocklisted_expr)
+            ).label("available"),
+        )
+        .where(Contact.bucket_id.in_(bucket_ids))
+        .group_by(Contact.bucket_id)
+    )
+    return {
+        row.bucket_id: {"total": row.total or 0, "available": row.available or 0}
+        for row in result
+    }
+
+
+async def compute_blocklist_counts_per_assignment(
+    db: AsyncSession, assignment_ids: list[str]
+) -> dict[str, dict]:
+    """Return {assignment_id: {"total": N, "assigned": M}} of blocklisted contacts.
+
+    - total: blocklisted contacts ever claimed by the assignment (any status).
+    - assigned: blocklisted contacts still in outreach_status='assigned'.
+    """
+    if not assignment_ids:
+        return {}
+    blocklisted_expr = sa_func.lower(Contact.email).in_(_blocklist_email_subquery())
+    result = await db.execute(
+        select(
+            Contact.assignment_id,
+            sa_func.count().filter(blocklisted_expr).label("total"),
+            sa_func.count().filter(
+                and_(Contact.outreach_status == "assigned", blocklisted_expr)
+            ).label("assigned"),
+        )
+        .where(Contact.assignment_id.in_(assignment_ids))
+        .group_by(Contact.assignment_id)
+    )
+    return {
+        row.assignment_id: {"total": row.total or 0, "assigned": row.assigned or 0}
+        for row in result
+    }
+
+
 # ── Serialization helpers ─────────────────────────────────────────────────
 
-def bucket_dict(b: OutreachBucket, include_copies: bool = False, assigned_copy_ids: set[str] | None = None) -> dict:
+def bucket_dict(
+    b: OutreachBucket,
+    include_copies: bool = False,
+    assigned_copy_ids: set[str] | None = None,
+    blocklist_counts: dict | None = None,
+) -> dict:
     try:
         all_copies = b.copies or []
     except Exception:
         all_copies = []
     titles = [c for c in all_copies if c.copy_type == "title" and not c.deleted_at]
     descs = [c for c in all_copies if c.copy_type == "description" and not c.deleted_at]
+    bl = blocklist_counts or {}
+    blocklisted_total = bl.get("total", 0)
+    blocklisted_available = bl.get("available", 0)
+    raw_total = b.total_contacts or 0
+    raw_remaining = b.remaining_contacts or 0
     d = {
         "id": b.id,
         "name": b.name,
         "industry": b.industry,
-        "total_contacts": b.total_contacts,
-        "remaining_contacts": b.remaining_contacts,
+        # Counts exposed to the UI exclude blocklisted contacts so the user
+        # sees only the volume they can actually use. Raw values are kept as
+        # *_raw for diagnostics or future UI.
+        "total_contacts": max(0, raw_total - blocklisted_total),
+        "remaining_contacts": max(0, raw_remaining - blocklisted_available),
+        "total_contacts_raw": raw_total,
+        "remaining_contacts_raw": raw_remaining,
+        "blocklisted_total": blocklisted_total,
+        "blocklisted_available": blocklisted_available,
         "countries": b.countries or [],
         "emp_range": b.emp_range,
         "source_file": b.source_file,
@@ -86,7 +180,15 @@ def webinar_dict(w: Webinar) -> dict:
     }
 
 
-def assignment_dict(a: WebinarListAssignment) -> dict:
+def assignment_dict(
+    a: WebinarListAssignment,
+    blocklist_counts: dict | None = None,
+) -> dict:
+    bl = blocklist_counts or {}
+    blocklisted_total = bl.get("total", 0)
+    blocklisted_assigned = bl.get("assigned", 0)
+    raw_volume = a.volume or 0
+    raw_remaining = a.remaining or 0
     return {
         "id": a.id,
         "webinar_id": a.webinar_id,
@@ -94,8 +196,14 @@ def assignment_dict(a: WebinarListAssignment) -> dict:
         "sender": {"id": a.sender.id, "name": a.sender.name, "color": a.sender.color} if a.sender else None,
         "description": a.description,
         "list_url": a.list_url,
-        "volume": a.volume,
-        "remaining": a.remaining,
+        # Volume / remaining shown to the user exclude blocklisted contacts
+        # so the displayed list size matches what is actually usable.
+        "volume": max(0, raw_volume - blocklisted_total),
+        "remaining": max(0, raw_remaining - blocklisted_assigned),
+        "volume_raw": raw_volume,
+        "remaining_raw": raw_remaining,
+        "blocklisted_total": blocklisted_total,
+        "blocklisted_assigned": blocklisted_assigned,
         "gcal_invited": a.gcal_invited,
         "accounts_used": a.accounts_used,
         "send_per_account": a.send_per_account,

@@ -113,6 +113,9 @@ interface PlannedList {
   sender: string;
   listSize: number;
   listRemain: number;
+  // Blocklist breakdown for tooltip
+  listVolumeRaw: number;
+  listBlocklistedTotal: number;
   title: string;
   accountsNeeded: number;
   listName?: string;
@@ -218,6 +221,8 @@ function apiAssignmentToList(a: ApiAssignment): PlannedList {
     senderColor: a.sender?.color || undefined,
     listSize: a.volume,
     listRemain: a.remaining,
+    listVolumeRaw: a.volume_raw ?? a.volume,
+    listBlocklistedTotal: a.blocklisted_total ?? 0,
     title: a.title_copy?.text || "",
     accountsNeeded: a.accounts_used,
     isNonjoiners: a.is_nonjoiners,
@@ -2059,12 +2064,13 @@ export function PlanningPage() {
                       </td>
                       <td className="px-2 py-1.5"><SenderBadge name={l.sender} color={l.senderColor} /></td>
                       <td className="px-2 py-1.5 text-right font-mono">
-                        {l.listSize > 0 ? (
+                        {l.listVolumeRaw > 0 ? (
                           <a
-                            href={`/contacts/${l.id}`}
+                            href={`/contacts/${l.id}?tab=all`}
                             target="_blank"
                             rel="noopener noreferrer"
                             onClick={(e) => e.stopPropagation()}
+                            title={`Total: ${l.listVolumeRaw.toLocaleString()} · Blocklisted: ${l.listBlocklistedTotal.toLocaleString()} · Available: ${l.listSize.toLocaleString()}`}
                             className="text-violet-500 hover:text-violet-400 underline underline-offset-2 decoration-violet-500/30 hover:decoration-violet-400/50 transition-colors"
                           >
                             {l.listSize.toLocaleString()}
@@ -2072,7 +2078,17 @@ export function PlanningPage() {
                         ) : ""}
                       </td>
                       <td className="px-2 py-1.5 text-right">
-                        <span className="font-mono text-violet-400">{l.listRemain > 0 ? l.listRemain.toLocaleString() : l.listSize > 0 ? "0" : ""}</span>
+                        {l.listVolumeRaw > 0 ? (
+                          <a
+                            href={`/contacts/${l.id}?tab=assigned`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="font-mono text-violet-400 hover:text-violet-300 underline underline-offset-2 decoration-violet-500/30 hover:decoration-violet-400/50 transition-colors"
+                          >
+                            {l.listRemain > 0 ? l.listRemain.toLocaleString() : "0"}
+                          </a>
+                        ) : <span className="font-mono text-violet-400"></span>}
                       </td>
                       <td className="px-2 py-1.5">
                         {l.title ? (

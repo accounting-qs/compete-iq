@@ -12,7 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from api.auth import require_auth
-from api.routers.outreach._helpers import LLOYD_USER_ID, bucket_dict, copy_dict
+from api.routers.outreach._helpers import (
+    LLOYD_USER_ID, bucket_dict, compute_blocklist_counts_per_bucket, copy_dict,
+)
 from api.schemas import (
     BucketCreate, BucketMergeRequest, BucketUpdate, CopyBulkGenerateRequest,
     CopyCreate, CopyGenerateRequest, CopyRegenerateRequest, CopyUpdate,
@@ -91,7 +93,17 @@ async def list_buckets(
             if row.desc_copy_id:
                 assigned_copy_ids.add(row.desc_copy_id)
 
-    return {"buckets": [bucket_dict(b, include_copies=(include == "copies"), assigned_copy_ids=assigned_copy_ids) for b in buckets]}
+    blocklist_counts = await compute_blocklist_counts_per_bucket(db, bucket_ids)
+
+    return {"buckets": [
+        bucket_dict(
+            b,
+            include_copies=(include == "copies"),
+            assigned_copy_ids=assigned_copy_ids,
+            blocklist_counts=blocklist_counts.get(b.id),
+        )
+        for b in buckets
+    ]}
 
 
 @router.post("/buckets", status_code=201)

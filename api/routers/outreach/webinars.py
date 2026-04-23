@@ -14,7 +14,8 @@ from sqlalchemy.orm import selectinload, undefer
 
 from api.auth import require_auth
 from api.routers.outreach._helpers import (
-    LLOYD_USER_ID, webinar_dict, assignment_dict, copy_dict,
+    LLOYD_USER_ID, _blocklist_email_subquery, assignment_dict,
+    compute_blocklist_counts_per_assignment, copy_dict, webinar_dict,
 )
 from api.schemas import WebinarCreate, WebinarUpdate, AssignRequest, AssignmentUpdate
 from db.models import (
@@ -189,7 +190,14 @@ async def get_webinar_lists(
         .order_by(WebinarListAssignment.display_order, WebinarListAssignment.created_at)
     )
     assignments = result.scalars().all()
-    return {"assignments": [assignment_dict(a) for a in assignments]}
+    bl_counts = await compute_blocklist_counts_per_assignment(
+        db, [a.id for a in assignments]
+    )
+    return {
+        "assignments": [
+            assignment_dict(a, blocklist_counts=bl_counts.get(a.id)) for a in assignments
+        ]
+    }
 
 
 @router.post("/webinars/{webinar_id}/assign", status_code=201)
@@ -228,6 +236,9 @@ async def assign_bucket(
     desc_copy = None
     upload = None
 
+    blocklist_sq = _blocklist_email_subquery()
+    not_blocklisted = sa_func.lower(Contact.email).notin_(blocklist_sq)
+
     if is_custom_list:
         # Validate custom list upload
         from db.models import UploadHistory
@@ -243,12 +254,13 @@ async def assign_bucket(
         if not upload:
             raise HTTPException(404, "Custom list not found or not complete")
 
-        # Count available contacts from this upload (custom list contacts have bucket_id = NULL)
+        # Count available (non-blocklisted) contacts from this upload
         available_count_result = await db.execute(
             select(sa_func.count()).where(
                 Contact.upload_id == body.upload_id,
                 Contact.bucket_id.is_(None),
                 Contact.outreach_status == "available",
+                not_blocklisted,
             )
         )
         available_count = available_count_result.scalar() or 0
@@ -278,11 +290,12 @@ async def assign_bucket(
         if not bucket:
             raise HTTPException(404, "Bucket not found")
 
-        # Count available contacts in this bucket
+        # Count available (non-blocklisted) contacts in this bucket
         available_count_result = await db.execute(
             select(sa_func.count()).where(
                 Contact.bucket_id == body.bucket_id,
                 Contact.outreach_status == "available",
+                not_blocklisted,
             )
         )
         available_count = available_count_result.scalar() or 0
@@ -333,7 +346,7 @@ async def assign_bucket(
     db.add(assignment)
     await db.flush()  # get assignment.id
 
-    # Claim available contacts
+    # Claim available contacts — excluding blocklisted
     if is_custom_list:
         claim_subq = (
             select(Contact.id)
@@ -341,6 +354,7 @@ async def assign_bucket(
                 Contact.upload_id == body.upload_id,
                 Contact.bucket_id.is_(None),
                 Contact.outreach_status == "available",
+                not_blocklisted,
             )
             .limit(body.volume)
         )
@@ -350,6 +364,7 @@ async def assign_bucket(
             .where(
                 Contact.bucket_id == body.bucket_id,
                 Contact.outreach_status == "available",
+                not_blocklisted,
             )
             .limit(body.volume)
         )
@@ -389,7 +404,8 @@ async def assign_bucket(
         )
     )
     assignment = reload_result.scalar_one()
-    resp = assignment_dict(assignment)
+    bl = await compute_blocklist_counts_per_assignment(db, [assignment.id])
+    resp = assignment_dict(assignment, blocklist_counts=bl.get(assignment.id))
     resp["bucket_remaining"] = bucket.remaining_contacts if bucket else None
     return resp
 
@@ -425,7 +441,8 @@ async def update_assignment(
         )
     )
     assignment = result.scalar_one()
-    return assignment_dict(assignment)
+    bl = await compute_blocklist_counts_per_assignment(db, [assignment.id])
+    return assignment_dict(assignment, blocklist_counts=bl.get(assignment.id))
 
 
 @router.delete("/assignments/{assignment_id}")
@@ -548,9 +565,12 @@ async def get_assignment_contacts(
     if not assignment:
         raise HTTPException(404, "Assignment not found")
 
+    not_blocklisted = sa_func.lower(Contact.email).notin_(_blocklist_email_subquery())
+
     q = select(Contact).where(
         Contact.assignment_id == assignment_id,
         Contact.user_id == LLOYD_USER_ID,
+        not_blocklisted,
     )
     if status != "all":
         q = q.where(Contact.outreach_status == status)
@@ -559,14 +579,18 @@ async def get_assignment_contacts(
     result = await db.execute(q)
     contacts = result.scalars().all()
 
-    # Count by status for the filter badges
+    # Count by status for the filter badges — excludes blocklisted
     count_result = await db.execute(
         select(Contact.outreach_status, sa_func.count()).where(
             Contact.assignment_id == assignment_id,
             Contact.user_id == LLOYD_USER_ID,
+            not_blocklisted,
         ).group_by(Contact.outreach_status)
     )
     counts = {row[0]: row[1] for row in count_result}
+
+    bl_counts = await compute_blocklist_counts_per_assignment(db, [assignment_id])
+    blocklisted_total = bl_counts.get(assignment_id, {}).get("total", 0)
 
     return {
         "assignment": {
@@ -575,7 +599,9 @@ async def get_assignment_contacts(
             "list_name": assignment.list_name,
             "webinar_number": assignment.webinar.number if assignment.webinar else None,
             "webinar_date": assignment.webinar.date.isoformat() if assignment.webinar and assignment.webinar.date else None,
-            "volume": assignment.volume,
+            "volume": max(0, (assignment.volume or 0) - blocklisted_total),
+            "volume_raw": assignment.volume,
+            "blocklisted_total": blocklisted_total,
         },
         "contacts": [
             {
