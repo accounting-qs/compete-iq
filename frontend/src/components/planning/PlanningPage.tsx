@@ -1269,23 +1269,41 @@ export function PlanningPage() {
     // Update assignment's title_copy_id or desc_copy_id
     const payload = type === "title" ? { title_copy_id: variantId } : { desc_copy_id: variantId };
     apiUpdateAssignment(listId, payload).catch((err) => console.error("Failed to pick variant:", err));
-    // Update local list state: mark this variant as selected
+    // Update local list state: mark this variant as selected. We also fold
+    // in the full modalBucketData.titles/descriptions so that when the
+    // picked variant was added after the initial bucket-copies load
+    // (e.g. via Copy Generator or another modal), the list's variants array
+    // stays in sync and the pick doesn't silently no-op.
+    const bucketTitles = modalBucketData?.titles ?? [];
+    const bucketDescriptions = modalBucketData?.descriptions ?? [];
     setWebinars((prev) => prev.map((w) => ({
       ...w,
       lists: w.lists.map((l) => {
         if (l.id !== listId) return l;
         if (type === "title") {
-          const newVariants = l.titleVariants?.map(v => ({ ...v, selected: v.id === variantId }));
+          // Prefer the fresh bucket copies when they cover the picked variant;
+          // otherwise fall back to the existing titleVariants.
+          const source = bucketTitles.length > 0 ? bucketTitles : null;
+          const newVariants = source
+            ? source.map(c => ({
+                id: c.id, text: c.text, variantIndex: c.variant_index,
+                selected: c.id === variantId,
+              }))
+            : l.titleVariants?.map(v => ({ ...v, selected: v.id === variantId }));
           const selected = newVariants?.find(v => v.selected);
           return { ...l, titleVariants: newVariants, title: selected?.text ?? l.title };
         }
-        return {
-          ...l,
-          descVariants: l.descVariants?.map(v => ({ ...v, selected: v.id === variantId })),
-        };
+        const source = bucketDescriptions.length > 0 ? bucketDescriptions : null;
+        const newVariants = source
+          ? source.map(c => ({
+              id: c.id, text: c.text, variantIndex: c.variant_index,
+              selected: c.id === variantId,
+            }))
+          : l.descVariants?.map(v => ({ ...v, selected: v.id === variantId }));
+        return { ...l, descVariants: newVariants };
       }),
     })));
-  }, [planningCopyModal]);
+  }, [planningCopyModal, modalBucketData]);
 
   const closeCopyModal = () => {
     setShowCopyModal(false);
