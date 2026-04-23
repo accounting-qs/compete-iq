@@ -84,6 +84,69 @@ const sCopySp = `${L_COPY} ${Z_ROW} ${BG_SPECIAL}`;
 const sUrlSp = `${L_URL} ${Z_ROW} ${BG_SPECIAL}`;
 const sSendSp = `${L_SEND} ${Z_ROW} ${BG_SPECIAL}`;
 
+/* ─── Metric info modal ──────────────────────────────────────────────── */
+
+function MetricInfoModal({ col, onClose }: { col: MetricColumn; onClose: () => void }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-xl shadow-2xl max-w-xl w-[90vw] max-h-[80vh] overflow-y-auto"
+      >
+        <div className="flex items-start justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-800">
+          <div>
+            <div className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold mb-0.5">{col.group}</div>
+            <div className="text-sm font-bold text-zinc-900 dark:text-zinc-100">{col.label}</div>
+            <div className="text-[10px] font-mono text-zinc-500 mt-0.5">{col.key}</div>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 transition-colors"
+            aria-label="Close"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M18 6L6 18M6 6l12 12"/>
+            </svg>
+          </button>
+        </div>
+        <div className="px-6 py-4 space-y-4 text-sm">
+          {col.description && (
+            <section>
+              <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-1">What it tracks</div>
+              <p className="text-zinc-800 dark:text-zinc-200">{col.description}</p>
+            </section>
+          )}
+          {col.formulaText && (
+            <section>
+              <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-1">Formula</div>
+              <code className="block bg-zinc-100 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700/50 rounded px-3 py-2 text-xs text-zinc-800 dark:text-zinc-200 font-mono">
+                {col.formulaText}
+              </code>
+            </section>
+          )}
+          {col.source && (
+            <section>
+              <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-1">Data source / filter</div>
+              <p className="text-zinc-700 dark:text-zinc-300 text-xs leading-relaxed whitespace-pre-wrap">{col.source}</p>
+            </section>
+          )}
+          <section>
+            <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-1">Display</div>
+            <p className="text-zinc-700 dark:text-zinc-300 text-xs">
+              Format: <code className="font-mono text-zinc-500">{col.format}</code>
+              {col.decimals != null && <> · decimals: <code className="font-mono text-zinc-500">{col.decimals}</code></>}
+              {" · "}null / zero-div renders as "—", explicit 0 renders as "0".
+            </p>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ─── Status badge ────────────────────────────────────────────────────── */
 
 function StatusBadge({ status }: { status: string | null }) {
@@ -305,7 +368,21 @@ function renderGroupedRows(
   collapsedBuckets: Set<string>,
   toggleBucketGroup: (webinarId: string, groupKey: string) => void,
   setCopyModalRow: (row: ApiStatisticsRow) => void,
+  sortKey: string | null,
+  sortDir: "asc" | "desc",
 ): ReactNode[] {
+  // Sort comparator: numeric metric value, null last, respecting asc/desc.
+  const cmp = (a: ApiStatisticsRow, b: ApiStatisticsRow): number => {
+    if (!sortKey) return 0;
+    const av = a.metrics[sortKey];
+    const bv = b.metrics[sortKey];
+    const aNum = typeof av === "number" ? av : null;
+    const bNum = typeof bv === "number" ? bv : null;
+    if (aNum === null && bNum === null) return 0;
+    if (aNum === null) return 1;  // nulls always last
+    if (bNum === null) return -1;
+    return sortDir === "desc" ? bNum - aNum : aNum - bNum;
+  };
   type Group = { bucketId: string; bucketName: string; lists: ApiStatisticsRow[] };
 
   const groups: Group[] = [];
@@ -331,6 +408,17 @@ function renderGroupedRows(
 
   const multi = groups.filter((g) => g.lists.length >= 2);
   const single = groups.filter((g) => g.lists.length === 1).map((g) => g.lists[0]);
+
+  // Apply per-webinar sort when active. Sort within each multi-list bucket,
+  // sort the "Unique Buckets" bundle, and sort unbucketed rows. Specials
+  // (Nonjoiners / NO LIST DATA) stay at the bottom; we also sort them for
+  // consistency (useful when the same column is clicked across webinars).
+  if (sortKey) {
+    for (const g of multi) g.lists = [...g.lists].sort(cmp);
+    single.sort(cmp);
+    unbucketed.sort(cmp);
+    specials.sort(cmp);
+  }
 
   const renderListRow = (row: ApiStatisticsRow) => {
     const isSpecial = row.kind !== "list";
@@ -516,6 +604,20 @@ export function StatisticsPage() {
   const [syncingWebinar, setSyncingWebinar] = useState<number | null>(null);
   const [collapsedBuckets, setCollapsedBuckets] = useState<Set<string>>(new Set());
   const [copyModalRow, setCopyModalRow] = useState<ApiStatisticsRow | null>(null);
+  const [infoModalCol, setInfoModalCol] = useState<MetricColumn | null>(null);
+  const [sortKey, setSortKey] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  const toggleSort = (key: string) => {
+    if (sortKey === key) {
+      // Cycle: desc -> asc -> off
+      if (sortDir === "desc") setSortDir("asc");
+      else { setSortKey(null); }
+    } else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+  };
 
   const toggleBucketGroup = (webinarId: string, groupKey: string) => {
     setCollapsedBuckets((prev) => {
@@ -787,17 +889,46 @@ export function StatisticsPage() {
               <th className={`text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] ${W_COPY} ${sCopyH}`}>Copy</th>
               <th className={`text-center px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] ${W_URL} ${sUrlH}`}>URL</th>
               <th className={`text-left px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] ${W_SEND} ${sSendH}`}>Send Info</th>
-              {METRIC_COLUMNS.map((col, idx) => (
-                <th
-                  key={col.key}
-                  className={`text-right px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] whitespace-nowrap ${
-                    isGroupBoundary(idx) ? GROUP_BOUNDARY_CLASSES : ""
-                  }`}
-                  title={col.formulaText}
-                >
-                  {col.label}
-                </th>
-              ))}
+              {METRIC_COLUMNS.map((col, idx) => {
+                const isSorted = sortKey === col.key;
+                const sortArrow = isSorted ? (sortDir === "desc" ? "▼" : "▲") : "";
+                return (
+                  <th
+                    key={col.key}
+                    className={`px-2 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] whitespace-nowrap ${
+                      isGroupBoundary(idx) ? GROUP_BOUNDARY_CLASSES : ""
+                    }`}
+                    title={col.description ?? col.formulaText}
+                  >
+                    <div className="flex items-center justify-end gap-1">
+                      <button
+                        type="button"
+                        onClick={() => toggleSort(col.key)}
+                        className={`inline-flex items-center gap-0.5 hover:text-zinc-800 dark:hover:text-zinc-200 transition-colors ${
+                          isSorted ? "text-violet-500 dark:text-violet-400" : ""
+                        }`}
+                        title={`Sort by ${col.label} (per webinar)`}
+                      >
+                        <span>{col.label}</span>
+                        {sortArrow && <span className="text-[8px]">{sortArrow}</span>}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setInfoModalCol(col)}
+                        className="text-zinc-400 hover:text-violet-500 dark:hover:text-violet-400 transition-colors opacity-60 hover:opacity-100"
+                        aria-label={`Info about ${col.label}`}
+                        title="What does this column track?"
+                      >
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <circle cx="12" cy="12" r="10" />
+                          <line x1="12" y1="8" x2="12" y2="8.01" />
+                          <line x1="12" y1="12" x2="12" y2="16" />
+                        </svg>
+                      </button>
+                    </div>
+                  </th>
+                );
+              })}
             </tr>
           </thead>
 
@@ -867,7 +998,7 @@ export function StatisticsPage() {
                 </tr>
 
                 {/* ── Child rows (bucket-grouped) ─────────────────── */}
-                {isExpanded && renderGroupedRows(w, collapsedBuckets, toggleBucketGroup, setCopyModalRow)}
+                {isExpanded && renderGroupedRows(w, collapsedBuckets, toggleBucketGroup, setCopyModalRow, sortKey, sortDir)}
               </tbody>
             );
           })}
@@ -884,6 +1015,11 @@ export function StatisticsPage() {
       {/* ── Copy preview modal ─────────────────────────────────────── */}
       {copyModalRow && (
         <CopyModal row={copyModalRow} onClose={() => setCopyModalRow(null)} />
+      )}
+
+      {/* ── Metric info modal ──────────────────────────────────────── */}
+      {infoModalCol && (
+        <MetricInfoModal col={infoModalCol} onClose={() => setInfoModalCol(null)} />
       )}
     </div>
   );
