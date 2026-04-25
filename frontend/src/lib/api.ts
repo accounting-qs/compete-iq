@@ -852,6 +852,7 @@ export interface ApiCaseStudy {
   tags: string[];
   content: string;
   is_active: boolean;
+  source_url: string | null;
   created_at: string | null;
 }
 
@@ -940,6 +941,17 @@ export async function deleteCaseStudy(id: string): Promise<void> {
     method: "DELETE", headers: authHeaders(),
   });
   if (!res.ok) throw new Error("Failed to delete case study");
+}
+
+export async function importCaseStudyFromUrl(data: {
+  url: string;
+  notes?: string;
+}): Promise<ApiCaseStudy> {
+  const res = await fetch(`${API_URL}/outreach/brain/case-studies/import`, {
+    method: "POST", headers: jsonHeaders(), body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to import case study"));
+  return res.json();
 }
 
 // Brain Content
@@ -1358,6 +1370,37 @@ export async function deleteWgApiKey(): Promise<void> {
     headers: authHeaders(),
   });
   if (!res.ok) throw new Error("Failed to delete API key");
+}
+
+/* ── Connectors: OpenAI ────────────────────────────────────────────────── */
+
+export interface OpenAiCredentialStatus {
+  configured: boolean;
+  api_key_masked?: string | null;
+}
+
+export async function fetchOpenAiStatus(): Promise<OpenAiCredentialStatus> {
+  const res = await fetch(`${API_URL}/connectors/openai`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to fetch OpenAI status");
+  return res.json();
+}
+
+export async function saveOpenAiApiKey(api_key: string): Promise<OpenAiCredentialStatus> {
+  const res = await fetch(`${API_URL}/connectors/openai`, {
+    method: "PUT",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ api_key }),
+  });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to save OpenAI API key"));
+  return res.json();
+}
+
+export async function deleteOpenAiApiKey(): Promise<void> {
+  const res = await fetch(`${API_URL}/connectors/openai`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to delete OpenAI API key");
 }
 
 export async function fetchWgWebinars(opts?: { limit?: number; offset?: number; q?: string }): Promise<{ broadcasts: WgWebinar[]; total: number }> {

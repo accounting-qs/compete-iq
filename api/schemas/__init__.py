@@ -158,6 +158,7 @@ class CaseStudyCreate(BaseModel):
     industry: str | None = None
     tags: list[str] = []
     content: str
+    source_url: str | None = None
 
 class CaseStudyUpdate(BaseModel):
     title: str | None = None
@@ -166,6 +167,11 @@ class CaseStudyUpdate(BaseModel):
     tags: list[str] | None = None
     content: str | None = None
     is_active: bool | None = None
+    source_url: str | None = None
+
+class CaseStudyImportRequest(BaseModel):
+    url: str
+    notes: str | None = None
 
 class BrainContentUpdate(BaseModel):
     brain_content: str

@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   fetchPrinciples, createPrinciple, updatePrinciple, deletePrinciple,
   fetchCaseStudies, createCaseStudy as apiCreateCaseStudy, updateCaseStudy as apiUpdateCaseStudy, deleteCaseStudy as apiDeleteCaseStudy,
+  importCaseStudyFromUrl,
   fetchBrainContent, updateUniversalBrain, updateFormatBrain,
   type ApiPrinciple, type ApiCaseStudy, type ApiBrainContent,
 } from "@/lib/api";
@@ -162,6 +163,9 @@ function PrinciplesTab() {
 
 /* ─── Case Studies Tab ────────────────────────────────────────────────── */
 
+type ImportRowStatus = "pending" | "running" | "done" | "error";
+type ImportRow = { url: string; status: ImportRowStatus; message?: string };
+
 function CaseStudiesTab() {
   const [studies, setStudies] = useState<ApiCaseStudy[]>([]);
   const [loading, setLoading] = useState(true);
@@ -169,6 +173,14 @@ function CaseStudiesTab() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState({ title: "", client_name: "", industry: "", tags: "", content: "" });
   const [saving, setSaving] = useState(false);
+
+  // URL importer state
+  const [urlInput, setUrlInput] = useState("");
+  const [notesInput, setNotesInput] = useState("");
+  const [bulkMode, setBulkMode] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importRows, setImportRows] = useState<ImportRow[]>([]);
 
   useEffect(() => {
     fetchCaseStudies().then(setStudies).catch(console.error).finally(() => setLoading(false));
@@ -226,24 +238,156 @@ function CaseStudiesTab() {
     } catch (err) { console.error(err); }
   }, []);
 
+  const handleImportSingle = useCallback(async () => {
+    const url = urlInput.trim();
+    if (!url) return;
+    setImportError(null);
+    setImporting(true);
+    try {
+      const created = await importCaseStudyFromUrl({
+        url,
+        notes: notesInput.trim() || undefined,
+      });
+      setStudies(prev => [created, ...prev]);
+      setUrlInput("");
+      setNotesInput("");
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : "Import failed");
+    } finally {
+      setImporting(false);
+    }
+  }, [urlInput, notesInput]);
+
+  const handleImportBulk = useCallback(async () => {
+    const urls = urlInput
+      .split("\n")
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (urls.length === 0) return;
+    setImportError(null);
+    setImporting(true);
+    const initial: ImportRow[] = urls.map(u => ({ url: u, status: "pending" }));
+    setImportRows(initial);
+    const sharedNotes = notesInput.trim() || undefined;
+
+    for (let i = 0; i < urls.length; i++) {
+      setImportRows(prev => prev.map((r, idx) => idx === i ? { ...r, status: "running" } : r));
+      try {
+        const created = await importCaseStudyFromUrl({ url: urls[i], notes: sharedNotes });
+        setStudies(prev => [created, ...prev]);
+        setImportRows(prev => prev.map((r, idx) => idx === i ? { ...r, status: "done" } : r));
+      } catch (err) {
+        setImportRows(prev => prev.map((r, idx) => idx === i
+          ? { ...r, status: "error", message: err instanceof Error ? err.message : "Import failed" }
+          : r));
+      }
+    }
+    setImporting(false);
+  }, [urlInput, notesInput]);
+
   if (loading) return <div className="flex items-center gap-2 py-8 justify-center text-zinc-400 text-sm"><Spinner /> Loading…</div>;
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <span className="text-xs text-zinc-500">{studies.filter(s => s.is_active).length} active case studies</span>
-        {!showForm && (
+        <div className="flex items-center gap-3">
           <button
-            onClick={() => { resetForm(); setShowForm(true); }}
-            className="text-xs font-medium text-violet-500 hover:text-violet-400 flex items-center gap-1"
+            onClick={() => { setBulkMode(b => !b); setImportRows([]); setImportError(null); }}
+            className="text-[11px] font-medium text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
           >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
-            Add case study
+            {bulkMode ? "Single URL" : "Bulk paste"}
           </button>
+          {!showForm && (
+            <button
+              onClick={() => { resetForm(); setShowForm(true); }}
+              className="text-xs font-medium text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 flex items-center gap-1"
+            >
+              Add manually
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* URL Importer */}
+      <div className="rounded-xl border border-violet-200 dark:border-violet-500/25 bg-violet-50/30 dark:bg-violet-500/5 p-4 space-y-3">
+        <div className="flex items-center gap-2">
+          <svg className="w-4 h-4 text-violet-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+          </svg>
+          <h3 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">
+            Import from URL
+          </h3>
+          <span className="text-[10px] text-zinc-500">
+            Fetches the page and extracts client, industry, metrics & story via OpenAI.
+          </span>
+        </div>
+
+        {bulkMode ? (
+          <textarea
+            value={urlInput}
+            onChange={(e) => setUrlInput(e.target.value)}
+            placeholder={"Paste one URL per line\nhttps://qs-institute.com/elevatefinancialpartners\nhttps://qs-institute.com/ken-tyborski--code-of-the-north"}
+            rows={6}
+            className="w-full bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-violet-500 font-mono leading-relaxed resize-vertical"
+          />
+        ) : (
+          <input
+            type="url"
+            value={urlInput}
+            onChange={(e) => setUrlInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !importing) handleImportSingle(); }}
+            placeholder="https://qs-institute.com/elevatefinancialpartners"
+            className="w-full bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2 text-sm text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-violet-500"
+          />
+        )}
+
+        <input
+          type="text"
+          value={notesInput}
+          onChange={(e) => setNotesInput(e.target.value)}
+          placeholder="Optional hints for the extractor (e.g. 'Coaching & Training, focus on revenue lift')"
+          className="w-full bg-white dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2 text-xs text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-violet-500"
+        />
+
+        <div className="flex items-center gap-2">
+          <button
+            onClick={bulkMode ? handleImportBulk : handleImportSingle}
+            disabled={!urlInput.trim() || importing}
+            className="px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5"
+          >
+            {importing && <Spinner />}
+            {bulkMode ? "Import all" : "Import"}
+          </button>
+          {importError && (
+            <span className="text-[11px] text-red-500">{importError}</span>
+          )}
+        </div>
+
+        {importRows.length > 0 && (
+          <div className="space-y-1 max-h-40 overflow-y-auto pt-1">
+            {importRows.map((r, i) => (
+              <div key={i} className="flex items-center gap-2 text-[11px]">
+                <span className={
+                  r.status === "done" ? "text-emerald-500" :
+                  r.status === "error" ? "text-red-500" :
+                  r.status === "running" ? "text-violet-500" :
+                  "text-zinc-400"
+                }>
+                  {r.status === "done" ? "✓"
+                    : r.status === "error" ? "✕"
+                    : r.status === "running" ? "…"
+                    : "·"}
+                </span>
+                <span className="font-mono truncate flex-1 text-zinc-600 dark:text-zinc-400">{r.url}</span>
+                {r.message && <span className="text-red-500 truncate max-w-xs" title={r.message}>{r.message}</span>}
+              </div>
+            ))}
+          </div>
         )}
       </div>
 
-      {/* Add/Edit Form */}
+      {/* Add/Edit Form (manual fallback) */}
       {showForm && (
         <div className="rounded-xl border border-violet-200 dark:border-violet-500/25 bg-violet-50/30 dark:bg-violet-500/5 p-4 space-y-3">
           <div className="grid grid-cols-3 gap-2">
@@ -284,6 +428,17 @@ function CaseStudiesTab() {
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <h4 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200 truncate">{cs.title}</h4>
+                  {cs.source_url && (
+                    <a
+                      href={cs.source_url}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="text-[10px] text-violet-500 hover:text-violet-400"
+                      title={cs.source_url}
+                    >
+                      ↗ source
+                    </a>
+                  )}
                   {cs.client_name && <span className="text-[10px] text-zinc-500">{cs.client_name}</span>}
                   {cs.industry && (
                     <span className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400">

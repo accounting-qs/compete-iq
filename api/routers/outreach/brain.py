@@ -11,11 +11,14 @@ from api.auth import require_auth
 from api.routers.outreach._helpers import LLOYD_USER_ID
 from api.schemas import (
     PrincipleCreate, PrincipleUpdate,
-    CaseStudyCreate, CaseStudyUpdate,
+    CaseStudyCreate, CaseStudyUpdate, CaseStudyImportRequest,
     BrainContentUpdate,
 )
 from db.models import CopywritingPrinciple, CaseStudy, UniversalBrain, FormatBrain
 from db.session import get_db
+from services.case_study_import import (
+    CaseStudyImportError, import_case_study_from_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +146,7 @@ def _case_study_dict(cs: CaseStudy) -> dict:
         "tags": cs.tags or [],
         "content": cs.content,
         "is_active": cs.is_active,
+        "source_url": cs.source_url,
         "created_at": cs.created_at.isoformat() if cs.created_at else None,
     }
 
@@ -174,6 +178,39 @@ async def create_case_study(
         tags=body.tags,
         content=body.content,
         is_active=True,
+        source_url=body.source_url,
+    )
+    db.add(cs)
+    await db.flush()
+    return _case_study_dict(cs)
+
+
+@router.post("/brain/case-studies/import", status_code=201)
+async def import_case_study(
+    body: CaseStudyImportRequest,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    url = (body.url or "").strip()
+    if not url:
+        raise HTTPException(400, "url is required")
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(400, "url must start with http:// or https://")
+
+    try:
+        extracted = await import_case_study_from_url(db, url, notes=body.notes)
+    except CaseStudyImportError as exc:
+        raise HTTPException(400, str(exc))
+
+    cs = CaseStudy(
+        user_id=LLOYD_USER_ID,
+        title=extracted["title"],
+        client_name=extracted.get("client_name"),
+        industry=extracted.get("industry"),
+        tags=extracted.get("tags") or [],
+        content=extracted["content"],
+        is_active=True,
+        source_url=extracted.get("source_url"),
     )
     db.add(cs)
     await db.flush()
@@ -209,6 +246,8 @@ async def update_case_study(
         cs.content = body.content
     if body.is_active is not None:
         cs.is_active = body.is_active
+    if body.source_url is not None:
+        cs.source_url = body.source_url or None
 
     await db.flush()
     return _case_study_dict(cs)

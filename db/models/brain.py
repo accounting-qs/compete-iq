@@ -240,6 +240,7 @@ class CaseStudy(Base):
     tags: Mapped[Optional[list]] = mapped_column(JSONB, server_default="'[]'")
     content: Mapped[str] = mapped_column(Text, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, server_default="true")
+    source_url: Mapped[Optional[str]] = mapped_column(String)
     notion_page_id: Mapped[Optional[str]] = mapped_column(String, unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -248,4 +249,5 @@ class CaseStudy(Base):
         Index("ix_case_studies_user_id", "user_id"),
         Index("ix_case_studies_notion_page_id", "notion_page_id"),
         Index("ix_case_studies_industry", "industry"),
+        Index("ix_case_studies_source_url", "source_url"),
     )

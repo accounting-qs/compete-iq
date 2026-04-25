@@ -37,12 +37,14 @@ from api.routers.outreach._helpers import LLOYD_USER_ID
 from db.models import BlocklistEntry, ConnectorCredential, WebinarGeekWebinar, WebinarGeekSubscriber
 from db.session import get_db
 from integrations import webinargeek_client as wg
+from integrations import openai_client as oai
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(dependencies=[Depends(require_auth)])
 
 PROVIDER = "webinargeek"
+OPENAI_PROVIDER = "openai"
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +241,46 @@ async def set_credential(body: SetCredentialRequest, db: AsyncSession = Depends(
 @router.delete("/webinargeek")
 async def delete_credential(db: AsyncSession = Depends(get_db)):
     await db.execute(delete(ConnectorCredential).where(ConnectorCredential.provider == PROVIDER))
+    return {"deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# OpenAI credentials (used by case-study URL importer)
+# ---------------------------------------------------------------------------
+@router.get("/openai", response_model=CredentialStatus)
+async def get_openai_status(db: AsyncSession = Depends(get_db)):
+    row = (await db.execute(
+        select(ConnectorCredential).where(ConnectorCredential.provider == OPENAI_PROVIDER)
+    )).scalar_one_or_none()
+    if not row:
+        return CredentialStatus(configured=False)
+    return CredentialStatus(configured=True, api_key_masked=_mask(row.api_key))
+
+
+@router.put("/openai", response_model=CredentialStatus)
+async def set_openai_credential(body: SetCredentialRequest, db: AsyncSession = Depends(get_db)):
+    api_key = body.api_key.strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="api_key is required")
+    try:
+        ok = await oai.verify_api_key(api_key)
+    except oai.OpenAIError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    if not ok:
+        raise HTTPException(status_code=400, detail="Invalid OpenAI API key")
+
+    stmt = pg_insert(ConnectorCredential).values(provider=OPENAI_PROVIDER, api_key=api_key)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["provider"],
+        set_={"api_key": api_key, "updated_at": datetime.now(timezone.utc)},
+    )
+    await db.execute(stmt)
+    return CredentialStatus(configured=True, api_key_masked=_mask(api_key))
+
+
+@router.delete("/openai")
+async def delete_openai_credential(db: AsyncSession = Depends(get_db)):
+    await db.execute(delete(ConnectorCredential).where(ConnectorCredential.provider == OPENAI_PROVIDER))
     return {"deleted": True}
 
 
