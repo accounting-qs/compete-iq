@@ -397,6 +397,24 @@ async def assign_bucket(
     )
     claimed = claim_result.rowcount
 
+    # Reconcile assignment.volume / .remaining with what was actually claimed.
+    # The pre-claim available_count check (line ~328) can race against a
+    # concurrent assignment, leaving fewer rows for this UPDATE. Without this
+    # reconciliation the assignment carries a phantom volume that the
+    # Planning table and contacts page have no way to reconcile.
+    if claimed == 0 and body.volume > 0:
+        await db.delete(assignment)
+        await db.flush()
+        source = "list" if is_custom_list else "bucket"
+        raise HTTPException(
+            409,
+            f"No available contacts left in this {source} — they were claimed by another assignment.",
+        )
+    if claimed != body.volume:
+        assignment.volume = claimed
+        assignment.remaining = claimed
+        await db.flush()
+
     # Update bucket remaining counter (only for bucket assignments)
     if bucket:
         bucket.remaining_contacts = max(0, available_count - claimed)
@@ -609,6 +627,11 @@ async def get_assignment_contacts(
     bl_counts = await compute_blocklist_counts_per_assignment(db, [assignment_id])
     blocklisted_total = bl_counts.get(assignment_id, {}).get("total", 0)
 
+    # Header total mirrors the All tab — assigned + used rows actually
+    # attached to this assignment, post-blocklist. The query above already
+    # filters by assignment_id and excludes blocklisted contacts.
+    attached_total = counts.get("assigned", 0) + counts.get("used", 0)
+
     return {
         "assignment": {
             "id": assignment.id,
@@ -616,7 +639,7 @@ async def get_assignment_contacts(
             "list_name": assignment.list_name,
             "webinar_number": assignment.webinar.number if assignment.webinar else None,
             "webinar_date": assignment.webinar.date.isoformat() if assignment.webinar and assignment.webinar.date else None,
-            "volume": max(0, (assignment.volume or 0) - blocklisted_total),
+            "volume": attached_total,
             "volume_raw": assignment.volume,
             "blocklisted_total": blocklisted_total,
         },
