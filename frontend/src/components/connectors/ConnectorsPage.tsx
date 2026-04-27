@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import {
   fetchWgStatus,
@@ -11,13 +12,9 @@ import {
   syncAllWgSubscribers,
   fetchWgSubscribers,
   wgSubscribersCsvUrl,
-  fetchOpenAiStatus,
-  saveOpenAiApiKey,
-  deleteOpenAiApiKey,
   type WgCredentialStatus,
   type WgWebinar,
   type WgSubscriber,
-  type OpenAiCredentialStatus,
 } from "@/lib/api";
 
 type Tab = "config" | "broadcasts" | "subscribers";
@@ -62,7 +59,10 @@ export function ConnectorsPage() {
 
   useEffect(() => {
     fetchWgStatus()
-      .then(setStatus)
+      .then((s) => {
+        setStatus(s);
+        if (s.configured) setTab("broadcasts");
+      })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load"))
       .finally(() => setLoadingStatus(false));
   }, []);
@@ -74,6 +74,7 @@ export function ConnectorsPage() {
       setStatus(s);
       setApiKeyInput("");
       setMessage("API key saved.");
+      setTab("broadcasts");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save");
     } finally {
@@ -103,20 +104,20 @@ export function ConnectorsPage() {
   return (
     <div className="px-6 py-6 max-w-[1400px]">
       <div className="flex items-center gap-3 mb-6">
-        <button
-          onClick={() => history.back()}
+        <Link
+          href="/connectors"
           className="text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 text-lg"
-          aria-label="Back"
+          aria-label="Back to connectors"
         >
           ←
-        </button>
+        </Link>
         <div className="w-8 h-8 rounded-md bg-violet-500/15 flex items-center justify-center">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-violet-500">
             <polygon points="5 3 19 12 5 21 5 3" />
           </svg>
         </div>
         <h1 className="text-xl font-bold text-zinc-900 dark:text-zinc-100 tracking-tight">
-          Connectors
+          WebinarGeek
         </h1>
       </div>
 
@@ -184,50 +185,17 @@ function ConfigTab(props: {
 }) {
   const { status, apiKeyInput, setApiKeyInput, onSave, onDelete, saving } = props;
   return (
-    <div className="space-y-4">
-      <CredentialCard
-        title="WebinarGeek API"
-        subtitle="Connect your API key to pull broadcasts and subscribers."
-        configured={!!status?.configured}
-        masked={status?.api_key_masked ?? null}
-        apiKeyInput={apiKeyInput}
-        setApiKeyInput={setApiKeyInput}
-        onSave={onSave}
-        onDelete={onDelete}
-        saving={saving}
-        inputLabel="WebinarGeek API Key"
-      />
-      <OpenAiConfigCard />
-    </div>
-  );
-}
-
-function CredentialCard(props: {
-  title: string;
-  subtitle: string;
-  configured: boolean;
-  masked: string | null;
-  apiKeyInput: string;
-  setApiKeyInput: (v: string) => void;
-  onSave: () => void;
-  onDelete: () => void;
-  saving: boolean;
-  inputLabel: string;
-}) {
-  const {
-    title, subtitle, configured, masked,
-    apiKeyInput, setApiKeyInput, onSave, onDelete, saving, inputLabel,
-  } = props;
-  return (
     <section className="rounded-lg border border-zinc-200 dark:border-zinc-800/60 bg-white dark:bg-zinc-900/40 p-4">
-      <h2 className="text-sm font-bold text-zinc-900 dark:text-zinc-100 mb-1">{title}</h2>
-      <p className="text-xs text-zinc-500 mb-4">{subtitle}</p>
+      <h2 className="text-sm font-bold text-zinc-900 dark:text-zinc-100 mb-1">WebinarGeek API</h2>
+      <p className="text-xs text-zinc-500 mb-4">
+        Connect your API key to pull broadcasts and subscribers.
+      </p>
 
-      {configured ? (
+      {status?.configured ? (
         <div className="flex items-center gap-3">
           <div className="flex-1">
             <label className="block text-[10px] uppercase tracking-wider text-zinc-500 font-semibold mb-1">API Key</label>
-            <div className="font-mono text-xs text-zinc-700 dark:text-zinc-300">{masked}</div>
+            <div className="font-mono text-xs text-zinc-700 dark:text-zinc-300">{status.api_key_masked}</div>
           </div>
           <span className="px-2 py-0.5 rounded text-[10px] font-semibold border bg-emerald-500/15 text-emerald-500 border-emerald-500/30">
             Connected
@@ -242,7 +210,7 @@ function CredentialCard(props: {
       ) : (
         <div className="space-y-2">
           <label className="block text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">
-            {inputLabel}
+            WebinarGeek API Key
           </label>
           <div className="flex gap-2">
             <input
@@ -263,71 +231,6 @@ function CredentialCard(props: {
         </div>
       )}
     </section>
-  );
-}
-
-function OpenAiConfigCard() {
-  const [status, setStatus] = useState<OpenAiCredentialStatus | null>(null);
-  const [apiKeyInput, setApiKeyInput] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetchOpenAiStatus()
-      .then(setStatus)
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load OpenAI status"));
-  }, []);
-
-  async function handleSave() {
-    setError(null); setMessage(null); setSaving(true);
-    try {
-      const s = await saveOpenAiApiKey(apiKeyInput.trim());
-      setStatus(s);
-      setApiKeyInput("");
-      setMessage("OpenAI API key saved.");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save OpenAI key");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleDelete() {
-    if (!confirm("Remove OpenAI API key? Case-study URL imports will stop working until you reconnect.")) return;
-    try {
-      await deleteOpenAiApiKey();
-      setStatus({ configured: false });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete OpenAI key");
-    }
-  }
-
-  return (
-    <div className="space-y-2">
-      <CredentialCard
-        title="OpenAI API"
-        subtitle="Used to extract structured fields when you import a case study from a URL. We use gpt-4o-mini (~$0.0002 per import)."
-        configured={!!status?.configured}
-        masked={status?.api_key_masked ?? null}
-        apiKeyInput={apiKeyInput}
-        setApiKeyInput={setApiKeyInput}
-        onSave={handleSave}
-        onDelete={handleDelete}
-        saving={saving}
-        inputLabel="OpenAI API Key (sk-…)"
-      />
-      {error && (
-        <div className="px-3 py-2 rounded-md border border-red-500/30 bg-red-500/10 text-xs text-red-500">
-          {error}
-        </div>
-      )}
-      {message && (
-        <div className="px-3 py-2 rounded-md border border-emerald-500/30 bg-emerald-500/10 text-xs text-emerald-500">
-          {message}
-        </div>
-      )}
-    </div>
   );
 }
 

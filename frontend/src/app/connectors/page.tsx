@@ -1,5 +1,5 @@
-import { ConnectorsPage } from "@/components/connectors/ConnectorsPage";
+import { ConnectorsLanding } from "@/components/connectors/ConnectorsLanding";
 
 export default function Connectors() {
-  return <ConnectorsPage />;
+  return <ConnectorsLanding />;
 }
