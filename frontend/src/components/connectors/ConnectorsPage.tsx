@@ -62,10 +62,7 @@ export function ConnectorsPage() {
 
   useEffect(() => {
     fetchWgStatus()
-      .then((s) => {
-        setStatus(s);
-        if (s.configured) setTab("broadcasts");
-      })
+      .then(setStatus)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load"))
       .finally(() => setLoadingStatus(false));
   }, []);
@@ -77,7 +74,6 @@ export function ConnectorsPage() {
       setStatus(s);
       setApiKeyInput("");
       setMessage("API key saved.");
-      setTab("broadcasts");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save");
     } finally {
@@ -120,7 +116,7 @@ export function ConnectorsPage() {
           </svg>
         </div>
         <h1 className="text-xl font-bold text-zinc-900 dark:text-zinc-100 tracking-tight">
-          WebinarGeek Connector
+          Connectors
         </h1>
       </div>
 
