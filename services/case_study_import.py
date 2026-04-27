@@ -158,7 +158,7 @@ _EXTRACTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "title", "client_name", "industry", "tags", "content",
+        "title", "client_name", "industry", "industry_aliases", "tags", "content",
         "headline", "quote", "metrics", "pain_points", "outcomes", "persona",
     ],
     "properties": {
@@ -172,7 +172,29 @@ _EXTRACTION_SCHEMA: dict[str, Any] = {
         },
         "industry": {
             "type": "string",
-            "description": "Concise industry label (e.g. 'Financial Advisory', 'Coaching & Training', 'SaaS', 'Agency'). Empty string if unclear.",
+            "description": (
+                "Full canonical industry label. NEVER truncate. If the page shows a shortened label "
+                "like 'Consulting & Professional Serv.' or 'Financial Serv.', expand it to the standard "
+                "form ('Consulting & Professional Services', 'Financial Services'). "
+                "Prefer one of: 'Consulting & Professional Services', 'Coaching & Training', "
+                "'Software', 'Agency', 'Financial Services', 'Financial Planning', 'M&A / Investment', "
+                "'E-commerce', 'Healthcare', 'Real Estate', 'Education', 'Marketing'. "
+                "If none fit, use the most precise full-form label that does. Empty string only if the "
+                "industry is genuinely unstated and cannot be inferred."
+            ),
+        },
+        "industry_aliases": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "3-6 lowercase synonyms / sub-labels that a user might use to refer to this industry, "
+                "so we can match this case study against differently-named buckets. "
+                "Include the broad category, common variants, and specialised terms. "
+                "Example for 'Consulting & Professional Services' serving HNW financial clients: "
+                "['consulting', 'professional services', 'advisory', 'financial advisory', 'wealth management']. "
+                "Example for 'Software' B2B SaaS: ['software', 'saas', 'b2b saas', 'tech']. "
+                "Always include the broad category and at least one narrower specialisation when known."
+            ),
         },
         "tags": {
             "type": "array",
@@ -235,12 +257,16 @@ _EXTRACTION_SCHEMA: dict[str, Any] = {
 
 _SYSTEM_PROMPT = (
     "You extract structured case-study data from a marketing / case-study web page. "
-    "Two strict rules:\n"
+    "Three strict rules:\n"
     "1. PRESERVE DIRECT QUOTES VERBATIM. Copy testimonials exactly — never paraphrase, "
     "smooth, or summarise the client's words. The quote field must be a real first-person sentence "
     "from the page, character-for-character.\n"
     "2. EXTRACT METRICS AS DISCRETE before/after PAIRS, not prose. If the page shows three KPIs, "
     "return three separate metric objects with the labels and numbers as they appear.\n"
+    "3. EXPAND TRUNCATED INDUSTRY LABELS. Pages often show abbreviated badges like "
+    "'Consulting & Professional Serv.' — always emit the full canonical form "
+    "('Consulting & Professional Services'). Never copy a truncation. Pick from the canonical list "
+    "in the schema when one fits.\n"
     "If a field is genuinely absent, use an empty string (or empty array). Never invent numbers, "
     "quotes, or claims that aren't on the page."
 )
@@ -351,8 +377,15 @@ def _normalise_structured(extracted: dict[str, Any]) -> dict[str, Any] | None:
             if v:
                 persona[key] = v
 
+    aliases_raw = extracted.get("industry_aliases") or []
+    industry_aliases = sorted({
+        str(a).strip().lower()
+        for a in aliases_raw
+        if str(a or "").strip()
+    })
+
     has_any = (
-        headline or quote or metrics or pain_points or outcomes or persona
+        headline or quote or metrics or pain_points or outcomes or persona or industry_aliases
     )
     if not has_any:
         return None
@@ -364,4 +397,5 @@ def _normalise_structured(extracted: dict[str, Any]) -> dict[str, Any] | None:
         "pain_points": pain_points,
         "outcomes": outcomes,
         "persona": persona,
+        "industry_aliases": industry_aliases,
     }

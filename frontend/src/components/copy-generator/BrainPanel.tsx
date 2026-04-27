@@ -518,6 +518,23 @@ function CaseStudiesTab() {
 
               {isExpanded && (
                 <div className="mt-3 pt-3 border-t border-zinc-100 dark:border-zinc-800/40 space-y-3 text-xs">
+                  {s?.headline && (
+                    <Field label="Offer / program on the page" value={s.headline} />
+                  )}
+
+                  {s?.industry_aliases && s.industry_aliases.length > 0 && (
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold mb-1">Industry synonyms (used for matching)</div>
+                      <div className="flex flex-wrap gap-1">
+                        {s.industry_aliases.map(a => (
+                          <span key={a} className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400">
+                            {a}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {s?.persona && (s.persona.role || s.persona.company_size || s.persona.target_market) && (
                     <div className="grid grid-cols-3 gap-2">
                       {s.persona.role && (

@@ -157,10 +157,26 @@ async def _load_case_studies(
             if tag and bucket and tag in bucket:
                 score += 3
 
-        # Structured persona signals: target_market and role often capture the
-        # niche better than the industry label (e.g. "high-net-worth individuals"
-        # for a financial advisor case study would match a "Wealth Managers" bucket).
+        # Structured signals from the URL importer let us match more reliably
+        # than the literal industry label: aliases catch synonyms (e.g. a
+        # "Consulting & Professional Services" study still matches a bucket
+        # called "Advisory" or "Wealth Management"), and persona target_market
+        # / role catch niches that aren't in the industry label at all.
         structured = cs.structured or {}
+
+        aliases = [
+            str(a).lower()
+            for a in (structured.get("industry_aliases") or [])
+            if str(a or "").strip()
+        ] if isinstance(structured.get("industry_aliases"), list) else []
+        for alias in aliases:
+            if not alias:
+                continue
+            if bucket and alias in bucket:
+                score += 4
+            if bucket_industry and (alias == bucket_industry or alias in bucket_industry):
+                score += 4
+
         persona = structured.get("persona") if isinstance(structured.get("persona"), dict) else {}
         if persona:
             target = (persona.get("target_market") or "").lower()
@@ -420,6 +436,10 @@ def _format_case_studies(case_studies: list[dict] | None) -> str:
 
         structured = cs.get("structured") if isinstance(cs.get("structured"), dict) else None
         if structured:
+            aliases = [a for a in (structured.get("industry_aliases") or []) if str(a).strip()]
+            if aliases:
+                section.append("**Industry synonyms:** " + ", ".join(aliases))
+
             persona = structured.get("persona") if isinstance(structured.get("persona"), dict) else {}
             persona_bits = [
                 f"{key.replace('_', ' ').title()}: {val}"

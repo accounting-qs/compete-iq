@@ -861,6 +861,7 @@ export interface ApiCaseStudyStructured {
     company_size?: string;
     target_market?: string;
   };
+  industry_aliases?: string[];
 }
 
 export interface ApiCaseStudy {
