@@ -23,7 +23,10 @@ logger = logging.getLogger(__name__)
 
 
 # Skip these tags entirely (their text is noise for extraction).
-_SKIP_TAGS = {"script", "style", "noscript", "svg", "head", "meta", "link"}
+# NOTE: only tags with proper closing tags belong here — void elements like
+# <meta>/<link> have no </meta>/</link> and would leave skip_depth permanently
+# elevated, swallowing the rest of the document.
+_SKIP_TAGS = {"script", "style", "noscript", "svg", "head"}
 _BLOCK_TAGS = {
     "p", "div", "section", "article", "header", "footer", "main", "nav",
     "h1", "h2", "h3", "h4", "h5", "h6", "li", "tr", "br", "hr",
