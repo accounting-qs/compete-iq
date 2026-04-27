@@ -844,6 +844,25 @@ export interface ApiPrinciple {
   created_at: string | null;
 }
 
+export interface ApiCaseStudyMetric {
+  label: string;
+  before: string;
+  after: string;
+}
+
+export interface ApiCaseStudyStructured {
+  headline?: string;
+  quote?: string;
+  metrics?: ApiCaseStudyMetric[];
+  pain_points?: string[];
+  outcomes?: string[];
+  persona?: {
+    role?: string;
+    company_size?: string;
+    target_market?: string;
+  };
+}
+
 export interface ApiCaseStudy {
   id: string;
   title: string;
@@ -853,6 +872,7 @@ export interface ApiCaseStudy {
   content: string;
   is_active: boolean;
   source_url: string | null;
+  structured: ApiCaseStudyStructured | null;
   created_at: string | null;
 }
 
@@ -951,6 +971,14 @@ export async function importCaseStudyFromUrl(data: {
     method: "POST", headers: jsonHeaders(), body: JSON.stringify(data),
   });
   if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to import case study"));
+  return res.json();
+}
+
+export async function reextractCaseStudy(id: string): Promise<ApiCaseStudy> {
+  const res = await fetch(`${API_URL}/outreach/brain/case-studies/${id}/reextract`, {
+    method: "POST", headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to re-extract case study"));
   return res.json();
 }
 

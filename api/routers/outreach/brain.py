@@ -147,6 +147,7 @@ def _case_study_dict(cs: CaseStudy) -> dict:
         "content": cs.content,
         "is_active": cs.is_active,
         "source_url": cs.source_url,
+        "structured": cs.structured,
         "created_at": cs.created_at.isoformat() if cs.created_at else None,
     }
 
@@ -179,6 +180,7 @@ async def create_case_study(
         content=body.content,
         is_active=True,
         source_url=body.source_url,
+        structured=body.structured,
     )
     db.add(cs)
     await db.flush()
@@ -211,8 +213,46 @@ async def import_case_study(
         content=extracted["content"],
         is_active=True,
         source_url=extracted.get("source_url"),
+        structured=extracted.get("structured"),
     )
     db.add(cs)
+    await db.flush()
+    return _case_study_dict(cs)
+
+
+@router.post("/brain/case-studies/{case_study_id}/reextract")
+async def reextract_case_study(
+    case_study_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(require_auth),
+):
+    """Re-fetch the source URL and re-run extraction in place. Updates the
+    existing row so existing references / IDs keep working."""
+    result = await db.execute(
+        select(CaseStudy).where(
+            CaseStudy.id == case_study_id,
+            CaseStudy.user_id == LLOYD_USER_ID,
+        )
+    )
+    cs = result.scalar_one_or_none()
+    if not cs:
+        raise HTTPException(404, "Case study not found")
+    if not cs.source_url:
+        raise HTTPException(
+            400, "This case study has no source URL — re-extract is only available for URL imports."
+        )
+
+    try:
+        extracted = await import_case_study_from_url(db, cs.source_url)
+    except CaseStudyImportError as exc:
+        raise HTTPException(400, str(exc))
+
+    cs.title = extracted["title"]
+    cs.client_name = extracted.get("client_name")
+    cs.industry = extracted.get("industry")
+    cs.tags = extracted.get("tags") or []
+    cs.content = extracted["content"]
+    cs.structured = extracted.get("structured")
     await db.flush()
     return _case_study_dict(cs)
 
@@ -248,6 +288,8 @@ async def update_case_study(
         cs.is_active = body.is_active
     if body.source_url is not None:
         cs.source_url = body.source_url or None
+    if body.structured is not None:
+        cs.structured = body.structured or None
 
     await db.flush()
     return _case_study_dict(cs)

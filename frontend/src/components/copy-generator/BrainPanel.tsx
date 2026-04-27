@@ -4,7 +4,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   fetchPrinciples, createPrinciple, updatePrinciple, deletePrinciple,
   fetchCaseStudies, createCaseStudy as apiCreateCaseStudy, updateCaseStudy as apiUpdateCaseStudy, deleteCaseStudy as apiDeleteCaseStudy,
-  importCaseStudyFromUrl,
+  importCaseStudyFromUrl, reextractCaseStudy,
   fetchBrainContent, updateUniversalBrain, updateFormatBrain,
   type ApiPrinciple, type ApiCaseStudy, type ApiBrainContent,
 } from "@/lib/api";
@@ -17,6 +17,15 @@ function Spinner() {
       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
     </svg>
+  );
+}
+
+function Field({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">{label}</div>
+      <div className="text-zinc-700 dark:text-zinc-300 truncate">{value}</div>
+    </div>
   );
 }
 
@@ -182,6 +191,10 @@ function CaseStudiesTab() {
   const [importError, setImportError] = useState<string | null>(null);
   const [importRows, setImportRows] = useState<ImportRow[]>([]);
 
+  // Per-row UI state
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [reextractingId, setReextractingId] = useState<string | null>(null);
+
   useEffect(() => {
     fetchCaseStudies().then(setStudies).catch(console.error).finally(() => setLoading(false));
   }, []);
@@ -236,6 +249,18 @@ function CaseStudiesTab() {
       await apiDeleteCaseStudy(id);
       setStudies(prev => prev.filter(s => s.id !== id));
     } catch (err) { console.error(err); }
+  }, []);
+
+  const handleReextract = useCallback(async (id: string) => {
+    setReextractingId(id);
+    try {
+      const updated = await reextractCaseStudy(id);
+      setStudies(prev => prev.map(s => s.id === id ? updated : s));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Re-extract failed");
+    } finally {
+      setReextractingId(null);
+    }
   }, []);
 
   const handleImportSingle = useCallback(async () => {
@@ -415,55 +440,147 @@ function CaseStudiesTab() {
 
       {/* List */}
       <div className="space-y-2 max-h-[400px] overflow-y-auto">
-        {studies.map((cs) => (
-          <div
-            key={cs.id}
-            className={`rounded-xl border px-4 py-3 transition-all ${
-              cs.is_active
-                ? "border-zinc-200 dark:border-zinc-800/40 bg-white dark:bg-zinc-900/60"
-                : "border-zinc-100 dark:border-zinc-800/20 bg-zinc-50 dark:bg-zinc-900/30 opacity-60"
-            }`}
-          >
-            <div className="flex items-start justify-between gap-2">
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <h4 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200 truncate">{cs.title}</h4>
-                  {cs.source_url && (
-                    <a
-                      href={cs.source_url}
-                      target="_blank"
-                      rel="noreferrer noopener"
-                      className="text-[10px] text-violet-500 hover:text-violet-400"
-                      title={cs.source_url}
-                    >
-                      ↗ source
-                    </a>
+        {studies.map((cs) => {
+          const isExpanded = expandedId === cs.id;
+          const s = cs.structured;
+          const hasStructured = !!(s && (s.quote || (s.metrics && s.metrics.length) || (s.pain_points && s.pain_points.length) || (s.outcomes && s.outcomes.length) || (s.persona && Object.keys(s.persona).length)));
+          return (
+            <div
+              key={cs.id}
+              className={`rounded-xl border px-4 py-3 transition-all ${
+                cs.is_active
+                  ? "border-zinc-200 dark:border-zinc-800/40 bg-white dark:bg-zinc-900/60"
+                  : "border-zinc-100 dark:border-zinc-800/20 bg-zinc-50 dark:bg-zinc-900/30 opacity-60"
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h4 className="text-sm font-semibold text-zinc-800 dark:text-zinc-200 truncate">{cs.title}</h4>
+                    {cs.source_url && (
+                      <a
+                        href={cs.source_url}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="text-[10px] text-violet-500 hover:text-violet-400"
+                        title={cs.source_url}
+                      >
+                        ↗ source
+                      </a>
+                    )}
+                    {hasStructured && (
+                      <span className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                        Structured
+                      </span>
+                    )}
+                    {cs.client_name && <span className="text-[10px] text-zinc-500">{cs.client_name}</span>}
+                    {cs.industry && (
+                      <span className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400">
+                        {cs.industry}
+                      </span>
+                    )}
+                    {(cs.tags || []).map(tag => (
+                      <span key={tag} className="text-[9px] font-medium px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800/60 text-zinc-500 dark:text-zinc-400">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                  {!isExpanded && (
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 line-clamp-2 leading-relaxed">{cs.content}</p>
                   )}
-                  {cs.client_name && <span className="text-[10px] text-zinc-500">{cs.client_name}</span>}
-                  {cs.industry && (
-                    <span className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400">
-                      {cs.industry}
-                    </span>
-                  )}
-                  {(cs.tags || []).map(tag => (
-                    <span key={tag} className="text-[9px] font-medium px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800/60 text-zinc-500 dark:text-zinc-400">
-                      {tag}
-                    </span>
-                  ))}
                 </div>
-                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 line-clamp-2 leading-relaxed">{cs.content}</p>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={() => setExpandedId(isExpanded ? null : cs.id)}
+                    className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 px-1"
+                  >
+                    {isExpanded ? "Collapse" : "Expand"}
+                  </button>
+                  {cs.source_url && (
+                    <button
+                      onClick={() => handleReextract(cs.id)}
+                      disabled={reextractingId === cs.id}
+                      title="Re-fetch the source URL and re-run extraction"
+                      className="text-[10px] text-violet-500 hover:text-violet-400 disabled:opacity-50 px-1 flex items-center gap-1"
+                    >
+                      {reextractingId === cs.id && <Spinner />}
+                      Re-extract
+                    </button>
+                  )}
+                  <button onClick={() => handleToggle(cs)}
+                    className={`text-[10px] font-medium px-1.5 py-0.5 rounded transition-colors ${cs.is_active ? "text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-500/10" : "text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-500/10"}`}>
+                    {cs.is_active ? "Disable" : "Enable"}
+                  </button>
+                  <button onClick={() => handleEdit(cs)} className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 px-1">Edit</button>
+                  <button onClick={() => handleDelete(cs.id)} className="text-[10px] text-zinc-400 hover:text-red-500 px-1">Delete</button>
+                </div>
               </div>
-              <div className="flex items-center gap-1 shrink-0">
-                <button onClick={() => handleToggle(cs)}
-                  className={`text-[10px] font-medium px-1.5 py-0.5 rounded transition-colors ${cs.is_active ? "text-amber-500 hover:bg-amber-50 dark:hover:bg-amber-500/10" : "text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-500/10"}`}>
-                  {cs.is_active ? "Disable" : "Enable"}
-                </button>
-                <button onClick={() => handleEdit(cs)} className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 px-1">Edit</button>
-                <button onClick={() => handleDelete(cs.id)} className="text-[10px] text-zinc-400 hover:text-red-500 px-1">Delete</button>
-              </div>
+
+              {isExpanded && (
+                <div className="mt-3 pt-3 border-t border-zinc-100 dark:border-zinc-800/40 space-y-3 text-xs">
+                  {s?.persona && (s.persona.role || s.persona.company_size || s.persona.target_market) && (
+                    <div className="grid grid-cols-3 gap-2">
+                      {s.persona.role && (
+                        <Field label="Role" value={s.persona.role} />
+                      )}
+                      {s.persona.company_size && (
+                        <Field label="Company size" value={s.persona.company_size} />
+                      )}
+                      {s.persona.target_market && (
+                        <Field label="Target market" value={s.persona.target_market} />
+                      )}
+                    </div>
+                  )}
+
+                  {s?.metrics && s.metrics.length > 0 && (
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold mb-1">Metrics</div>
+                      <div className="space-y-0.5">
+                        {s.metrics.map((m, i) => (
+                          <div key={i} className="flex items-center gap-2 text-zinc-700 dark:text-zinc-300">
+                            <span className="text-zinc-500 min-w-0 flex-1 truncate">{m.label}</span>
+                            <span className="font-mono text-zinc-400">{m.before || "—"}</span>
+                            <span className="text-zinc-400">→</span>
+                            <span className="font-mono font-semibold text-emerald-600 dark:text-emerald-400">{m.after || "—"}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {s?.pain_points && s.pain_points.length > 0 && (
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold mb-1">Pain points</div>
+                      <ul className="list-disc list-inside text-zinc-600 dark:text-zinc-400 space-y-0.5">
+                        {s.pain_points.map((p, i) => <li key={i}>{p}</li>)}
+                      </ul>
+                    </div>
+                  )}
+
+                  {s?.outcomes && s.outcomes.length > 0 && (
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold mb-1">Outcomes</div>
+                      <ul className="list-disc list-inside text-zinc-600 dark:text-zinc-400 space-y-0.5">
+                        {s.outcomes.map((o, i) => <li key={i}>{o}</li>)}
+                      </ul>
+                    </div>
+                  )}
+
+                  {s?.quote && (
+                    <blockquote className="border-l-2 border-violet-400 pl-3 text-zinc-700 dark:text-zinc-300 italic leading-relaxed">
+                      “{s.quote}”
+                    </blockquote>
+                  )}
+
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold mb-1">Narrative</div>
+                    <p className="text-zinc-600 dark:text-zinc-400 leading-relaxed whitespace-pre-line">{cs.content}</p>
+                  </div>
+                </div>
+              )}
             </div>
-          </div>
-        ))}
+          );
+        })}
         {studies.length === 0 && (
           <div className="text-center py-8 text-zinc-400 text-sm">No case studies yet. Add one to use in copy generation.</div>
         )}

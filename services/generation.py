@@ -134,7 +134,9 @@ async def _load_case_studies(
     if not all_studies:
         return []
 
-    # Score each study for relevance to this bucket
+    # Score each study for relevance to this bucket. Industry is the strongest
+    # signal; tags are a soft match; persona.target_market lets us match
+    # bucket-name niches that aren't expressed as a clean industry label.
     def relevance(cs: CaseStudy) -> int:
         score = 0
         cs_industry = (cs.industry or "").lower()
@@ -154,19 +156,41 @@ async def _load_case_studies(
                 score += 3
             if tag and bucket and tag in bucket:
                 score += 3
+
+        # Structured persona signals: target_market and role often capture the
+        # niche better than the industry label (e.g. "high-net-worth individuals"
+        # for a financial advisor case study would match a "Wealth Managers" bucket).
+        structured = cs.structured or {}
+        persona = structured.get("persona") if isinstance(structured.get("persona"), dict) else {}
+        if persona:
+            target = (persona.get("target_market") or "").lower()
+            role = (persona.get("role") or "").lower()
+            for needle in (target, role):
+                if not needle:
+                    continue
+                if bucket and needle in bucket:
+                    score += 2
+                if bucket_industry and needle in bucket_industry:
+                    score += 2
+
         return score
 
     scored = [(relevance(cs), cs) for cs in all_studies]
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # Return top 3 (prioritise matched, then fill with others)
+    # Return top 3 (prioritise matched, then fill with others). Surface
+    # `structured` (verbatim quote, before/after metrics, pain points, outcomes,
+    # persona) so the copy generator has clean signal instead of having to
+    # re-parse the narrative `content` blob.
     top = scored[:3]
     return [
         {
             "title": cs.title or "",
             "client_name": cs.client_name or "",
             "industry": cs.industry or "",
+            "tags": cs.tags or [],
             "content": cs.content,
+            "structured": cs.structured or None,
         }
         for _, cs in top
     ]
@@ -375,17 +399,70 @@ async def stream_calendar_blocker(
 # ── Bucket Copy Generation ────────────────────────────────────────────────
 
 def _format_case_studies(case_studies: list[dict] | None) -> str:
-    """Format case studies for inclusion in prompts."""
+    """
+    Format case studies for inclusion in prompts. When a case study has a
+    `structured` payload (from the URL importer) we render it as discrete
+    fields so the LLM can lift verbatim quotes and exact before→after metrics
+    instead of reverse-engineering them from the narrative blob.
+    """
     if not case_studies:
         return "No case studies available."
-    parts = []
+
+    parts: list[str] = []
     for cs in case_studies:
         label = cs.get("title", "Case Study")
         if cs.get("client_name"):
             label += f" ({cs['client_name']})"
         if cs.get("industry"):
             label += f" — {cs['industry']}"
-        parts.append(f"### {label}\n{cs['content']}")
+
+        section: list[str] = [f"### {label}"]
+
+        structured = cs.get("structured") if isinstance(cs.get("structured"), dict) else None
+        if structured:
+            persona = structured.get("persona") if isinstance(structured.get("persona"), dict) else {}
+            persona_bits = [
+                f"{key.replace('_', ' ').title()}: {val}"
+                for key, val in (persona or {}).items()
+                if val
+            ]
+            if persona_bits:
+                section.append("**Persona:** " + " · ".join(persona_bits))
+
+            metrics = [m for m in (structured.get("metrics") or []) if isinstance(m, dict)]
+            if metrics:
+                lines = []
+                for m in metrics:
+                    label_m = (m.get("label") or "").strip()
+                    before = (m.get("before") or "").strip()
+                    after = (m.get("after") or "").strip()
+                    if before and after:
+                        lines.append(f"- {label_m}: {before} → {after}")
+                    elif after:
+                        lines.append(f"- {label_m}: {after}")
+                    elif label_m:
+                        lines.append(f"- {label_m}")
+                if lines:
+                    section.append("**Metrics (use verbatim — do not round or change units):**\n" + "\n".join(lines))
+
+            pain = [p for p in (structured.get("pain_points") or []) if str(p).strip()]
+            if pain:
+                section.append("**Pain points (client voice):**\n" + "\n".join(f"- {p}" for p in pain))
+
+            outcomes = [o for o in (structured.get("outcomes") or []) if str(o).strip()]
+            if outcomes:
+                section.append("**Outcomes:**\n" + "\n".join(f"- {o}" for o in outcomes))
+
+            quote = (structured.get("quote") or "").strip()
+            if quote:
+                section.append(f'**Verbatim testimonial (quote exactly if used):**\n> {quote}')
+
+        narrative = (cs.get("content") or "").strip()
+        if narrative:
+            section.append(f"**Narrative:**\n{narrative}")
+
+        parts.append("\n\n".join(section))
+
     return "\n\n---\n\n".join(parts)
 
 
@@ -436,7 +513,12 @@ You generate {type_label} for LinkedIn calendar invites that get professionals t
 ## Real Examples (study these — match this voice and structure exactly)
 {examples_block}
 
-## Client Case Studies (use these as proof — reference real results verbatim)
+## Client Case Studies (use as proof — verbatim quotes and exact metrics only)
+When a case study has Metrics, the before→after numbers are the source of truth:
+do not round, paraphrase, or unit-convert them. When a case study has a
+Verbatim testimonial, you may quote from it word-for-word but never reword it.
+Pain points and Outcomes are short, client-voice fragments useful as openers.
+
 {_format_case_studies(case_studies)}
 
 ## Output Format

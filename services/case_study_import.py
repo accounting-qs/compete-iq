@@ -112,10 +112,55 @@ async def _get_openai_key(db: AsyncSession) -> str:
     return row.api_key
 
 
+_METRIC_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["label", "before", "after"],
+    "properties": {
+        "label": {
+            "type": "string",
+            "description": "What the metric measures, e.g. 'Annual revenue', 'Sales calls per month', 'Webinar attendees per month'.",
+        },
+        "before": {
+            "type": "string",
+            "description": "Pre-state as it appears on the page (e.g. '$120K', 'Sporadic', '0'). Empty string if not stated.",
+        },
+        "after": {
+            "type": "string",
+            "description": "Post-state as it appears on the page (e.g. '$360K', '62', '400+'). Empty string if not stated.",
+        },
+    },
+}
+
+
+_PERSONA_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["role", "company_size", "target_market"],
+    "properties": {
+        "role": {
+            "type": "string",
+            "description": "Client's role / archetype, e.g. 'Independent financial advisor', 'Solo founder coach'. Empty if unclear.",
+        },
+        "company_size": {
+            "type": "string",
+            "description": "Team size as stated on the page, e.g. 'Solo founder + 1 assistant', '5-10 employees'. Empty if unstated.",
+        },
+        "target_market": {
+            "type": "string",
+            "description": "Who the client serves, e.g. 'High-net-worth individuals', 'B2B SaaS founders'. Empty if unstated.",
+        },
+    },
+}
+
+
 _EXTRACTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["title", "client_name", "industry", "tags", "content"],
+    "required": [
+        "title", "client_name", "industry", "tags", "content",
+        "headline", "quote", "metrics", "pain_points", "outcomes", "persona",
+    ],
     "properties": {
         "title": {
             "type": "string",
@@ -137,19 +182,67 @@ _EXTRACTION_SCHEMA: dict[str, Any] = {
         "content": {
             "type": "string",
             "description": (
-                "Self-contained case-study summary suitable for use as RAG context in copy generation. "
-                "Include: who the client is, the problem, what they did, and quantified outcomes / metrics / "
-                "testimonials when present. 150-400 words. Plain text, no markdown headers."
+                "Self-contained narrative summary, 150-400 words, plain text, no markdown headers. "
+                "Who the client is, the problem, what they did, and quantified outcomes."
             ),
         },
+        "headline": {
+            "type": "string",
+            "description": (
+                "Program / offer / product name promoted on the page (e.g. '10X GROWTH Accelerator'). "
+                "This is NOT the case-study title — it's the offer being sold. Empty string if absent."
+            ),
+        },
+        "quote": {
+            "type": "string",
+            "description": (
+                "VERBATIM testimonial from the client. Copy the words exactly as they appear, "
+                "preserving the client's voice, em-dashes, and tone. Do NOT paraphrase or smooth out. "
+                "Empty string if no first-person quote exists on the page."
+            ),
+        },
+        "metrics": {
+            "type": "array",
+            "items": _METRIC_SCHEMA,
+            "description": (
+                "Discrete before/after KPIs as separate objects. Use the exact numbers and units from the "
+                "page (e.g. '$120K' → '$360K'). If only an after-value is shown (e.g. '400+ attendees/month'), "
+                "leave 'before' empty. Do NOT mash multiple metrics into one entry."
+            ),
+        },
+        "pain_points": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "3-5 specific pain phrases from the 'before' state, in the client's voice when possible "
+                "(e.g. 'inconsistent lead flow', 'ineffective marketing strategies'). "
+                "Short fragments, not full sentences. Empty array if not stated."
+            ),
+        },
+        "outcomes": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "3-5 specific outcome phrases from the 'after' state, ideally tied to a metric or "
+                "behaviour change (e.g. 'peak-performing webinar system', '60+ qualified sales calls / month'). "
+                "Short fragments, not full sentences."
+            ),
+        },
+        "persona": _PERSONA_SCHEMA,
     },
 }
 
 
 _SYSTEM_PROMPT = (
-    "You extract structured case-study data from a marketing/case-study web page. "
-    "Be faithful to the source — do not invent metrics or quotes. "
-    "If a field is genuinely absent, use an empty string (or empty array for tags) rather than guessing."
+    "You extract structured case-study data from a marketing / case-study web page. "
+    "Two strict rules:\n"
+    "1. PRESERVE DIRECT QUOTES VERBATIM. Copy testimonials exactly — never paraphrase, "
+    "smooth, or summarise the client's words. The quote field must be a real first-person sentence "
+    "from the page, character-for-character.\n"
+    "2. EXTRACT METRICS AS DISCRETE before/after PAIRS, not prose. If the page shows three KPIs, "
+    "return three separate metric objects with the labels and numbers as they appear.\n"
+    "If a field is genuinely absent, use an empty string (or empty array). Never invent numbers, "
+    "quotes, or claims that aren't on the page."
 )
 
 
@@ -165,7 +258,7 @@ async def import_case_study_from_url(
 ) -> dict[str, Any]:
     """
     Returns a dict shaped like the CaseStudyCreate payload:
-    {title, client_name, industry, tags, content, source_url}.
+    {title, client_name, industry, tags, content, source_url, structured}.
 
     Raises CaseStudyImportError on any user-facing failure.
     """
@@ -207,6 +300,8 @@ async def import_case_study_from_url(
     tags_raw = extracted.get("tags") or []
     tags = [str(t).strip().lower() for t in tags_raw if str(t).strip()]
 
+    structured = _normalise_structured(extracted)
+
     return {
         "title": title,
         "client_name": (extracted.get("client_name") or "").strip() or None,
@@ -214,4 +309,59 @@ async def import_case_study_from_url(
         "tags": tags,
         "content": content,
         "source_url": url,
+        "structured": structured,
+    }
+
+
+def _normalise_structured(extracted: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Pulls the rich extraction fields out of the OpenAI response and trims them
+    to a clean shape suitable for storage in case_studies.structured.
+    Returns None when the model gave us nothing useful (so we don't bloat the row).
+    """
+    headline = (extracted.get("headline") or "").strip()
+    quote = (extracted.get("quote") or "").strip()
+
+    metrics_raw = extracted.get("metrics") or []
+    metrics: list[dict[str, str]] = []
+    for m in metrics_raw:
+        if not isinstance(m, dict):
+            continue
+        label = str(m.get("label") or "").strip()
+        before = str(m.get("before") or "").strip()
+        after = str(m.get("after") or "").strip()
+        if not label and not before and not after:
+            continue
+        metrics.append({"label": label, "before": before, "after": after})
+
+    pain_points = [
+        str(x).strip() for x in (extracted.get("pain_points") or [])
+        if str(x or "").strip()
+    ]
+    outcomes = [
+        str(x).strip() for x in (extracted.get("outcomes") or [])
+        if str(x or "").strip()
+    ]
+
+    persona_raw = extracted.get("persona") or {}
+    persona: dict[str, str] = {}
+    if isinstance(persona_raw, dict):
+        for key in ("role", "company_size", "target_market"):
+            v = str(persona_raw.get(key) or "").strip()
+            if v:
+                persona[key] = v
+
+    has_any = (
+        headline or quote or metrics or pain_points or outcomes or persona
+    )
+    if not has_any:
+        return None
+
+    return {
+        "headline": headline,
+        "quote": quote,
+        "metrics": metrics,
+        "pain_points": pain_points,
+        "outcomes": outcomes,
+        "persona": persona,
     }

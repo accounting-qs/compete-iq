@@ -159,6 +159,7 @@ class CaseStudyCreate(BaseModel):
     tags: list[str] = []
     content: str
     source_url: str | None = None
+    structured: dict | None = None
 
 class CaseStudyUpdate(BaseModel):
     title: str | None = None
@@ -168,6 +169,7 @@ class CaseStudyUpdate(BaseModel):
     content: str | None = None
     is_active: bool | None = None
     source_url: str | None = None
+    structured: dict | None = None
 
 class CaseStudyImportRequest(BaseModel):
     url: str
