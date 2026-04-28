@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import require_auth
@@ -39,6 +39,17 @@ def _normalize_email(raw: str) -> str | None:
         return None
     e = raw.strip().lower()
     return e or None
+
+
+# asyncpg caps bind parameters at 32,767 per query. Our largest IN-clauses use
+# one parameter per email (plus a few constants), so cap at 5,000 to stay well
+# under the limit and match the chunking pattern used by the import pipeline.
+_DB_CHUNK_SIZE = 5000
+
+
+def _chunked(seq: list, size: int):
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
 
 
 @router.post("/webinars/{webinar_id}/releases", status_code=201)
@@ -102,31 +113,43 @@ async def release_contacts(
     if not normalized:
         raise HTTPException(400, "No valid emails provided")
 
-    # Find every contact (any user-status) matching these emails so we can
-    # accurately classify "not found" vs "already available" vs "in another
-    # webinar". `func.lower(Contact.email)` would work but we already store
-    # emails lowercased on insert — match directly.
-    c_result = await db.execute(
-        select(Contact).where(
-            Contact.user_id == LLOYD_USER_ID,
-            Contact.email.in_(normalized),
+    # Find every matching contact, chunked to stay under asyncpg's 32,767-param
+    # limit on a single query. We fetch only the columns we need (no full ORM
+    # load) so a 30k-row CSV doesn't materialize 30k hydrated Contact objects.
+    by_email: dict[str, list[dict]] = {}
+    assignment_id_set = set(assignment_ids)
+    for chunk in _chunked(normalized, _DB_CHUNK_SIZE):
+        c_result = await db.execute(
+            select(
+                Contact.id,
+                Contact.email,
+                Contact.outreach_status,
+                Contact.assignment_id,
+                Contact.bucket_id,
+                Contact.used_at,
+            ).where(
+                Contact.user_id == LLOYD_USER_ID,
+                Contact.email.in_(chunk),
+            )
         )
-    )
-    all_matches = list(c_result.scalars().all())
-
-    by_email: dict[str, list[Contact]] = {}
-    for c in all_matches:
-        if c.email:
-            by_email.setdefault(c.email, []).append(c)
+        for row in c_result.all():
+            by_email.setdefault(row.email, []).append({
+                "id": row.id,
+                "status": row.outreach_status,
+                "assignment_id": row.assignment_id,
+                "bucket_id": row.bucket_id,
+                "used_at": row.used_at,
+            })
 
     release_batch_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
 
-    released_contacts: list[Contact] = []
-    by_status_count = {"assigned": 0, "used": 0}
     not_found: list[str] = []
     already_available: list[str] = []
+    by_status_count = {"assigned": 0, "used": 0}
     touched_bucket_ids: set[str] = set()
+    log_rows: list[dict] = []
+    contact_ids_to_release: list[str] = []
 
     for email in normalized:
         candidates = by_email.get(email)
@@ -134,62 +157,69 @@ async def release_contacts(
             not_found.append(email)
             continue
 
-        # Prefer a contact attached to this webinar that is assigned/used.
         target = next(
             (
                 c for c in candidates
-                if c.assignment_id in assignment_ids
-                and c.outreach_status in ("assigned", "used")
+                if c["assignment_id"] in assignment_id_set
+                and c["status"] in ("assigned", "used")
             ),
             None,
         )
         if target is None:
             # Email exists for the user but not in this webinar's pool — either
-            # already available, or assigned/used in a different webinar. We
-            # only report "already available" so operators don't accidentally
-            # think the system found their contact and silently did nothing.
-            if any(c.outreach_status == "available" for c in candidates):
+            # already available, or assigned/used in a different webinar.
+            if any(c["status"] == "available" for c in candidates):
                 already_available.append(email)
             else:
                 not_found.append(email)
             continue
 
-        prior_status = target.outreach_status
-        prior_assignment_id = target.assignment_id
-        prior_bucket_id = target.bucket_id
-        prior_used_at = target.used_at
-
-        target.outreach_status = "available"
-        target.assignment_id = None
-        target.assigned_date = None
-        target.used_at = None
-
-        db.add(ContactReleaseLog(
-            user_id=LLOYD_USER_ID,
-            webinar_id=webinar_id,
-            release_batch_id=release_batch_id,
-            released_at=now,
-            released_by=None,
-            contact_id=target.id,
-            email=email,
-            prior_status=prior_status,
-            prior_assignment_id=prior_assignment_id,
-            prior_bucket_id=prior_bucket_id,
-            prior_used_at=prior_used_at,
-        ))
-        released_contacts.append(target)
-        by_status_count[prior_status] += 1
-        if prior_bucket_id:
-            touched_bucket_ids.add(prior_bucket_id)
+        log_rows.append({
+            "user_id": LLOYD_USER_ID,
+            "webinar_id": webinar_id,
+            "release_batch_id": release_batch_id,
+            "released_at": now,
+            "released_by": None,
+            "contact_id": target["id"],
+            "email": email,
+            "prior_status": target["status"],
+            "prior_assignment_id": target["assignment_id"],
+            "prior_bucket_id": target["bucket_id"],
+            "prior_used_at": target["used_at"],
+        })
+        contact_ids_to_release.append(target["id"])
+        by_status_count[target["status"]] += 1
+        if target["bucket_id"]:
+            touched_bucket_ids.add(target["bucket_id"])
 
         # `assignment.remaining` tracks "claimed but not yet marked used"
         # (mark_contacts_used decrements it). Releasing an `assigned` contact
         # removes one from that pool. Releasing a `used` contact doesn't
         # touch it — it was already decremented at mark-used time.
-        if prior_status == "assigned" and prior_assignment_id:
-            asn = assignments_by_id.get(prior_assignment_id)
+        if target["status"] == "assigned" and target["assignment_id"]:
+            asn = assignments_by_id.get(target["assignment_id"])
             if asn:
                 asn.remaining = max(0, (asn.remaining or 0) - 1)
+
+    # Bulk UPDATE all released contacts in one (or a few) statements rather
+    # than 30k individual ORM flushes.
+    for chunk in _chunked(contact_ids_to_release, _DB_CHUNK_SIZE):
+        await db.execute(
+            update(Contact)
+            .where(Contact.id.in_(chunk))
+            .values(
+                outreach_status="available",
+                assignment_id=None,
+                assigned_date=None,
+                used_at=None,
+            )
+        )
+
+    # Bulk INSERT audit-log rows. asyncpg's param cap is 32,767; each row has
+    # 11 columns so ~2,900 rows per insert is the hard limit — we use 2,000.
+    LOG_CHUNK = 2000
+    for chunk in _chunked(log_rows, LOG_CHUNK):
+        await db.execute(insert(ContactReleaseLog), chunk)
 
     # Reconcile bucket.remaining_contacts from the live available count rather
     # than incrementing — keeps the field self-healing if it ever drifts.
@@ -213,10 +243,11 @@ async def release_contacts(
             bucket_updates[bucket_id] = available_count
 
     await db.flush()
+    released_count = len(contact_ids_to_release)
 
     return {
-        "release_batch_id": release_batch_id if released_contacts else None,
-        "released": len(released_contacts),
+        "release_batch_id": release_batch_id if released_count else None,
+        "released": released_count,
         "not_found": not_found,
         "already_available": already_available,
         "by_status": by_status_count,
