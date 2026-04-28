@@ -32,6 +32,12 @@ router = APIRouter()
 
 class ReleaseRequest(BaseModel):
     emails: list[str]
+    # Optional batch id to group multiple chunked requests into one audit
+    # entry. The frontend uploads in 1k-row chunks for progress reporting;
+    # all chunks for the same upload share a release_batch_id so the audit
+    # log + future "undo" action treat them atomically. The first chunk
+    # omits this and the server generates one; subsequent chunks pass it back.
+    release_batch_id: str | None = None
 
 
 def _normalize_email(raw: str) -> str | None:
@@ -141,7 +147,7 @@ async def release_contacts(
                 "used_at": row.used_at,
             })
 
-    release_batch_id = str(uuid.uuid4())
+    release_batch_id = body.release_batch_id or str(uuid.uuid4())
     now = datetime.now(timezone.utc)
 
     not_found: list[str] = []
@@ -245,8 +251,10 @@ async def release_contacts(
     await db.flush()
     released_count = len(contact_ids_to_release)
 
+    # Always return the batch_id (even on a 0-released chunk) so the client
+    # can pass it through to subsequent chunks of the same upload.
     return {
-        "release_batch_id": release_batch_id if released_count else None,
+        "release_batch_id": release_batch_id,
         "released": released_count,
         "not_found": not_found,
         "already_available": already_available,

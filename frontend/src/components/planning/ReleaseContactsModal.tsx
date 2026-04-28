@@ -16,6 +16,13 @@ interface ParsedCsv {
   rows: string[][];
 }
 
+interface ReleaseProgress {
+  processed: number;
+  total: number;
+  chunkIndex: number;
+  chunkCount: number;
+}
+
 interface Props {
   webinarId: string;
   webinarNumber: number;
@@ -24,6 +31,11 @@ interface Props {
    * webinar lists / bucket counts to reflect the new totals. */
   onReleased: (result: ReleaseContactsResponse) => void;
 }
+
+// Send emails to the backend in 1k-row chunks. The server can handle larger
+// payloads, but smaller chunks give a smoother progress bar (~30 ticks for a
+// 30k-row CSV) and bound any individual request's blast radius.
+const RELEASE_CHUNK_SIZE = 1000;
 
 /** Minimal RFC4180-ish CSV parser. Handles quoted fields with embedded quotes
  * ("") and commas. The release CSV is expected to be small (an emails list)
@@ -76,6 +88,7 @@ export function ReleaseContactsModal({ webinarId, webinarNumber, onClose, onRele
   const [emailColumn, setEmailColumn] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ReleaseContactsResponse | null>(null);
+  const [progress, setProgress] = useState<ReleaseProgress | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Lock body scroll while open + close on Escape.
@@ -144,14 +157,63 @@ export function ReleaseContactsModal({ webinarId, webinarNumber, onClose, onRele
     }
     setStep("submitting");
     setError(null);
+
+    const chunks: string[][] = [];
+    for (let i = 0; i < extractedEmails.length; i += RELEASE_CHUNK_SIZE) {
+      chunks.push(extractedEmails.slice(i, i + RELEASE_CHUNK_SIZE));
+    }
+
+    setProgress({ processed: 0, total: extractedEmails.length, chunkIndex: 0, chunkCount: chunks.length });
+
+    // Aggregate the per-chunk reports into a single response shape the UI
+    // can render. We also reuse the batch_id from the first chunk so all
+    // released contacts land in one audit-log batch.
+    const aggregate: ReleaseContactsResponse = {
+      release_batch_id: "",
+      released: 0,
+      not_found: [],
+      already_available: [],
+      by_status: { assigned: 0, used: 0 },
+      bucket_updates: {},
+    };
+
     try {
-      const res = await releaseWebinarContacts(webinarId, extractedEmails);
-      setResult(res);
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        const res = await releaseWebinarContacts(
+          webinarId,
+          chunk,
+          aggregate.release_batch_id || undefined,
+        );
+        if (!aggregate.release_batch_id) aggregate.release_batch_id = res.release_batch_id;
+        aggregate.released += res.released;
+        aggregate.not_found.push(...res.not_found);
+        aggregate.already_available.push(...res.already_available);
+        aggregate.by_status.assigned += res.by_status.assigned;
+        aggregate.by_status.used += res.by_status.used;
+        // Last write wins — bucket_updates is the *current* available count
+        // per bucket, so the latest chunk's value is the most accurate.
+        Object.assign(aggregate.bucket_updates, res.bucket_updates);
+
+        setProgress({
+          processed: Math.min((i + 1) * RELEASE_CHUNK_SIZE, extractedEmails.length),
+          total: extractedEmails.length,
+          chunkIndex: i + 1,
+          chunkCount: chunks.length,
+        });
+      }
+      setResult(aggregate);
       setStep("done");
-      onReleased(res);
+      onReleased(aggregate);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Release failed.");
+      setError(
+        e instanceof Error
+          ? `${e.message} (released ${aggregate.released.toLocaleString()} contacts before the error — they're already saved)`
+          : "Release failed.",
+      );
       setStep("error");
+      // Still notify the parent so the planning page reflects what *did* land.
+      if (aggregate.released > 0) onReleased(aggregate);
     }
   }
 
@@ -299,10 +361,32 @@ export function ReleaseContactsModal({ webinarId, webinarNumber, onClose, onRele
             </div>
           )}
 
-          {step === "submitting" && (
-            <div className="py-12 text-center">
-              <div className="w-8 h-8 border-3 border-violet-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-              <div className="text-sm text-zinc-500">Releasing contacts…</div>
+          {step === "submitting" && progress && (
+            <div className="py-10">
+              <div className="text-center mb-4">
+                <div className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                  Releasing contacts…
+                </div>
+                <div className="text-xs text-zinc-500 mt-0.5">
+                  Batch {progress.chunkIndex.toLocaleString()} of {progress.chunkCount.toLocaleString()}
+                  {" — "}
+                  {progress.processed.toLocaleString()} / {progress.total.toLocaleString()} emails
+                </div>
+              </div>
+              <div className="h-2 w-full bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-violet-500 transition-[width] duration-300 ease-out"
+                  style={{
+                    width: `${progress.total > 0 ? (progress.processed / progress.total) * 100 : 0}%`,
+                  }}
+                />
+              </div>
+              <div className="text-center mt-2 text-[11px] text-zinc-500 font-mono">
+                {progress.total > 0
+                  ? Math.round((progress.processed / progress.total) * 100)
+                  : 0}
+                %
+              </div>
             </div>
           )}
 

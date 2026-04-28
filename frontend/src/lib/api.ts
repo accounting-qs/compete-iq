@@ -365,7 +365,7 @@ export async function downloadWebinarListExport(
 /* ── Webinar contact release ──────────────────────────────────────────── */
 
 export interface ReleaseContactsResponse {
-  release_batch_id: string | null;
+  release_batch_id: string;
   released: number;
   not_found: string[];
   already_available: string[];
@@ -376,13 +376,17 @@ export interface ReleaseContactsResponse {
 export async function releaseWebinarContacts(
   webinarId: string,
   emails: string[],
+  releaseBatchId?: string,
 ): Promise<ReleaseContactsResponse> {
   const res = await fetch(
     `${API_URL}/outreach/webinars/${webinarId}/releases`,
     {
       method: "POST",
       headers: jsonHeaders(),
-      body: JSON.stringify({ emails }),
+      body: JSON.stringify({
+        emails,
+        ...(releaseBatchId ? { release_batch_id: releaseBatchId } : {}),
+      }),
     },
   );
   if (!res.ok) {
