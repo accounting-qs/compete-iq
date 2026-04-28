@@ -362,6 +362,36 @@ export async function downloadWebinarListExport(
   URL.revokeObjectURL(url);
 }
 
+/* ── Webinar contact release ──────────────────────────────────────────── */
+
+export interface ReleaseContactsResponse {
+  release_batch_id: string | null;
+  released: number;
+  not_found: string[];
+  already_available: string[];
+  by_status: { assigned: number; used: number };
+  bucket_updates: Record<string, number>;
+}
+
+export async function releaseWebinarContacts(
+  webinarId: string,
+  emails: string[],
+): Promise<ReleaseContactsResponse> {
+  const res = await fetch(
+    `${API_URL}/outreach/webinars/${webinarId}/releases`,
+    {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ emails }),
+    },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to release contacts");
+  }
+  return res.json();
+}
+
 /* ── Bucket merge ──────────────────────────────────────────────────────── */
 
 export interface MergeBlockingBucket {
@@ -1064,6 +1094,7 @@ export interface StatisticsMetrics {
   gcalInvitedGhl: number | null;
   accountsNeeded: number | null;
   invited: number | null;
+  actuallyUsed: number | null;
   unsubscribes: number | null;
   ghlPageViews: number | null;
   lpRegs: number | null;
@@ -1169,6 +1200,10 @@ export interface ApiStatisticsRow {
   employeeRange: string | null;
   country: string | null;
   metrics: StatisticsMetrics;
+  /** True when rate metrics fell back to `invited` because `actuallyUsed`
+   * was null/0 — surfaces a tag on the row so operators know the
+   * denominator is the planned number, not the live sent number. */
+  usedFallback: boolean;
 }
 
 export interface ApiStatisticsWebinar {
@@ -1179,6 +1214,9 @@ export interface ApiStatisticsWebinar {
   workbookRow: number;
   source: string;
   summary: StatisticsMetrics;
+  /** Same fallback semantics as ApiStatisticsRow.usedFallback — applies
+   * to the parent summary's rate metrics. */
+  usedFallback: boolean;
   rows: ApiStatisticsRow[];
 }
 

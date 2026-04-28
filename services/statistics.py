@@ -57,9 +57,23 @@ def _safe_per1k(a: float | None, b: float | None) -> float | None:
     return a / (b / 1000)
 
 
-def compute_derived_metrics(m: dict[str, float | None]) -> dict[str, float | None]:
-    """Compute all derived fields from raw metrics. Zero-division → None."""
-    inv = m.get("invited")
+def compute_derived_metrics(
+    m: dict[str, float | None],
+) -> tuple[dict[str, float | None], bool]:
+    """Compute all derived fields from raw metrics. Zero-division → None.
+
+    Rate-metric denominator is `actuallyUsed` (live count of contacts marked
+    sent) so released contacts are excluded. Falls back to `invited` (planned
+    volume) when `actuallyUsed` is None or 0 — covers historical webinars
+    where contacts were never explicitly marked used and synthetic rows
+    (nonjoiners, no-list-data) that have no Planning attribution. The second
+    return value is True iff the fallback was used, so the UI can flag the
+    row.
+    """
+    actually_used = m.get("actuallyUsed")
+    planned_invited = m.get("invited")
+    used_fallback = actually_used is None or actually_used == 0
+    inv = planned_invited if used_fallback else actually_used
 
     derived: dict[str, float | None] = {
         # Pass through all raw fields
@@ -126,7 +140,7 @@ def compute_derived_metrics(m: dict[str, float | None]) -> dict[str, float | Non
         "closeRatePercent": _safe_div(m.get("won"), m.get("shows")),
         "qualPercent": _safe_div(m.get("qualified"), m.get("shows")),
     }
-    return derived
+    return derived, used_fallback
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +150,7 @@ def compute_derived_metrics(m: dict[str, float | None]) -> dict[str, float | Non
 # Keys that should be summed across children
 _SUM_KEYS = [
     "listSize", "listRemain", "gcalInvited", "accountsNeeded",
-    "invited", "unsubscribes", "ghlPageViews", "lpRegs",
+    "invited", "actuallyUsed", "unsubscribes", "ghlPageViews", "lpRegs",
     "yesMarked", "yesAttended", "yes10MinPlus", "yesAttendBySmsClick", "yesBookings",
     "maybeMarked", "maybeAttended", "maybe10MinPlus", "maybeAttendBySmsClick", "maybeBookings",
     "selfRegMarked", "selfRegAttended", "selfReg10MinPlus", "selfRegBookings",
@@ -268,11 +282,12 @@ async def get_statistics_webinars(source: str = "auto") -> list[dict[str, Any]]:
         for row in w["rows"]:
             raw_m = row["metrics"]
             raw_metrics_for_agg.append(raw_m)
-            derived = compute_derived_metrics(raw_m)
+            derived, row_fallback = compute_derived_metrics(raw_m)
             processed_rows.append(
                 {
                     **{k: v for k, v in row.items() if k != "metrics"},
                     "metrics": derived,
+                    "usedFallback": row_fallback,
                     "segmentName": _build_segment_name(row),
                 }
             )
@@ -281,10 +296,10 @@ async def get_statistics_webinars(source: str = "auto") -> list[dict[str, Any]]:
         # it can blend aggregated list bases with webinar-wide GHL/WG metrics),
         # use it. Otherwise aggregate child rows.
         if "summary" in w:
-            summary = compute_derived_metrics(w["summary"])
+            summary, summary_fallback = compute_derived_metrics(w["summary"])
         else:
             agg_raw = aggregate_parent_summary(raw_metrics_for_agg)
-            summary = compute_derived_metrics(agg_raw)
+            summary, summary_fallback = compute_derived_metrics(agg_raw)
 
         result.append(
             {
@@ -295,6 +310,7 @@ async def get_statistics_webinars(source: str = "auto") -> list[dict[str, Any]]:
                 "workbookRow": w.get("workbookRow", 0),
                 "source": source_label,
                 "summary": summary,
+                "usedFallback": summary_fallback,
                 "rows": [
                     {
                         "id": f"stat-w{w['number']}-r{r.get('workbookRow', i)}",

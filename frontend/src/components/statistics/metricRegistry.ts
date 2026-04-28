@@ -165,9 +165,14 @@ export const METRIC_COLUMNS: MetricColumn[] = [
 
   // ── Delivery ──
   {
-    key: "invited", label: "Invited", group: "Delivery", format: "number",
-    description: "Total contacts invited to this webinar (the denominator for response-rate metrics).",
+    key: "invited", label: "Invited (Planned)", group: "Delivery", format: "number",
+    description: "Originally planned send volume — preserved as the comparison baseline. Used as the fallback denominator for rate metrics when `actuallyUsed` is 0 (e.g. legacy webinars where contacts were never explicitly marked sent).",
     fieldsUsed: [{ ...F_WLA_VOLUME, filter: "SUM over assignments (= List Size)" }],
+  },
+  {
+    key: "actuallyUsed", label: "Actually Used", group: "Delivery", format: "number",
+    description: "Live count of contacts in this webinar with outreach_status='used'. Drops when contacts are released back to the bucket pool. Primary denominator for all rate metrics — falls back to `invited` when this is 0.",
+    fieldsUsed: [{ entity: "Planning Assignment", field: "contacts", filter: "COUNT WHERE assignment in this webinar AND outreach_status='used'" }],
   },
   {
     key: "unsubscribes", label: "Unsubs", group: "Delivery", format: "number",

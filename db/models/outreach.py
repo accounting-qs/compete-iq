@@ -198,6 +198,37 @@ class BucketCopyGenerationJob(Base):
     )
 
 
+class ContactReleaseLog(Base):
+    """Audit row for one contact released back to the bucket pool after a webinar.
+
+    A single uploaded CSV creates many rows sharing one `release_batch_id` so
+    a future "undo this release" feature can revert an entire batch at once.
+    `released_by` is nullable until the auth layer lands.
+    """
+    __tablename__ = "contact_release_log"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    webinar_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("webinars.id", ondelete="CASCADE"), nullable=False)
+    release_batch_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False)
+    released_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    released_by: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="SET NULL"))
+    contact_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False), ForeignKey("contacts.id", ondelete="SET NULL"))
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    prior_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    prior_assignment_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False))
+    prior_bucket_id: Mapped[Optional[str]] = mapped_column(UUID(as_uuid=False))
+    prior_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("prior_status IN ('assigned', 'used')", name="ck_release_log_prior_status"),
+        Index("ix_release_log_user", "user_id"),
+        Index("ix_release_log_webinar", "webinar_id"),
+        Index("ix_release_log_batch", "release_batch_id"),
+        Index("ix_release_log_email", "user_id", "email"),
+    )
+
+
 class WebinarListExportJob(Base):
     """Tracks async CSV export of a webinar's assigned-lists contacts.
 

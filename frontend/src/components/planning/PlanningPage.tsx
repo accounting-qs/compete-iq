@@ -16,6 +16,7 @@ import {
   type ApiCustomList, type ApiWebinarListExportJob,
 } from "@/lib/api";
 import { VariationsModal, apiCopyToVariant, type CopyVariant } from "../shared/VariationsModal";
+import { ReleaseContactsModal } from "./ReleaseContactsModal";
 
 /* ─── Copy link helper ────────────────────────────────────────────────── */
 
@@ -713,6 +714,29 @@ export function PlanningPage() {
       return next;
     });
   };
+
+  /* ── Release unused contacts modal ──────────────────────────────── */
+
+  const [releaseModalWebinar, setReleaseModalWebinar] = useState<{ id: string; number: number } | null>(null);
+
+  const refreshAfterRelease = useCallback(async (webinarId: string) => {
+    // After a release we need fresh assignment counts (volume stays, but
+    // bucket-side remaining_contacts and the contact mark counts change).
+    try {
+      const [{ buckets: freshBuckets }, { assignments }] = await Promise.all([
+        fetchBuckets(),
+        fetchWebinarLists(webinarId),
+      ]);
+      setBuckets(freshBuckets);
+      setWebinars((prev) => prev.map((w) => (
+        w.id === webinarId
+          ? { ...w, lists: assignments.map(apiAssignmentToList) }
+          : w
+      )));
+    } catch (err) {
+      console.error("Failed to refresh after release:", err);
+    }
+  }, []);
 
   /* ── Webinar list export: background CSV build + polling ──────────── */
 
@@ -1660,6 +1684,15 @@ export function PlanningPage() {
                     <td className="px-2 py-2.5" colSpan={2}></td>
                     <td className="px-2 py-2.5 text-right font-mono text-emerald-400 font-bold">{wAccounts > 0 ? wAccounts : ""}</td>
                     <td className="px-2 py-2.5 text-right" colSpan={3} onClick={(e) => e.stopPropagation()}>
+                      <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                        <button
+                          onClick={() => setReleaseModalWebinar({ id: w.id, number: w.number })}
+                          className="px-2 py-1 rounded text-[10px] font-semibold inline-flex items-center gap-1.5 whitespace-nowrap border bg-zinc-200/60 dark:bg-zinc-800/60 text-zinc-600 dark:text-zinc-400 hover:text-amber-500 hover:bg-amber-500/10 border-zinc-300 dark:border-zinc-700/50"
+                          title="Upload a CSV of emails you couldn't contact in time — they'll be released back to their buckets."
+                        >
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 11-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><polyline points="21 3 21 8 16 8"/></svg>
+                          Release unused
+                        </button>
                       {(() => {
                         const job = exportJobs.get(w.id);
                         const isActive = job?.status === "pending" || job?.status === "processing";
@@ -1707,6 +1740,7 @@ export function PlanningPage() {
                           </button>
                         );
                       })()}
+                      </div>
                     </td>
                   </tr>
 
@@ -2602,6 +2636,16 @@ export function PlanningPage() {
           />
         );
       })()}
+
+      {/* ── Release Unused Contacts Modal ─────────────────────────── */}
+      {releaseModalWebinar && (
+        <ReleaseContactsModal
+          webinarId={releaseModalWebinar.id}
+          webinarNumber={releaseModalWebinar.number}
+          onClose={() => setReleaseModalWebinar(null)}
+          onReleased={() => refreshAfterRelease(releaseModalWebinar.id)}
+        />
+      )}
 
       {/* ── New Webinar Modal ──────────────────────────────────────── */}
       {showNewWebinarModal && (

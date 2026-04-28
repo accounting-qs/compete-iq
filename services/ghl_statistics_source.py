@@ -73,7 +73,8 @@ def _webinar_series_regex(webinar_number: int) -> str:
 async def _webinar_summary_from_app(
     db: AsyncSession, webinar_id: str
 ) -> dict[str, float | None]:
-    """Fetch invited/listSize/listRemain/accountsNeeded from app-side assignments."""
+    """Fetch invited/listSize/listRemain/accountsNeeded from app-side assignments,
+    plus the live actuallyUsed count from contacts.outreach_status='used'."""
     result = await db.execute(
         select(
             func.coalesce(func.sum(WebinarListAssignment.volume), 0).label("list_size"),
@@ -84,12 +85,29 @@ async def _webinar_summary_from_app(
     )
     row = result.one()
     list_size = int(row.list_size) if row.list_size is not None else 0
+
+    # actuallyUsed: live count of contacts marked sent (outreach_status='used')
+    # for any assignment of this webinar. Released contacts go back to
+    # 'available' and disappear from this count, so plan/actual diverge by
+    # the released amount.
+    used_result = await db.execute(
+        select(func.count())
+        .select_from(Contact)
+        .join(WebinarListAssignment, WebinarListAssignment.id == Contact.assignment_id)
+        .where(
+            WebinarListAssignment.webinar_id == webinar_id,
+            Contact.outreach_status == "used",
+        )
+    )
+    actually_used = int(used_result.scalar() or 0)
+
     return {
         "listSize": list_size,
         "listRemain": int(row.list_remain) if row.list_remain is not None else 0,
         "gcalInvited": int(row.gcal_invited) if row.gcal_invited is not None else 0,
         "accountsNeeded": int(row.accts_used) if row.accts_used is not None else 0,
         "invited": list_size,  # app-side: invited = sum of planned volumes
+        "actuallyUsed": actually_used,
     }
 
 
@@ -209,6 +227,9 @@ def _row_for_assignment(a: WebinarListAssignment, webinar_status: str) -> dict[s
         "gcalInvited": a.gcal_invited or 0,
         "accountsNeeded": a.accounts_used or 0,
         "invited": a.volume or 0,
+        # actuallyUsed is filled in by _compute_per_list_metrics — count of
+        # contacts marked sent for this assignment (status='used').
+        "actuallyUsed": 0,
     }
 
     # Title + description copy variants chosen for this list
@@ -374,6 +395,7 @@ class GoHighLevelStatisticsSource:
             "gcalInvited": None,
             "accountsNeeded": None,
             "invited": nj_count,  # treat nonjoiners as part of the invited pool
+            "actuallyUsed": None,  # not from our planning system → fallback to invited
             "yesMarked": 0,
             "maybeMarked": 0,
             "selfRegMarked": 0,
@@ -431,6 +453,7 @@ class GoHighLevelStatisticsSource:
             "gcalInvited": None,
             "accountsNeeded": None,
             "invited": total_u,
+            "actuallyUsed": None,  # not from our planning system → fallback to invited
             "yesMarked": yes_u,
             "maybeMarked": maybe_u,
             "totalBookings": booked_u,
@@ -507,6 +530,24 @@ class GoHighLevelStatisticsSource:
         wid = w.id
 
         out: dict[str, dict[str, float | None]] = {a.id: {} for a in assignments}
+
+        # actuallyUsed per list — live count of contacts marked sent. Drops
+        # when contacts are released back to the bucket pool, while volume
+        # (planned) stays the same so plan vs. actual stays comparable.
+        used_q = await db.execute(
+            select(Contact.assignment_id, func.count())
+            .where(
+                Contact.assignment_id.in_([a.id for a in assignments]) if assignments else False,
+                Contact.outreach_status == "used",
+            )
+            .group_by(Contact.assignment_id)
+        )
+        for aid, cnt in used_q.all():
+            if str(aid) in out:
+                out[str(aid)]["actuallyUsed"] = int(cnt or 0)
+        # Default 0 for assignments with no used contacts so the column reads "0"
+        for aid in out:
+            out[aid].setdefault("actuallyUsed", 0)
 
         async def _group_count(sql: str, **params) -> dict[str, int]:
             r = await db.execute(sa_text(sql).bindparams(webinar_id=wid, **params))

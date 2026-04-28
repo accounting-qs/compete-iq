@@ -420,7 +420,7 @@ function ExternalLinkIcon() {
 
 /* ─── Bucket-grouped child-row renderer ─────────────────────────────── */
 
-const BASE_SUM_KEYS = ["listSize", "listRemain", "gcalInvited", "accountsNeeded", "invited"] as const;
+const BASE_SUM_KEYS = ["listSize", "listRemain", "gcalInvited", "accountsNeeded", "invited", "actuallyUsed"] as const;
 
 function sumMetric(rows: ApiStatisticsRow[], key: string): number {
   let total = 0;
@@ -1039,7 +1039,15 @@ export function StatisticsPage() {
                     <StatusBadge status={w.rows[0]?.status ?? null} />
                   </td>
                   <td className="px-2 py-2.5 text-zinc-500 text-[10px]">
-                    {listCount} lists
+                    <span>{listCount} lists</span>
+                    {w.usedFallback && (
+                      <span
+                        title="Rate metrics use the planned 'Invited' number because no contacts have been marked sent yet for this webinar (or all sent contacts have been released). Mark contacts as used on the planning page for more accurate rates."
+                        className="ml-1.5 inline-block px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-500/15 text-amber-500 border border-amber-500/30 align-middle"
+                      >
+                        uses planned
+                      </span>
+                    )}
                   </td>
                   <td className={`px-2 py-2.5 ${sDescP}`} colSpan={4}>
                     <button

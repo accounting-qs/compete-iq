@@ -10,6 +10,7 @@ from api.routers.outreach.webinars import router as webinars_router
 from api.routers.outreach.uploads import router as uploads_router
 from api.routers.outreach.contacts import router as contacts_router
 from api.routers.outreach.brain import router as brain_router
+from api.routers.outreach.releases import router as releases_router
 
 router = APIRouter()
 router.include_router(buckets_router)
@@ -18,3 +19,4 @@ router.include_router(webinars_router)
 router.include_router(uploads_router)
 router.include_router(contacts_router)
 router.include_router(brain_router)
+router.include_router(releases_router)
