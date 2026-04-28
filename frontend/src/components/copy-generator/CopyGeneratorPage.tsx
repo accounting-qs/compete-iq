@@ -627,47 +627,37 @@ export function CopyGeneratorPage() {
         const { jobs } = await apiFetchCopyGenStatus();
         if (cancelled) return;
 
-        // Which (bucket, type) keys just transitioned from non-done to done?
+        // Detect newly-done jobs by comparing against the current statusMap
+        // closure. We must do this BEFORE any setState — otherwise the
+        // statusMap update triggers an effect re-run whose cleanup sets
+        // `cancelled = true`, and the bucket re-fetch below silently bails.
         const newlyDone: Array<{ bucketId: string; type: "title" | "description" }> = [];
-
-        setStatusMap(prev => {
-          const next = new Map(prev);
-          for (const j of jobs) {
-            const key = `${j.bucket_id}-${j.copy_type}`;
-            const prevStatus = prev.get(key);
-            if (prevStatus !== "done" && j.status === "done") {
-              newlyDone.push({ bucketId: j.bucket_id, type: j.copy_type });
-            }
-            // Only reflect jobs we care about (active or terminal)
-            if (j.status === "pending" || j.status === "generating" || j.status === "failed") {
-              next.set(key, j.status);
-            } else if (j.status === "done") {
-              next.set(key, "done");
-            }
+        for (const j of jobs) {
+          const key = `${j.bucket_id}-${j.copy_type}`;
+          const prevStatus = statusMap.get(key);
+          if (prevStatus !== "done" && j.status === "done") {
+            newlyDone.push({ bucketId: j.bucket_id, type: j.copy_type });
           }
-          return next;
-        });
+        }
 
-        setJobMap(prev => {
-          const next = new Map(prev);
-          for (const j of jobs) {
-            next.set(`${j.bucket_id}-${j.copy_type}`, {
-              jobId: j.id,
-              errorMessage: j.error_message,
-            });
-          }
-          return next;
-        });
-
-        // For freshly-completed jobs, re-fetch bucket copies so variants appear
+        // For freshly-completed jobs, fetch the new bucket copies first —
+        // still no setState calls yet, so no risk of mid-flight cancellation.
+        let refreshedBuckets: ApiBucket[] | null = null;
         if (newlyDone.length > 0) {
           const { buckets: refreshed } = await fetchBuckets(true);
           if (cancelled) return;
-          setBuckets(refreshed);
+          refreshedBuckets = refreshed;
+        }
+
+        // Now batch all state updates together. React 18 auto-batches these,
+        // so the effect re-runs at most once after this callback returns.
+        if (refreshedBuckets) {
+          setBuckets(refreshedBuckets);
+          const touched = new Set(newlyDone.map(d => d.bucketId));
+          const fresh = refreshedBuckets;
           setGeneratedCopies(prev => {
             const next = new Map(prev);
-            const touched = new Set(newlyDone.map(d => d.bucketId));
-            for (const b of refreshed) {
+            for (const b of fresh) {
               if (!touched.has(b.id)) continue;
               const copies: GeneratedCopy[] = [];
               if (b.titles && b.titles.length > 0) {
@@ -689,6 +679,30 @@ export function CopyGeneratorPage() {
             return next;
           });
         }
+
+        setStatusMap(prev => {
+          const next = new Map(prev);
+          for (const j of jobs) {
+            const key = `${j.bucket_id}-${j.copy_type}`;
+            if (j.status === "pending" || j.status === "generating" || j.status === "failed") {
+              next.set(key, j.status);
+            } else if (j.status === "done") {
+              next.set(key, "done");
+            }
+          }
+          return next;
+        });
+
+        setJobMap(prev => {
+          const next = new Map(prev);
+          for (const j of jobs) {
+            next.set(`${j.bucket_id}-${j.copy_type}`, {
+              jobId: j.id,
+              errorMessage: j.error_message,
+            });
+          }
+          return next;
+        });
       } catch (err) {
         console.error("Polling failed:", err);
       }
