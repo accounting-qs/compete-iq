@@ -1245,6 +1245,36 @@ export async function fetchStatisticsWebinars(source: "auto" | "ghl" | "workbook
   return res.json();
 }
 
+export interface ApiStatisticsWebinarSummary {
+  id: string;
+  number: number;
+  date: string | null;
+  title: string | null;
+  status: string | null;
+  listCount: number;
+}
+
+export async function fetchStatisticsWebinarList(
+  source: "auto" | "ghl" | "workbook" = "auto",
+): Promise<{ webinars: ApiStatisticsWebinarSummary[]; meta: StatisticsMeta }> {
+  const res = await fetch(`${API_URL}/statistics/webinars/list?source=${source}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to fetch statistics list");
+  return res.json();
+}
+
+export async function fetchStatisticsWebinar(
+  number: number,
+  source: "auto" | "ghl" | "workbook" = "auto",
+): Promise<ApiStatisticsWebinar> {
+  const res = await fetch(`${API_URL}/statistics/webinars/${number}?source=${source}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(`Failed to fetch webinar ${number}`);
+  return res.json();
+}
+
 export interface ContactDrilldownItem {
   ghl_contact_id: string;
   email: string | null;

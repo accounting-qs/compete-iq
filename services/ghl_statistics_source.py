@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from db.models import (
-    Contact, GHLContact, GHLOpportunity, GHLWebinarStats, OutreachSender, Webinar,
+    Contact, GHLContact, GHLWebinarStats, OutreachSender, Webinar,
     WebinarGeekSubscriber, WebinarListAssignment,
 )
 from db.session import AsyncSessionLocal
@@ -283,8 +283,57 @@ class GoHighLevelStatisticsSource:
     """
 
     async def get_raw_webinars(self) -> list[dict[str, Any]]:
+        webinars = await self._load_webinars()
+        date_windows = self._date_windows(webinars)
+        raw_webinars: list[dict[str, Any]] = []
+        for w in webinars:
+            prev_date, current_date = date_windows[w.id]
+            raw_webinars.append(
+                await self._build_raw_webinar(w, prev_date, current_date)
+            )
+        raw_webinars.reverse()  # descending by number for the UI
+        return raw_webinars
+
+    async def get_raw_webinar_list(self) -> list[dict[str, Any]]:
+        """Lightweight list — webinar identity + list count, no metrics.
+
+        Powers the progressive-load UI: the page renders the parent rows
+        immediately, then fetches per-webinar metrics in priority order.
+        """
         async with AsyncSessionLocal() as db:
-            # Load webinars with their assignments (+bucket, +sender) in one go
+            result = await db.execute(select(Webinar).order_by(Webinar.number.desc()))
+            webinars = list(result.scalars().all())
+
+            counts_q = await db.execute(
+                select(WebinarListAssignment.webinar_id, func.count())
+                .group_by(WebinarListAssignment.webinar_id)
+            )
+            counts = {str(wid): int(c or 0) for wid, c in counts_q.all()}
+
+        out: list[dict[str, Any]] = []
+        for w in webinars:
+            out.append({
+                "id": f"stat-w{w.number}",
+                "number": w.number,
+                "date": w.date.isoformat() if w.date else None,
+                "title": w.main_title,
+                "status": w.status,
+                "listCount": counts.get(str(w.id), 0),
+            })
+        return out
+
+    async def get_raw_webinar(self, number: int) -> dict[str, Any] | None:
+        """Fully-processed single webinar (summary + per-list rows + specials)."""
+        webinars = await self._load_webinars()
+        date_windows = self._date_windows(webinars)
+        for w in webinars:
+            if w.number == number:
+                prev_date, current_date = date_windows[w.id]
+                return await self._build_raw_webinar(w, prev_date, current_date)
+        return None
+
+    async def _load_webinars(self) -> list[Webinar]:
+        async with AsyncSessionLocal() as db:
             result = await db.execute(
                 select(Webinar)
                 .options(
@@ -299,58 +348,56 @@ class GoHighLevelStatisticsSource:
                 )
                 .order_by(Webinar.number.asc())
             )
-            webinars = list(result.unique().scalars().all())
+            return list(result.unique().scalars().all())
 
-        raw_webinars: list[dict[str, Any]] = []
-
+    @staticmethod
+    def _date_windows(webinars: list[Webinar]) -> dict[str, tuple[Any, Any]]:
+        """{webinar_id: (prev_date, current_date)} — defaults to 30-day fallback
+        when no prior webinar exists, mirroring the original loop behaviour."""
         from datetime import timedelta
+        out: dict[str, tuple[Any, Any]] = {}
         for idx, w in enumerate(webinars):
-            # For self-reg and unsub windows, default to 30 days before the
-            # webinar date when there's no prior webinar in the DB (otherwise
-            # those metrics are always null for the first/only webinar).
             prev_date = webinars[idx - 1].date if idx > 0 else None
             current_date = w.date
             if prev_date is None and current_date is not None:
                 prev_date = current_date - timedelta(days=30)
+            out[w.id] = (prev_date, current_date)
+        return out
 
-            # Per-list child rows (sorted by display_order, then id)
-            assignments = sorted(
-                w.assignments,
-                key=lambda a: (a.display_order or 0, a.created_at or 0),
+    async def _build_raw_webinar(
+        self, w: Webinar, prev_date, current_date,
+    ) -> dict[str, Any]:
+        assignments = sorted(
+            w.assignments,
+            key=lambda a: (a.display_order or 0, a.created_at or 0),
+        )
+        rows = [_row_for_assignment(a, w.status) for a in assignments]
+
+        async with AsyncSessionLocal() as db:
+            summary = await self._compute_webinar_summary(
+                db, w, assignments, prev_date, current_date,
             )
-            rows = [_row_for_assignment(a, w.status) for a in assignments]
+            per_list = await self._compute_per_list_metrics(
+                db, w, assignments, prev_date, current_date,
+            )
+            for r, a in zip(rows, assignments):
+                extra = per_list.get(a.id, {})
+                r["metrics"].update(extra)
 
-            async with AsyncSessionLocal() as db:
-                # Compute webinar-wide summary
-                summary = await self._compute_webinar_summary(
-                    db, w, assignments, prev_date, current_date,
-                )
-                # Compute per-list GHL metrics and merge into each row
-                per_list = await self._compute_per_list_metrics(
-                    db, w, assignments, prev_date, current_date,
-                )
-                for r, a in zip(rows, assignments):
-                    extra = per_list.get(a.id, {})
-                    r["metrics"].update(extra)
+            synthetic = await self._synthetic_special_rows(
+                db, w, assignments, prev_date, current_date,
+            )
+            rows.extend(synthetic)
 
-                # Synthesize Nonjoiners + No List Data rows (if any data exists)
-                synthetic = await self._synthetic_special_rows(
-                    db, w, assignments, prev_date, current_date,
-                )
-                rows.extend(synthetic)
-
-            raw_webinars.append({
-                "number": w.number,
-                "date": w.date.isoformat() if w.date else None,
-                "title": w.main_title,
-                "workbookRow": 0,
-                "rows": rows,
-                "summary": summary,
-                "status": w.status,
-            })
-
-        raw_webinars.reverse()  # descending by number for the UI
-        return raw_webinars
+        return {
+            "number": w.number,
+            "date": w.date.isoformat() if w.date else None,
+            "title": w.main_title,
+            "workbookRow": 0,
+            "rows": rows,
+            "summary": summary,
+            "status": w.status,
+        }
 
     async def _synthetic_special_rows(
         self,
@@ -519,6 +566,10 @@ class GoHighLevelStatisticsSource:
         Uses Planning `contacts.assignment_id` to map Planning emails → list.
         Joins to ghl_contact via lowercase email. Only lists whose planned
         contacts actually exist in GHL will show counts > 0.
+
+        Performance: every metric that shares a join shape is computed via
+        FILTER (WHERE …) inside one grouped query — three batched queries
+        replace ~20 separate scans of the planning + ghl_contact join.
         """
         from sqlalchemy import text as sa_text
 
@@ -530,6 +581,8 @@ class GoHighLevelStatisticsSource:
         wid = w.id
 
         out: dict[str, dict[str, float | None]] = {a.id: {} for a in assignments}
+        if not assignments:
+            return out
 
         # actuallyUsed per list — live count of contacts marked sent. Drops
         # when contacts are released back to the bucket pool, while volume
@@ -537,7 +590,7 @@ class GoHighLevelStatisticsSource:
         used_q = await db.execute(
             select(Contact.assignment_id, func.count())
             .where(
-                Contact.assignment_id.in_([a.id for a in assignments]) if assignments else False,
+                Contact.assignment_id.in_([a.id for a in assignments]),
                 Contact.outreach_status == "used",
             )
             .group_by(Contact.assignment_id)
@@ -545,252 +598,191 @@ class GoHighLevelStatisticsSource:
         for aid, cnt in used_q.all():
             if str(aid) in out:
                 out[str(aid)]["actuallyUsed"] = int(cnt or 0)
-        # Default 0 for assignments with no used contacts so the column reads "0"
         for aid in out:
             out[aid].setdefault("actuallyUsed", 0)
 
-        async def _group_count(sql: str, **params) -> dict[str, int]:
-            r = await db.execute(sa_text(sql).bindparams(webinar_id=wid, **params))
-            # Cast assignment_id to str — Planning assignments use str-uuid ids,
-            # raw SQL returns UUID objects which won't match dict lookups.
-            return {str(row[0]): int(row[1]) for row in r.fetchall() if row[0] is not None}
+        has_window = bool(prev_date and current_date)
 
-        # ── GHL-only counts (no broadcast needed) ────────────────────────
-        # yesMarked / maybeMarked — filter on calendar_invite_response_history
-        for key, regex in [("yesMarked", yes_re), ("maybeMarked", maybe_re)]:
-            counts = await _group_count("""
-                SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
-                FROM contacts c
-                JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
-                JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
-                WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
-                  AND g.calendar_invite_response_history ~* :regex
-                GROUP BY c.assignment_id
-            """, regex=regex)
-            for aid, cnt in counts.items():
-                if aid in out:
-                    out[aid][key] = cnt
-
-        # gcalInvitedGhl per list — calendar_webinar_series_history contains eN
-        counts = await _group_count("""
-            SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
+        # ── Batch A: ghl_contact-only counts (one scan of the planned join) ─
+        # Includes yes/maybe marked, gcal invited, yes/maybe bookings,
+        # self-reg, self-reg bookings, unsubscribes.
+        ghl_params: dict[str, Any] = {
+            "wid": wid,
+            "yes_re": yes_re,
+            "maybe_re": maybe_re,
+            "series_re": series_re,
+            "N": N,
+        }
+        window_filter_marker = "FALSE"
+        if has_window:
+            ghl_params["sr_start"] = prev_date
+            ghl_params["sr_end"] = current_date
+            window_filter_marker = "g.webinar_registration_in_form_date >= :sr_start AND g.webinar_registration_in_form_date < :sr_end"
+            unsub_filter = "g.cold_calendar_unsubscribe_date >= :sr_start AND g.cold_calendar_unsubscribe_date < :sr_end"
+        else:
+            unsub_filter = "FALSE"
+        ghl_sql = f"""
+            SELECT
+                c.assignment_id,
+                COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE g.calendar_invite_response_history ~* :yes_re) AS yes_marked,
+                COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE g.calendar_invite_response_history ~* :maybe_re) AS maybe_marked,
+                COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE g.calendar_webinar_series_history ~* :series_re) AS gcal_invited_ghl,
+                COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE g.calendar_invite_response_history ~* :yes_re AND g.booked_call_webinar_series = :N) AS yes_bookings,
+                COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE g.calendar_invite_response_history ~* :maybe_re AND g.booked_call_webinar_series = :N) AS maybe_bookings,
+                COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE {window_filter_marker}) AS self_reg_marked,
+                COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE ({window_filter_marker}) AND g.booked_call_webinar_series = :N) AS self_reg_bookings,
+                COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE {unsub_filter}) AS unsubscribes
             FROM contacts c
             JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
             JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
-            WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
-              AND g.calendar_webinar_series_history ~* :regex
+            WHERE wla.webinar_id = CAST(:wid AS uuid)
             GROUP BY c.assignment_id
-        """, regex=series_re)
-        for aid, cnt in counts.items():
-            if aid in out:
-                out[aid]["gcalInvitedGhl"] = cnt
+        """
+        r = await db.execute(sa_text(ghl_sql).bindparams(**ghl_params))
+        for row in r.mappings().all():
+            aid = str(row["assignment_id"]) if row["assignment_id"] is not None else None
+            if aid is None or aid not in out:
+                continue
+            m = out[aid]
+            m["yesMarked"] = int(row["yes_marked"] or 0)
+            m["maybeMarked"] = int(row["maybe_marked"] or 0)
+            m["gcalInvitedGhl"] = int(row["gcal_invited_ghl"] or 0)
+            m["yesBookings"] = int(row["yes_bookings"] or 0)
+            m["maybeBookings"] = int(row["maybe_bookings"] or 0)
+            if has_window:
+                self_reg = int(row["self_reg_marked"] or 0)
+                m["selfRegMarked"] = self_reg
+                m["lpRegs"] = self_reg
+                m["selfRegBookings"] = int(row["self_reg_bookings"] or 0)
+                m["unsubscribes"] = int(row["unsubscribes"] or 0)
 
-        # yesBookings / maybeBookings — invite_response matches AND booked_call = N
-        for key, regex in [("yesBookings", yes_re), ("maybeBookings", maybe_re)]:
-            counts = await _group_count("""
-                SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
+        # ── Batch B: WG attendance (one scan of planned + WG join) ───────
+        if broadcast_id:
+            ATT = "(wgs.watched_live = TRUE OR wgs.minutes_viewing > 0)"
+            wg_window_filter = window_filter_marker if has_window else "FALSE"
+            wg_params: dict[str, Any] = {
+                "wid": wid,
+                "bid": broadcast_id,
+                "yes_re": yes_re,
+                "maybe_re": maybe_re,
+            }
+            if has_window:
+                wg_params["sr_start"] = prev_date
+                wg_params["sr_end"] = current_date
+
+            wg_sql = f"""
+                SELECT
+                    c.assignment_id,
+                    COUNT(DISTINCT LOWER(c.email)) AS total_regs,
+                    COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE {ATT}) AS total_attended,
+                    COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE {ATT} AND wgs.minutes_viewing >= 10) AS total_10m,
+                    COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE {ATT} AND wgs.minutes_viewing >= 30) AS total_30m,
+                    COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE {ATT} AND g.has_sms_click_tag = TRUE) AS sms_attended,
+                    COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE {ATT} AND g.calendar_invite_response_history ~* :yes_re) AS yes_attended,
+                    COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE {ATT} AND g.calendar_invite_response_history ~* :yes_re AND wgs.minutes_viewing >= 10) AS yes_10m,
+                    COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE {ATT} AND g.calendar_invite_response_history ~* :yes_re AND g.has_sms_click_tag = TRUE) AS yes_sms,
+                    COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE {ATT} AND g.calendar_invite_response_history ~* :maybe_re) AS maybe_attended,
+                    COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE {ATT} AND g.calendar_invite_response_history ~* :maybe_re AND wgs.minutes_viewing >= 10) AS maybe_10m,
+                    COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE {ATT} AND g.calendar_invite_response_history ~* :maybe_re AND g.has_sms_click_tag = TRUE) AS maybe_sms,
+                    COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE {ATT} AND ({wg_window_filter})) AS self_reg_attended,
+                    COUNT(DISTINCT LOWER(c.email)) FILTER (WHERE {ATT} AND ({wg_window_filter}) AND wgs.minutes_viewing >= 10) AS self_reg_10m
                 FROM contacts c
                 JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
                 JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
-                WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
-                  AND g.calendar_invite_response_history ~* :regex
-                  AND g.booked_call_webinar_series = :N
+                JOIN webinargeek_subscribers wgs ON LOWER(wgs.email) = LOWER(c.email)
+                WHERE wla.webinar_id = CAST(:wid AS uuid)
+                  AND wgs.broadcast_id = :bid
                 GROUP BY c.assignment_id
-            """, regex=regex, N=N)
-            for aid, cnt in counts.items():
-                if aid in out:
-                    out[aid][key] = cnt
+            """
+            r = await db.execute(sa_text(wg_sql).bindparams(**wg_params))
+            for row in r.mappings().all():
+                aid = str(row["assignment_id"]) if row["assignment_id"] is not None else None
+                if aid is None or aid not in out:
+                    continue
+                m = out[aid]
+                m["totalRegs"] = int(row["total_regs"] or 0)
+                m["totalAttended"] = int(row["total_attended"] or 0)
+                m["total10MinPlus"] = int(row["total_10m"] or 0)
+                m["total30MinPlus"] = int(row["total_30m"] or 0)
+                m["attendBySmsReminder"] = int(row["sms_attended"] or 0)
+                m["yesAttended"] = int(row["yes_attended"] or 0)
+                m["yes10MinPlus"] = int(row["yes_10m"] or 0)
+                m["yesAttendBySmsClick"] = int(row["yes_sms"] or 0)
+                m["maybeAttended"] = int(row["maybe_attended"] or 0)
+                m["maybe10MinPlus"] = int(row["maybe_10m"] or 0)
+                m["maybeAttendBySmsClick"] = int(row["maybe_sms"] or 0)
+                if has_window:
+                    m["selfRegAttended"] = int(row["self_reg_attended"] or 0)
+                    m["selfReg10MinPlus"] = int(row["self_reg_10m"] or 0)
 
-        # selfRegMarked / selfRegBookings — Webinar_Registration_in_form_date window
-        if prev_date and current_date:
-            counts = await _group_count("""
-                SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
-                FROM contacts c
-                JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
-                JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
-                WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
-                  AND g.webinar_registration_in_form_date >= :start
-                  AND g.webinar_registration_in_form_date < :end
-                GROUP BY c.assignment_id
-            """, start=prev_date, end=current_date)
-            for aid, cnt in counts.items():
-                if aid in out:
-                    out[aid]["selfRegMarked"] = cnt
-                    out[aid]["lpRegs"] = cnt  # same formula per user
-
-            counts = await _group_count("""
-                SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
-                FROM contacts c
-                JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
-                JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
-                WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
-                  AND g.webinar_registration_in_form_date >= :start
-                  AND g.webinar_registration_in_form_date < :end
-                  AND g.booked_call_webinar_series = :N
-                GROUP BY c.assignment_id
-            """, start=prev_date, end=current_date, N=N)
-            for aid, cnt in counts.items():
-                if aid in out:
-                    out[aid]["selfRegBookings"] = cnt
-
-            counts = await _group_count("""
-                SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
-                FROM contacts c
-                JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
-                JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
-                WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
-                  AND g.cold_calendar_unsubscribe_date >= :start
-                  AND g.cold_calendar_unsubscribe_date < :end
-                GROUP BY c.assignment_id
-            """, start=prev_date, end=current_date)
-            for aid, cnt in counts.items():
-                if aid in out:
-                    out[aid]["unsubscribes"] = cnt
-
-        # totalBookings per list — UNION of (opps with webinar_source_number = N)
-        # + (opps whose contact has booked_call_webinar_series = N). Matches
-        # the webinar-level union since the opp-level field is often empty.
-        counts = await _group_count("""
-            SELECT c.assignment_id, COUNT(DISTINCT o.ghl_opportunity_id)
+        # ── Batch C: opportunity counts (one scan of planned + opp join) ─
+        # Union of (opp.webinar_source_number = N) or (contact.booked_call = N)
+        # is enforced in WHERE; per-bucket counts use FILTER.
+        qual_in = "('" + "', '".join(QUALIFIED_SET) + "')"
+        opp_sql = f"""
+            SELECT
+                c.assignment_id,
+                COUNT(DISTINCT o.ghl_opportunity_id) AS total_bookings,
+                COUNT(DISTINCT o.ghl_opportunity_id) FILTER (WHERE o.call1_appointment_date IS NOT NULL AND o.call1_appointment_date <= :now_ts) AS calls_passed,
+                COUNT(DISTINCT o.ghl_opportunity_id) FILTER (WHERE LOWER(COALESCE(o.call1_appointment_status, '')) = 'confirmed') AS confirmed,
+                COUNT(DISTINCT o.ghl_opportunity_id) FILTER (WHERE LOWER(COALESCE(o.call1_appointment_status, '')) = 'showed') AS shows,
+                COUNT(DISTINCT o.ghl_opportunity_id) FILTER (WHERE LOWER(COALESCE(o.call1_appointment_status, '')) IN ('noshow','no show','no-show')) AS no_shows,
+                COUNT(DISTINCT o.ghl_opportunity_id) FILTER (WHERE LOWER(COALESCE(o.call1_appointment_status, '')) = 'cancelled') AS canceled,
+                COUNT(DISTINCT o.ghl_opportunity_id) FILTER (WHERE o.pipeline_stage_id = :won_stage) AS won,
+                COUNT(DISTINCT o.ghl_opportunity_id) FILTER (WHERE o.pipeline_stage_id = :dq_stage) AS disqualified,
+                COUNT(DISTINCT o.ghl_opportunity_id) FILTER (WHERE LOWER(COALESCE(o.call1_appointment_status, '')) = 'showed' AND o.lead_quality IN {qual_in}) AS qualified,
+                COUNT(DISTINCT o.ghl_opportunity_id) FILTER (WHERE o.lead_quality = :lq_great) AS lq_great,
+                COUNT(DISTINCT o.ghl_opportunity_id) FILTER (WHERE o.lead_quality = :lq_ok) AS lq_ok,
+                COUNT(DISTINCT o.ghl_opportunity_id) FILTER (WHERE o.lead_quality = :lq_barely) AS lq_barely,
+                COUNT(DISTINCT o.ghl_opportunity_id) FILTER (WHERE o.lead_quality = :lq_dq) AS lq_dq
             FROM contacts c
             JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
             JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
             JOIN ghl_opportunity o ON o.ghl_contact_id = g.ghl_contact_id
-            WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
+            WHERE wla.webinar_id = CAST(:wid AS uuid)
               AND (o.webinar_source_number = :N OR g.booked_call_webinar_series = :N)
             GROUP BY c.assignment_id
-        """, N=N)
-        for aid, cnt in counts.items():
-            if aid in out:
-                out[aid]["totalBookings"] = cnt
-
-        # Attendance metrics — need broadcast_id + WebinarGeek subscribers
-        # ── Attendance metrics (need broadcast_id + WG subscribers) ─────
-        if broadcast_id:
-            # Shared attended predicate
-            ATT = "(wgs.watched_live = TRUE OR wgs.minutes_viewing > 0)"
-
-            async def _wg_count(response_filter: str | None, min_min: int | None, sms_tag: bool, key: str):
-                joins = "JOIN webinargeek_subscribers wgs ON LOWER(wgs.email) = LOWER(c.email)"
-                wheres = [f"wgs.broadcast_id = :bid", ATT]
-                params = {"bid": broadcast_id}
-                if response_filter == "yes":
-                    wheres.append("g.calendar_invite_response_history ~* :yes_re")
-                    params["yes_re"] = yes_re
-                elif response_filter == "maybe":
-                    wheres.append("g.calendar_invite_response_history ~* :maybe_re")
-                    params["maybe_re"] = maybe_re
-                elif response_filter == "self_reg" and prev_date and current_date:
-                    wheres.append("g.webinar_registration_in_form_date >= :sr_start")
-                    wheres.append("g.webinar_registration_in_form_date < :sr_end")
-                    params["sr_start"] = prev_date
-                    params["sr_end"] = current_date
-                if min_min is not None:
-                    wheres.append("wgs.minutes_viewing >= :mm")
-                    params["mm"] = min_min
-                if sms_tag:
-                    wheres.append("g.has_sms_click_tag = TRUE")
-                sql = f"""
-                    SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
-                    FROM contacts c
-                    JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
-                    JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
-                    {joins}
-                    WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
-                      AND ({' AND '.join(f'({w})' for w in wheres)})
-                    GROUP BY c.assignment_id
-                """
-                counts = await _group_count(sql, **params)
-                for aid, cnt in counts.items():
-                    if aid in out:
-                        out[aid][key] = cnt
-
-            # totalRegs (all WG subscribers in this list for this broadcast)
-            counts = await _group_count("""
-                SELECT c.assignment_id, COUNT(DISTINCT LOWER(c.email))
-                FROM contacts c
-                JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
-                JOIN webinargeek_subscribers wgs ON LOWER(wgs.email) = LOWER(c.email)
-                WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
-                  AND wgs.broadcast_id = :bid
-                GROUP BY c.assignment_id
-            """, bid=broadcast_id)
-            for aid, cnt in counts.items():
-                if aid in out:
-                    out[aid]["totalRegs"] = cnt
-
-            # Total attended + 10m+ / 30m+ / SMS reminder
-            await _wg_count(None, None, False, "totalAttended")
-            await _wg_count(None, 10, False, "total10MinPlus")
-            await _wg_count(None, 30, False, "total30MinPlus")
-            await _wg_count(None, None, True, "attendBySmsReminder")
-
-            # Yes split
-            await _wg_count("yes", None, False, "yesAttended")
-            await _wg_count("yes", 10, False, "yes10MinPlus")
-            await _wg_count("yes", None, True, "yesAttendBySmsClick")
-
-            # Maybe split
-            await _wg_count("maybe", None, False, "maybeAttended")
-            await _wg_count("maybe", 10, False, "maybe10MinPlus")
-            await _wg_count("maybe", None, True, "maybeAttendBySmsClick")
-
-            # Self-Reg split (needs date window too)
-            if prev_date and current_date:
-                await _wg_count("self_reg", None, False, "selfRegAttended")
-                await _wg_count("self_reg", 10, False, "selfReg10MinPlus")
-
-        # ── Sales metrics per-list (opportunities via ghl_contact join) ──
-        # Union of (opp.webinar_source_number = N) or (contact.booked_call_webinar_series = N)
-        async def _opp_count(opp_predicate: str, key: str, count_expr: str = "DISTINCT o.ghl_opportunity_id"):
-            sql = f"""
-                SELECT c.assignment_id, COUNT({count_expr})
-                FROM contacts c
-                JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
-                JOIN ghl_contact g ON LOWER(g.email) = LOWER(c.email)
-                JOIN ghl_opportunity o ON o.ghl_contact_id = g.ghl_contact_id
-                WHERE wla.webinar_id = CAST(:webinar_id AS uuid)
-                  AND (o.webinar_source_number = :N OR g.booked_call_webinar_series = :N)
-                  AND ({opp_predicate})
-                GROUP BY c.assignment_id
-            """
-            counts = await _group_count(sql, N=N)
-            for aid, cnt in counts.items():
-                if aid in out:
-                    out[aid][key] = cnt
-
-        now_iso = datetime.now(timezone.utc).isoformat()
-        await _opp_count(f"o.call1_appointment_date IS NOT NULL AND o.call1_appointment_date <= CAST('{now_iso}' AS timestamptz)", "totalCallsDatePassed")
-        await _opp_count("LOWER(COALESCE(o.call1_appointment_status, '')) = 'confirmed'", "confirmed")
-        await _opp_count("LOWER(COALESCE(o.call1_appointment_status, '')) = 'showed'", "shows")
-        await _opp_count("LOWER(COALESCE(o.call1_appointment_status, '')) IN ('noshow','no show','no-show')", "noShows")
-        await _opp_count("LOWER(COALESCE(o.call1_appointment_status, '')) = 'cancelled'", "canceled")
-        await _opp_count(f"o.pipeline_stage_id = '{DEAL_WON_STAGE_ID}'", "won")
-        await _opp_count(f"o.pipeline_stage_id = '{DISQUALIFIED_STAGE_ID}'", "disqualified")
-
-        # Qualified = shows with a non-DQ quality
-        qual_in = "('" + "', '".join(QUALIFIED_SET) + "')"
-        await _opp_count(f"LOWER(COALESCE(o.call1_appointment_status, '')) = 'showed' AND o.lead_quality IN {qual_in}", "qualified")
-
-        # Lead quality buckets
-        for key, val in [
-            ("leadQualityGreat", LEAD_QUALITY_GREAT),
-            ("leadQualityOk", LEAD_QUALITY_OK),
-            ("leadQualityBarelyPassable", LEAD_QUALITY_BARELY),
-            ("leadQualityBadDq", LEAD_QUALITY_BAD_DQ),
-        ]:
-            await _opp_count(f"o.lead_quality = '{val}'", key)
+        """
+        r = await db.execute(sa_text(opp_sql).bindparams(
+            wid=wid, N=N,
+            now_ts=datetime.now(timezone.utc),
+            won_stage=DEAL_WON_STAGE_ID,
+            dq_stage=DISQUALIFIED_STAGE_ID,
+            lq_great=LEAD_QUALITY_GREAT,
+            lq_ok=LEAD_QUALITY_OK,
+            lq_barely=LEAD_QUALITY_BARELY,
+            lq_dq=LEAD_QUALITY_BAD_DQ,
+        ))
+        for row in r.mappings().all():
+            aid = str(row["assignment_id"]) if row["assignment_id"] is not None else None
+            if aid is None or aid not in out:
+                continue
+            m = out[aid]
+            m["totalBookings"] = int(row["total_bookings"] or 0)
+            m["totalCallsDatePassed"] = int(row["calls_passed"] or 0)
+            m["confirmed"] = int(row["confirmed"] or 0)
+            m["shows"] = int(row["shows"] or 0)
+            m["noShows"] = int(row["no_shows"] or 0)
+            m["canceled"] = int(row["canceled"] or 0)
+            m["won"] = int(row["won"] or 0)
+            m["disqualified"] = int(row["disqualified"] or 0)
+            m["qualified"] = int(row["qualified"] or 0)
+            m["leadQualityGreat"] = int(row["lq_great"] or 0)
+            m["leadQualityOk"] = int(row["lq_ok"] or 0)
+            m["leadQualityBarelyPassable"] = int(row["lq_barely"] or 0)
+            m["leadQualityBadDq"] = int(row["lq_dq"] or 0)
 
         # Default any keys we queried to 0 for lists that had no hits — so the
         # UI shows "0" instead of "—" (we genuinely queried and found none).
         default_zero = [
             "yesMarked", "maybeMarked", "gcalInvitedGhl",
-            "yesBookings", "maybeBookings", "selfRegMarked", "selfRegBookings", "lpRegs",
-            "unsubscribes",
+            "yesBookings", "maybeBookings",
             "totalBookings", "totalCallsDatePassed", "confirmed", "shows", "noShows",
             "canceled", "won", "disqualified", "qualified",
             "leadQualityGreat", "leadQualityOk", "leadQualityBarelyPassable", "leadQualityBadDq",
         ]
+        if has_window:
+            default_zero.extend(["selfRegMarked", "selfRegBookings", "lpRegs", "unsubscribes"])
         if broadcast_id:
             default_zero.extend([
                 "totalRegs", "totalAttended", "total10MinPlus", "total30MinPlus",
@@ -798,7 +790,7 @@ class GoHighLevelStatisticsSource:
                 "yesAttended", "yes10MinPlus", "yesAttendBySmsClick",
                 "maybeAttended", "maybe10MinPlus", "maybeAttendBySmsClick",
             ])
-            if prev_date and current_date:
+            if has_window:
                 default_zero.extend(["selfRegAttended", "selfReg10MinPlus"])
         for aid, m in out.items():
             for k in default_zero:
@@ -839,6 +831,12 @@ class GoHighLevelStatisticsSource:
         prev_date,
         current_date,
     ) -> dict[str, float | None]:
+        """Webinar-wide GHL/WG metrics. Same FILTER batching pattern as
+        _compute_per_list_metrics — groups everything that shares a join shape
+        into a single grouped query.
+        """
+        from sqlalchemy import text as sa_text
+
         N = w.number
         broadcast_id = w.broadcast_id
         metrics: dict[str, float | None] = {}
@@ -848,209 +846,175 @@ class GoHighLevelStatisticsSource:
         metrics.update(base)
 
         # --- gcalInvitedGhl: read from ghl_webinar_stats cache (populated during sync) ---
-        # We don't sync the 200k contacts whose calendar_webinar_series_history
-        # contains eN by default — just record the count during the sync.
         r = await db.execute(
             select(GHLWebinarStats.gcal_invited_count)
             .where(GHLWebinarStats.webinar_number == N)
         )
         metrics["gcalInvitedGhl"] = r.scalar()
 
-        # --- Yes / Maybe marked (contact count) ---
         yes_re = _invite_response_regex(N, "Yes")
         maybe_re = _invite_response_regex(N, "Maybe")
-        metrics["yesMarked"] = await _count_contact_field_match(
-            db, GHLContact.calendar_invite_response_history, yes_re
-        )
-        metrics["maybeMarked"] = await _count_contact_field_match(
-            db, GHLContact.calendar_invite_response_history, maybe_re
-        )
+        has_window = bool(prev_date and current_date)
 
-        # --- Yes attended / 10m+ / SMS click ---
-        if broadcast_id:
-            metrics["yesAttended"] = await _count_attended_for_broadcast_filtered(
-                db, broadcast_id, yes_re, None
-            )
-            metrics["yes10MinPlus"] = await _count_attended_for_broadcast_filtered(
-                db, broadcast_id, yes_re, None, min_minutes=10
-            )
-            metrics["yesAttendBySmsClick"] = await _count_attended_for_broadcast_filtered(
-                db, broadcast_id, yes_re, None, require_sms_tag=True
-            )
-
-            metrics["maybeAttended"] = await _count_attended_for_broadcast_filtered(
-                db, broadcast_id, maybe_re, None
-            )
-            metrics["maybe10MinPlus"] = await _count_attended_for_broadcast_filtered(
-                db, broadcast_id, maybe_re, None, min_minutes=10
-            )
-            metrics["maybeAttendBySmsClick"] = await _count_attended_for_broadcast_filtered(
-                db, broadcast_id, maybe_re, None, require_sms_tag=True
-            )
+        # ── Batch A: ghl_contact-only counts (one scan) ──────────────────
+        ghl_params: dict[str, Any] = {
+            "yes_re": yes_re,
+            "maybe_re": maybe_re,
+            "N": N,
+        }
+        if has_window:
+            ghl_params["sr_start"] = prev_date
+            ghl_params["sr_end"] = current_date
+            window_filter = "g.webinar_registration_in_form_date >= :sr_start AND g.webinar_registration_in_form_date < :sr_end"
+            unsub_filter = "g.cold_calendar_unsubscribe_date >= :sr_start AND g.cold_calendar_unsubscribe_date < :sr_end"
         else:
-            for k in (
-                "yesAttended", "yes10MinPlus", "yesAttendBySmsClick",
-                "maybeAttended", "maybe10MinPlus", "maybeAttendBySmsClick",
-            ):
+            window_filter = "FALSE"
+            unsub_filter = "FALSE"
+        ghl_sql = f"""
+            SELECT
+                COUNT(g.ghl_contact_id) FILTER (WHERE g.calendar_invite_response_history ~* :yes_re) AS yes_marked,
+                COUNT(g.ghl_contact_id) FILTER (WHERE g.calendar_invite_response_history ~* :maybe_re) AS maybe_marked,
+                COUNT(g.ghl_contact_id) FILTER (WHERE g.calendar_invite_response_history ~* :yes_re AND g.booked_call_webinar_series = :N) AS yes_bookings,
+                COUNT(g.ghl_contact_id) FILTER (WHERE g.calendar_invite_response_history ~* :maybe_re AND g.booked_call_webinar_series = :N) AS maybe_bookings,
+                COUNT(g.ghl_contact_id) FILTER (WHERE {window_filter}) AS self_reg_marked,
+                COUNT(g.ghl_contact_id) FILTER (WHERE ({window_filter}) AND g.booked_call_webinar_series = :N) AS self_reg_bookings,
+                COUNT(g.ghl_contact_id) FILTER (WHERE {unsub_filter}) AS unsubscribes
+            FROM ghl_contact g
+        """
+        r = await db.execute(sa_text(ghl_sql).bindparams(**ghl_params))
+        row = r.mappings().one()
+        metrics["yesMarked"] = int(row["yes_marked"] or 0)
+        metrics["maybeMarked"] = int(row["maybe_marked"] or 0)
+        metrics["yesBookings"] = int(row["yes_bookings"] or 0)
+        metrics["maybeBookings"] = int(row["maybe_bookings"] or 0)
+        if has_window:
+            self_reg = int(row["self_reg_marked"] or 0)
+            metrics["selfRegMarked"] = self_reg
+            metrics["lpRegs"] = self_reg
+            metrics["selfRegBookings"] = int(row["self_reg_bookings"] or 0)
+            metrics["unsubscribes"] = int(row["unsubscribes"] or 0)
+        else:
+            for k in ("selfRegMarked", "selfRegBookings", "unsubscribes"):
                 metrics[k] = None
 
-        # --- Yes / Maybe bookings: yes/maybe contact + booked_call_webinar_series == N ---
-        if metrics["yesMarked"]:
-            r = await db.execute(
-                select(func.count(GHLContact.ghl_contact_id)).where(
-                    GHLContact.calendar_invite_response_history.op("~*")(yes_re),
-                    GHLContact.booked_call_webinar_series == N,
-                )
-            )
-            metrics["yesBookings"] = int(r.scalar() or 0)
-        else:
-            metrics["yesBookings"] = 0
-        if metrics["maybeMarked"]:
-            r = await db.execute(
-                select(func.count(GHLContact.ghl_contact_id)).where(
-                    GHLContact.calendar_invite_response_history.op("~*")(maybe_re),
-                    GHLContact.booked_call_webinar_series == N,
-                )
-            )
-            metrics["maybeBookings"] = int(r.scalar() or 0)
-        else:
-            metrics["maybeBookings"] = 0
+        # ── Batch B: WG attendance (one scan) ────────────────────────────
+        if broadcast_id:
+            ATT = "(wgs.watched_live = TRUE OR wgs.minutes_viewing > 0)"
+            wg_window_filter = window_filter if has_window else "FALSE"
+            wg_params: dict[str, Any] = {
+                "bid": broadcast_id,
+                "yes_re": yes_re,
+                "maybe_re": maybe_re,
+            }
+            if has_window:
+                wg_params["sr_start"] = prev_date
+                wg_params["sr_end"] = current_date
 
-        # --- Self-reg marked/attended/10m+/bookings (webinar_registration_in_form_date in window) ---
-        if prev_date and current_date:
-            window = (prev_date, current_date)
-            r = await db.execute(
-                select(func.count(GHLContact.ghl_contact_id)).where(
-                    GHLContact.webinar_registration_in_form_date >= prev_date,
-                    GHLContact.webinar_registration_in_form_date < current_date,
-                )
-            )
-            self_reg_marked = int(r.scalar() or 0)
-            metrics["selfRegMarked"] = self_reg_marked
-            # Per user: lpRegs uses the same formula as selfRegMarked.
-            metrics["lpRegs"] = self_reg_marked
-
-            if broadcast_id:
-                metrics["selfRegAttended"] = await _count_attended_for_broadcast_filtered(
-                    db, broadcast_id, None, window
-                )
-                metrics["selfReg10MinPlus"] = await _count_attended_for_broadcast_filtered(
-                    db, broadcast_id, None, window, min_minutes=10
-                )
+            wg_sql = f"""
+                SELECT
+                    COUNT(*) AS total_regs,
+                    COUNT(*) FILTER (WHERE {ATT}) AS total_attended,
+                    COUNT(*) FILTER (WHERE {ATT} AND wgs.minutes_viewing >= 10) AS total_10m,
+                    COUNT(*) FILTER (WHERE {ATT} AND wgs.minutes_viewing >= 30) AS total_30m,
+                    COUNT(DISTINCT g.ghl_contact_id) FILTER (WHERE {ATT} AND g.has_sms_click_tag = TRUE) AS sms_attended,
+                    COUNT(DISTINCT g.ghl_contact_id) FILTER (WHERE {ATT} AND g.calendar_invite_response_history ~* :yes_re) AS yes_attended,
+                    COUNT(DISTINCT g.ghl_contact_id) FILTER (WHERE {ATT} AND g.calendar_invite_response_history ~* :yes_re AND wgs.minutes_viewing >= 10) AS yes_10m,
+                    COUNT(DISTINCT g.ghl_contact_id) FILTER (WHERE {ATT} AND g.calendar_invite_response_history ~* :yes_re AND g.has_sms_click_tag = TRUE) AS yes_sms,
+                    COUNT(DISTINCT g.ghl_contact_id) FILTER (WHERE {ATT} AND g.calendar_invite_response_history ~* :maybe_re) AS maybe_attended,
+                    COUNT(DISTINCT g.ghl_contact_id) FILTER (WHERE {ATT} AND g.calendar_invite_response_history ~* :maybe_re AND wgs.minutes_viewing >= 10) AS maybe_10m,
+                    COUNT(DISTINCT g.ghl_contact_id) FILTER (WHERE {ATT} AND g.calendar_invite_response_history ~* :maybe_re AND g.has_sms_click_tag = TRUE) AS maybe_sms,
+                    COUNT(DISTINCT g.ghl_contact_id) FILTER (WHERE {ATT} AND ({wg_window_filter})) AS self_reg_attended,
+                    COUNT(DISTINCT g.ghl_contact_id) FILTER (WHERE {ATT} AND ({wg_window_filter}) AND wgs.minutes_viewing >= 10) AS self_reg_10m
+                FROM webinargeek_subscribers wgs
+                LEFT JOIN ghl_contact g ON LOWER(g.email) = LOWER(wgs.email)
+                WHERE wgs.broadcast_id = :bid
+            """
+            r = await db.execute(sa_text(wg_sql).bindparams(**wg_params))
+            row = r.mappings().one()
+            metrics["totalRegs"] = int(row["total_regs"] or 0)
+            metrics["totalAttended"] = int(row["total_attended"] or 0)
+            metrics["total10MinPlus"] = int(row["total_10m"] or 0)
+            metrics["total30MinPlus"] = int(row["total_30m"] or 0)
+            metrics["attendBySmsReminder"] = int(row["sms_attended"] or 0)
+            metrics["yesAttended"] = int(row["yes_attended"] or 0)
+            metrics["yes10MinPlus"] = int(row["yes_10m"] or 0)
+            metrics["yesAttendBySmsClick"] = int(row["yes_sms"] or 0)
+            metrics["maybeAttended"] = int(row["maybe_attended"] or 0)
+            metrics["maybe10MinPlus"] = int(row["maybe_10m"] or 0)
+            metrics["maybeAttendBySmsClick"] = int(row["maybe_sms"] or 0)
+            if has_window:
+                metrics["selfRegAttended"] = int(row["self_reg_attended"] or 0)
+                metrics["selfReg10MinPlus"] = int(row["self_reg_10m"] or 0)
             else:
                 metrics["selfRegAttended"] = None
                 metrics["selfReg10MinPlus"] = None
-
-            r = await db.execute(
-                select(func.count(GHLContact.ghl_contact_id)).where(
-                    GHLContact.webinar_registration_in_form_date >= prev_date,
-                    GHLContact.webinar_registration_in_form_date < current_date,
-                    GHLContact.booked_call_webinar_series == N,
-                )
-            )
-            metrics["selfRegBookings"] = int(r.scalar() or 0)
         else:
-            for k in ("selfRegMarked", "selfRegAttended", "selfReg10MinPlus", "selfRegBookings"):
+            for k in (
+                "totalRegs", "totalAttended", "total10MinPlus", "total30MinPlus", "attendBySmsReminder",
+                "yesAttended", "yes10MinPlus", "yesAttendBySmsClick",
+                "maybeAttended", "maybe10MinPlus", "maybeAttendBySmsClick",
+                "selfRegAttended", "selfReg10MinPlus",
+            ):
                 metrics[k] = None
 
-        # --- Total regs/attended/10m+/30m+ ---
-        if broadcast_id:
-            r = await db.execute(
-                select(func.count()).where(WebinarGeekSubscriber.broadcast_id == broadcast_id)
-            )
-            metrics["totalRegs"] = int(r.scalar() or 0)
-            metrics["totalAttended"] = await _count_broadcast_attendees(db, broadcast_id)
-            metrics["total10MinPlus"] = await _count_broadcast_attendees(db, broadcast_id, min_minutes=10)
-            metrics["total30MinPlus"] = await _count_broadcast_attendees(db, broadcast_id, min_minutes=30)
-            metrics["attendBySmsReminder"] = await _count_broadcast_attendees(
-                db, broadcast_id, require_sms_tag=True
-            )
-        else:
-            for k in ("totalRegs", "totalAttended", "total10MinPlus", "total30MinPlus", "attendBySmsReminder"):
-                metrics[k] = None
-
-        # --- Unsubscribes in webinar window ---
-        if prev_date and current_date:
-            r = await db.execute(
-                select(func.count(GHLContact.ghl_contact_id)).where(
-                    GHLContact.cold_calendar_unsubscribe_date >= prev_date,
-                    GHLContact.cold_calendar_unsubscribe_date < current_date,
-                )
-            )
-            metrics["unsubscribes"] = int(r.scalar() or 0)
-        else:
-            metrics["unsubscribes"] = None
-
-        # --- Sales ---
-        # Load opps two ways:
-        #   (a) opportunities with webinar_source_number = N (primary signal)
-        #   (b) opportunities whose contact has booked_call_webinar_series = N
-        #       (fallback when the opp-level field isn't populated — common in
-        #        this location, so treat the contact field as authoritative)
-        r = await db.execute(
-            select(GHLOpportunity).where(GHLOpportunity.webinar_source_number == N)
-        )
-        opps_primary = list(r.scalars().all())
-
-        r = await db.execute(
-            select(GHLOpportunity)
-            .join(GHLContact, GHLContact.ghl_contact_id == GHLOpportunity.ghl_contact_id)
-            .where(GHLContact.booked_call_webinar_series == N)
-        )
-        opps_fallback = list(r.scalars().all())
-
-        # Union by ghl_opportunity_id
-        seen_ids: set[str] = set()
-        opps: list[GHLOpportunity] = []
-        for o in (*opps_primary, *opps_fallback):
-            if o.ghl_opportunity_id in seen_ids:
-                continue
-            seen_ids.add(o.ghl_opportunity_id)
-            opps.append(o)
+        # ── Sales: load the opp set once, compute everything in Python ───
+        # The union of (opp.webinar_source_number = N) and
+        # (contact.booked_call_webinar_series = N) is small (handful → low
+        # hundreds), so a single SELECT then bucketing in Python is faster
+        # and simpler than 14 FILTER aggregates against the join.
+        r = await db.execute(sa_text("""
+            SELECT DISTINCT ON (o.ghl_opportunity_id)
+                   o.ghl_opportunity_id,
+                   o.call1_appointment_date,
+                   o.call1_appointment_status,
+                   o.pipeline_stage_id,
+                   o.lead_quality,
+                   o.projected_deal_size_value,
+                   o.monetary_value
+            FROM ghl_opportunity o
+            LEFT JOIN ghl_contact g ON g.ghl_contact_id = o.ghl_contact_id
+            WHERE o.webinar_source_number = :N
+               OR g.booked_call_webinar_series = :N
+        """).bindparams(N=N))
+        opps = r.mappings().all()
         n_opps = len(opps)
 
         def cnt(pred) -> int:
             return sum(1 for o in opps if pred(o))
 
-        metrics["totalBookings"] = n_opps
-        from datetime import datetime, timezone
         now_utc = datetime.now(timezone.utc)
+        metrics["totalBookings"] = n_opps
         metrics["totalCallsDatePassed"] = cnt(
-            lambda o: o.call1_appointment_date is not None and o.call1_appointment_date <= now_utc
+            lambda o: o["call1_appointment_date"] is not None and o["call1_appointment_date"] <= now_utc
         )
-        metrics["confirmed"] = cnt(lambda o: (o.call1_appointment_status or "").lower() == "confirmed")
-        metrics["shows"] = cnt(lambda o: (o.call1_appointment_status or "").lower() == "showed")
-        metrics["noShows"] = cnt(lambda o: (o.call1_appointment_status or "").lower() in ("noshow", "no show", "no-show"))
-        metrics["canceled"] = cnt(lambda o: (o.call1_appointment_status or "").lower() == "cancelled")
-        metrics["won"] = cnt(lambda o: o.pipeline_stage_id == DEAL_WON_STAGE_ID)
-        metrics["disqualified"] = cnt(lambda o: o.pipeline_stage_id == DISQUALIFIED_STAGE_ID)
+        metrics["confirmed"] = cnt(lambda o: (o["call1_appointment_status"] or "").lower() == "confirmed")
+        metrics["shows"] = cnt(lambda o: (o["call1_appointment_status"] or "").lower() == "showed")
+        metrics["noShows"] = cnt(lambda o: (o["call1_appointment_status"] or "").lower() in ("noshow", "no show", "no-show"))
+        metrics["canceled"] = cnt(lambda o: (o["call1_appointment_status"] or "").lower() == "cancelled")
+        metrics["won"] = cnt(lambda o: o["pipeline_stage_id"] == DEAL_WON_STAGE_ID)
+        metrics["disqualified"] = cnt(lambda o: o["pipeline_stage_id"] == DISQUALIFIED_STAGE_ID)
 
-        # Lead quality buckets
-        metrics["leadQualityGreat"] = cnt(lambda o: o.lead_quality == LEAD_QUALITY_GREAT)
-        metrics["leadQualityOk"] = cnt(lambda o: o.lead_quality == LEAD_QUALITY_OK)
-        metrics["leadQualityBarelyPassable"] = cnt(lambda o: o.lead_quality == LEAD_QUALITY_BARELY)
-        metrics["leadQualityBadDq"] = cnt(lambda o: o.lead_quality == LEAD_QUALITY_BAD_DQ)
+        metrics["leadQualityGreat"] = cnt(lambda o: o["lead_quality"] == LEAD_QUALITY_GREAT)
+        metrics["leadQualityOk"] = cnt(lambda o: o["lead_quality"] == LEAD_QUALITY_OK)
+        metrics["leadQualityBarelyPassable"] = cnt(lambda o: o["lead_quality"] == LEAD_QUALITY_BARELY)
+        metrics["leadQualityBadDq"] = cnt(lambda o: o["lead_quality"] == LEAD_QUALITY_BAD_DQ)
 
-        # Qualified = shows with a non-DQ quality (user: "qualified / shows")
         metrics["qualified"] = cnt(
-            lambda o: (o.call1_appointment_status or "").lower() == "showed"
-            and o.lead_quality in QUALIFIED_SET
+            lambda o: (o["call1_appointment_status"] or "").lower() == "showed"
+            and o["lead_quality"] in QUALIFIED_SET
         )
 
-        # avgProjectedDealSize = avg of numeric dropdown values
-        proj_vals = [o.projected_deal_size_value for o in opps if o.projected_deal_size_value]
+        proj_vals = [o["projected_deal_size_value"] for o in opps if o["projected_deal_size_value"]]
         metrics["avgProjectedDealSize"] = (sum(proj_vals) / len(proj_vals)) if proj_vals else None
 
-        # avgClosedDealValue = sum of monetary_value for Deal Won
         won_vals = [
-            float(o.monetary_value) for o in opps
-            if o.pipeline_stage_id == DEAL_WON_STAGE_ID and o.monetary_value is not None
+            float(o["monetary_value"]) for o in opps
+            if o["pipeline_stage_id"] == DEAL_WON_STAGE_ID and o["monetary_value"] is not None
         ]
         metrics["avgClosedDealValue"] = sum(won_vals) if won_vals else None
 
         # --- Skipped ---
         metrics["ghlPageViews"] = None
-        # lpRegs is populated above when prev_date/current_date exist.
         metrics.setdefault("lpRegs", None)
 
         return metrics

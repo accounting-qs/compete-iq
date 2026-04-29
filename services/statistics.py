@@ -263,63 +263,105 @@ async def _has_ghl_data() -> bool:
         return False
 
 
+def _process_raw_webinar(w: dict[str, Any], source_label: str) -> dict[str, Any]:
+    """Apply derived-metric computation to a single raw webinar dict."""
+    processed_rows: list[dict[str, Any]] = []
+    raw_metrics_for_agg: list[dict[str, float | None]] = []
+
+    for row in w["rows"]:
+        raw_m = row["metrics"]
+        raw_metrics_for_agg.append(raw_m)
+        derived, row_fallback = compute_derived_metrics(raw_m)
+        processed_rows.append(
+            {
+                **{k: v for k, v in row.items() if k != "metrics"},
+                "metrics": derived,
+                "usedFallback": row_fallback,
+                "segmentName": _build_segment_name(row),
+            }
+        )
+
+    if "summary" in w:
+        summary, summary_fallback = compute_derived_metrics(w["summary"])
+    else:
+        agg_raw = aggregate_parent_summary(raw_metrics_for_agg)
+        summary, summary_fallback = compute_derived_metrics(agg_raw)
+
+    return {
+        "id": f"stat-w{w['number']}",
+        "number": w["number"],
+        "date": w.get("date"),
+        "title": w.get("title"),
+        "workbookRow": w.get("workbookRow", 0),
+        "source": source_label,
+        "summary": summary,
+        "usedFallback": summary_fallback,
+        "rows": [
+            {
+                "id": f"stat-w{w['number']}-r{r.get('workbookRow', i)}",
+                "webinarNumber": w["number"],
+                **r,
+            }
+            for i, r in enumerate(processed_rows)
+        ],
+    }
+
+
 async def get_statistics_webinars(source: str = "auto") -> list[dict[str, Any]]:
     """Return fully processed statistics webinars with derived metrics.
 
     source: "auto" (default = DB-backed: Planning + WebinarGeek + synced GHL),
             "workbook" (dev-only legacy fixture).
     """
-    use_ghl = source != "workbook"  # default to DB-backed source
+    use_ghl = source != "workbook"
     src = _get_source(use_ghl)
     raw_webinars = await src.get_raw_webinars()
     source_label = "ghl" if use_ghl else "workbook_mock"
-    result: list[dict[str, Any]] = []
+    return [_process_raw_webinar(w, source_label) for w in raw_webinars]
 
-    for w in raw_webinars:
-        processed_rows: list[dict[str, Any]] = []
-        raw_metrics_for_agg: list[dict[str, float | None]] = []
 
-        for row in w["rows"]:
-            raw_m = row["metrics"]
-            raw_metrics_for_agg.append(raw_m)
-            derived, row_fallback = compute_derived_metrics(raw_m)
-            processed_rows.append(
-                {
-                    **{k: v for k, v in row.items() if k != "metrics"},
-                    "metrics": derived,
-                    "usedFallback": row_fallback,
-                    "segmentName": _build_segment_name(row),
-                }
-            )
+async def get_statistics_webinar_list(source: str = "auto") -> list[dict[str, Any]]:
+    """Lightweight identity-only list (no metrics). Powers progressive load."""
+    use_ghl = source != "workbook"
+    if use_ghl:
+        from services.ghl_statistics_source import GoHighLevelStatisticsSource
+        src = GoHighLevelStatisticsSource()
+        if not hasattr(src, "get_raw_webinar_list"):
+            # Defensive: should always exist; fall back to full list if not.
+            full = await src.get_raw_webinars()
+            return [
+                {"id": f"stat-w{w['number']}", "number": w["number"], "date": w.get("date"),
+                 "title": w.get("title"), "status": w.get("status"),
+                 "listCount": sum(1 for r in w.get("rows", []) if r.get("kind") == "list")}
+                for w in full
+            ]
+        return await src.get_raw_webinar_list()
+    # Workbook source — derive from the cached fixture.
+    raw = await _workbook_source.get_raw_webinars()
+    return [
+        {
+            "id": f"stat-w{w['number']}",
+            "number": w["number"],
+            "date": w.get("date"),
+            "title": w.get("title"),
+            "status": (w.get("rows") or [{}])[0].get("status"),
+            "listCount": sum(1 for r in w.get("rows", []) if r.get("kind") == "list"),
+        }
+        for w in raw
+    ]
 
-        # If the source pre-computed a summary (DB-backed source does this so
-        # it can blend aggregated list bases with webinar-wide GHL/WG metrics),
-        # use it. Otherwise aggregate child rows.
-        if "summary" in w:
-            summary, summary_fallback = compute_derived_metrics(w["summary"])
-        else:
-            agg_raw = aggregate_parent_summary(raw_metrics_for_agg)
-            summary, summary_fallback = compute_derived_metrics(agg_raw)
 
-        result.append(
-            {
-                "id": f"stat-w{w['number']}",
-                "number": w["number"],
-                "date": w.get("date"),
-                "title": w.get("title"),
-                "workbookRow": w.get("workbookRow", 0),
-                "source": source_label,
-                "summary": summary,
-                "usedFallback": summary_fallback,
-                "rows": [
-                    {
-                        "id": f"stat-w{w['number']}-r{r.get('workbookRow', i)}",
-                        "webinarNumber": w["number"],
-                        **r,
-                    }
-                    for i, r in enumerate(processed_rows)
-                ],
-            }
-        )
-
-    return result
+async def get_statistics_webinar_one(source: str, number: int) -> dict[str, Any] | None:
+    """Fully-processed single webinar by number, or None if missing."""
+    use_ghl = source != "workbook"
+    source_label = "ghl" if use_ghl else "workbook_mock"
+    if use_ghl:
+        from services.ghl_statistics_source import GoHighLevelStatisticsSource
+        src = GoHighLevelStatisticsSource()
+        raw = await src.get_raw_webinar(number)
+        return _process_raw_webinar(raw, source_label) if raw else None
+    raw_all = await _workbook_source.get_raw_webinars()
+    for w in raw_all:
+        if w["number"] == number:
+            return _process_raw_webinar(w, source_label)
+    return None

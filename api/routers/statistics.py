@@ -4,7 +4,7 @@ All routes require bearer auth.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from api.auth import require_auth
@@ -154,6 +154,21 @@ class StatisticsResponse(BaseModel):
     meta: StatisticsMetaResponse
 
 
+class ApiStatisticsWebinarSummary(BaseModel):
+    """Lightweight webinar identity used by the progressive-load list."""
+    id: str
+    number: int
+    date: str | None = None
+    title: str | None = None
+    status: str | None = None
+    listCount: int = 0
+
+
+class StatisticsListResponse(BaseModel):
+    webinars: list[ApiStatisticsWebinarSummary]
+    meta: StatisticsMetaResponse
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -287,22 +302,41 @@ async def list_contacts_for_metric(
         }
 
 
-@router.get("/webinars", response_model=StatisticsResponse)
-async def list_statistics_webinars(source: str = "auto"):
-    """Return all statistics webinars with derived metrics.
-
-    source: "auto" (default — DB-backed: Planning + WebinarGeek + synced GHL),
-            "workbook" (legacy fixture, dev only).
-    """
-    webinars = await stats_svc.get_statistics_webinars(source=source)
-
+async def _resolve_meta(source: str) -> dict:
     used = "workbook" if source == "workbook" else "ghl"
     last_sync = None
     if used == "ghl":
         from services.ghl_statistics_source import get_last_sync_summary
         last_sync = await get_last_sync_summary()
+    return {"source": used, "last_sync": last_sync}
 
-    return {
-        "webinars": webinars,
-        "meta": {"source": used, "last_sync": last_sync},
-    }
+
+@router.get("/webinars", response_model=StatisticsResponse)
+async def list_statistics_webinars(source: str = "auto"):
+    """Return all statistics webinars with derived metrics.
+
+    Heavy: computes metrics for every webinar. Prefer the split
+    `/webinars/list` + `/webinars/{number}` flow for the dashboard.
+    """
+    webinars = await stats_svc.get_statistics_webinars(source=source)
+    meta = await _resolve_meta(source)
+    return {"webinars": webinars, "meta": meta}
+
+
+@router.get("/webinars/list", response_model=StatisticsListResponse)
+async def list_statistics_webinar_summaries(source: str = "auto"):
+    """Lightweight identity-only list. The dashboard renders parent rows
+    immediately from this and then fetches per-webinar metrics in priority
+    order via `/webinars/{number}`."""
+    webinars = await stats_svc.get_statistics_webinar_list(source=source)
+    meta = await _resolve_meta(source)
+    return {"webinars": webinars, "meta": meta}
+
+
+@router.get("/webinars/{number}", response_model=ApiStatisticsWebinar)
+async def get_statistics_webinar(number: int, source: str = "auto"):
+    """Fully-processed single webinar by number."""
+    webinar = await stats_svc.get_statistics_webinar_one(source=source, number=number)
+    if webinar is None:
+        raise HTTPException(status_code=404, detail=f"Webinar {number} not found")
+    return webinar

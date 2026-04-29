@@ -2,13 +2,16 @@
 
 import { useState, useMemo, useEffect, type ReactNode } from "react";
 import {
-  fetchStatisticsWebinars,
+  fetchStatisticsWebinar,
+  fetchStatisticsWebinarList,
   fetchWgWebinars,
   syncWgSubscribers,
   triggerGhlWebinarSync,
   type ApiStatisticsRow,
   type ApiStatisticsWebinar,
+  type ApiStatisticsWebinarSummary,
   type StatisticsMeta,
+  type StatisticsMetrics,
   type WgWebinar,
 } from "@/lib/api";
 import {
@@ -416,6 +419,30 @@ function ExternalLinkIcon() {
   );
 }
 
+/* ─── Placeholder builder ────────────────────────────────────────────── */
+
+const EMPTY_METRICS = {} as StatisticsMetrics;
+
+/** Build an `ApiStatisticsWebinar` shell for a not-yet-loaded webinar so the
+ * existing render code can lay out the parent row. Metric cells render as
+ * "—" until the per-webinar fetch lands and replaces this entry. */
+function placeholderWebinar(
+  s: ApiStatisticsWebinarSummary,
+  source: StatisticsMeta["source"],
+): ApiStatisticsWebinar {
+  return {
+    id: s.id,
+    number: s.number,
+    date: s.date,
+    title: s.title,
+    workbookRow: 0,
+    source: source === "workbook" ? "workbook_mock" : "ghl",
+    summary: EMPTY_METRICS,
+    usedFallback: false,
+    rows: [],
+  };
+}
+
 /* ─── Main Component ──────────────────────────────────────────────────── */
 
 /* ─── Bucket-grouped child-row renderer ─────────────────────────────── */
@@ -671,6 +698,11 @@ function renderGroupedRows(
 
 export function StatisticsPage() {
   const [webinars, setWebinars] = useState<ApiStatisticsWebinar[]>([]);
+  /** Lightweight summary (status + listCount) for rows whose full metrics
+   * haven't loaded yet. Looked up by number. */
+  const [summariesByNumber, setSummariesByNumber] = useState<Map<number, ApiStatisticsWebinarSummary>>(new Map());
+  /** Webinar numbers whose per-webinar fetch is still in flight. */
+  const [loadingNumbers, setLoadingNumbers] = useState<Set<number>>(new Set());
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(true);
@@ -768,26 +800,78 @@ export function StatisticsPage() {
     }
   }
 
-  /* ── Load data ──────────────────────────────────────────────────── */
+  /* ── Progressive load ───────────────────────────────────────────────
+   * 1. Fetch the lightweight list — renders parent rows immediately with
+   *    "—" cells for unloaded metrics.
+   * 2. Fetch the latest 2 webinars in parallel (priority: the auto-expanded
+   *    latest webinar populates fast).
+   * 3. Stream the remaining webinars with concurrency 4 — each replaces its
+   *    placeholder as it arrives. */
   useEffect(() => {
     let cancelled = false;
+    const PRIORITY = 2;
+    const CONCURRENCY = 4;
+
     async function load() {
+      let summaries: ApiStatisticsWebinarSummary[];
+      let metaResp: StatisticsMeta;
       try {
-        const { webinars: data, meta } = await fetchStatisticsWebinars();
-        if (cancelled) return;
-        setMeta(meta);
-        // Sort descending by webinar number
-        data.sort((a, b) => b.number - a.number);
-        setWebinars(data);
-        // Expand the latest webinar by default
-        if (data.length > 0) {
-          setExpandedIds(new Set([data[0].number]));
-        }
+        const res = await fetchStatisticsWebinarList();
+        summaries = res.webinars;
+        metaResp = res.meta;
       } catch (err) {
-        console.error("Failed to load statistics:", err);
-      } finally {
+        console.error("Failed to load statistics list:", err);
         if (!cancelled) setLoading(false);
+        return;
       }
+      if (cancelled) return;
+
+      summaries.sort((a, b) => b.number - a.number);
+      setMeta(metaResp);
+      setSummariesByNumber(new Map(summaries.map((s) => [s.number, s])));
+      setWebinars(summaries.map((s) => placeholderWebinar(s, metaResp.source)));
+      setLoadingNumbers(new Set(summaries.map((s) => s.number)));
+      if (summaries.length > 0) {
+        setExpandedIds(new Set([summaries[0].number]));
+      }
+      setLoading(false);
+
+      const loadOne = async (num: number) => {
+        try {
+          const w = await fetchStatisticsWebinar(num);
+          if (cancelled) return;
+          setWebinars((prev) => prev.map((p) => (p.number === num ? w : p)));
+        } catch (err) {
+          console.error(`Failed to load webinar ${num}:`, err);
+        } finally {
+          if (!cancelled) {
+            setLoadingNumbers((prev) => {
+              const next = new Set(prev);
+              next.delete(num);
+              return next;
+            });
+          }
+        }
+      };
+
+      const numbers = summaries.map((s) => s.number);
+      // Priority pair — kicks off in parallel so the user sees the
+      // auto-expanded latest webinar fill in fast.
+      await Promise.all(numbers.slice(0, PRIORITY).map(loadOne));
+      if (cancelled) return;
+
+      // Worker pool for the rest.
+      const queue = numbers.slice(PRIORITY);
+      const workers = Array.from(
+        { length: Math.min(CONCURRENCY, queue.length) },
+        async () => {
+          while (queue.length > 0 && !cancelled) {
+            const n = queue.shift();
+            if (n !== undefined) await loadOne(n);
+          }
+        },
+      );
+      await Promise.all(workers);
     }
     load();
     return () => { cancelled = true; };
@@ -1008,7 +1092,14 @@ export function StatisticsPage() {
 
           {filteredWebinars.map((w) => {
             const isExpanded = expandedIds.has(w.number);
-            const listCount = w.rows.filter((r) => r.kind === "list").length;
+            const isLoading = loadingNumbers.has(w.number);
+            const summary = summariesByNumber.get(w.number);
+            // Use rows[] when loaded; fall back to the lightweight summary
+            // count / status while metrics are still in flight.
+            const listCount = w.rows.length > 0
+              ? w.rows.filter((r) => r.kind === "list").length
+              : summary?.listCount ?? 0;
+            const statusForBadge = w.rows[0]?.status ?? summary?.status ?? null;
 
             return (
               <tbody key={w.id}>
@@ -1030,13 +1121,19 @@ export function StatisticsPage() {
                     <div className="flex items-center gap-2">
                       <span className="text-zinc-900 dark:text-zinc-100 font-bold text-sm">{w.number}</span>
                       <span className="text-zinc-500">{w.date ?? "\u2014"}</span>
+                      {isLoading && (
+                        <span
+                          title="Loading metrics…"
+                          className="inline-block w-3 h-3 border-2 border-violet-500 border-t-transparent rounded-full animate-spin"
+                        />
+                      )}
                     </div>
                     {w.title && w.title !== "TOTAL" && (
                       <div className="text-[10px] text-zinc-500 mt-0.5 truncate max-w-[200px]">{w.title}</div>
                     )}
                   </td>
                   <td className="px-2 py-2.5">
-                    <StatusBadge status={w.rows[0]?.status ?? null} />
+                    <StatusBadge status={statusForBadge} />
                   </td>
                   <td className="px-2 py-2.5 text-zinc-500 text-[10px]">
                     <span>{listCount} lists</span>
@@ -1080,7 +1177,20 @@ export function StatisticsPage() {
                 </tr>
 
                 {/* ── Child rows (bucket-grouped) ─────────────────── */}
-                {isExpanded && renderGroupedRows(w, collapsedBuckets, toggleBucketGroup, setCopyModalRow, sortKey, sortDir)}
+                {isExpanded && w.rows.length > 0 &&
+                  renderGroupedRows(w, collapsedBuckets, toggleBucketGroup, setCopyModalRow, sortKey, sortDir)}
+                {isExpanded && w.rows.length === 0 && (
+                  <tr className="bg-white dark:bg-zinc-950 border-b border-zinc-200 dark:border-zinc-800/20">
+                    <td colSpan={IDENTITY_COL_COUNT + METRIC_COLUMNS.length} className="px-4 py-6 text-center text-xs text-zinc-500">
+                      <span className="inline-flex items-center gap-2">
+                        {isLoading && (
+                          <span className="inline-block w-3 h-3 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
+                        )}
+                        {isLoading ? "Loading metrics…" : "No data"}
+                      </span>
+                    </td>
+                  </tr>
+                )}
               </tbody>
             );
           })}
