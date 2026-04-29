@@ -192,15 +192,15 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   },
   {
     key: "yesPer1kInv", label: "/1k Inv", group: "Yes", format: "per1k",
-    formulaText: "yesMarked / (invited / 1000)",
-    formulaSources: ["yesMarked", "invited"],
-    description: "Yes responders per 1,000 invited.",
+    formulaText: "yesMarked / (actuallyUsed (fallback invited) / 1000)",
+    formulaSources: ["yesMarked", "actuallyUsed", "invited"],
+    description: "Yes responders per 1,000 (Actually Used; falls back to Invited when Actually Used is 0).",
   },
   {
     key: "yesPercent", label: "% Inv", group: "Yes", format: "percent",
-    formulaText: "yesMarked / invited",
-    formulaSources: ["yesMarked", "invited"],
-    description: "Yes response rate relative to invited.",
+    formulaText: "yesMarked / actuallyUsed (fallback invited)",
+    formulaSources: ["yesMarked", "actuallyUsed", "invited"],
+    description: "Yes response rate relative to Actually Used (falls back to Invited when Actually Used is 0).",
   },
   {
     key: "yesAttended", label: "Attended", group: "Yes", format: "number",
@@ -257,9 +257,9 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   },
   {
     key: "yesBookingsPer1kInv", label: "Book/1k", group: "Yes", format: "per1k",
-    formulaText: "yesBookings / (invited / 1000)",
-    formulaSources: ["yesBookings", "invited"],
-    description: "Yes-bookings per 1,000 invited.",
+    formulaText: "yesBookings / (actuallyUsed (fallback invited) / 1000)",
+    formulaSources: ["yesBookings", "actuallyUsed", "invited"],
+    description: "Yes-bookings per 1,000 (Actually Used; falls back to Invited when Actually Used is 0).",
   },
 
   // ── Maybe ──
