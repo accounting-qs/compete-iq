@@ -23,9 +23,21 @@ GHL_PROVIDER = "ghl"
 
 # Pagination knobs are intentionally hardcoded — they're tuned for GHL's
 # v2 API limits (contacts/search caps at 500 per page) and we never want
-# them changed at runtime. Was previously env-configurable.
+# them changed at runtime.
+#
+# Rate limit budget: GHL sub-account v2 burst is 100 req / 10s = 10 req/s.
+# Each page response itself takes 200-500ms, so the natural cadence is
+# already 2-5 req/s. The inter-page sleep adds margin against bursts when
+# the server is fast. 50ms keeps us comfortably under the limit (~7 req/s
+# worst case) without leaving free throughput on the table.
 GHL_PAGE_SIZE = 500
-GHL_PAGE_DELAY_S = 0.1
+GHL_PAGE_DELAY_S = 0.05
+
+# Retry config for transient HTTP errors (5xx, 429, network timeouts).
+# A single mid-stream blip used to fail an entire 200k-row deep sync;
+# this turns those into a brief pause and a continued stream.
+_RETRY_MAX_ATTEMPTS = 4
+_RETRY_BASE_DELAY_S = 1.0  # 1s, 2s, 4s, 8s
 
 
 async def get_ghl_credentials() -> tuple[str, str, str | None]:
@@ -167,17 +179,64 @@ class GHLClient:
         api_key, location_id, pipeline_id = await get_ghl_credentials()
         return cls(api_key=api_key, location_id=location_id, pipeline_id=pipeline_id)
 
-    async def _get(self, client: httpx.AsyncClient, path: str, params: dict) -> dict:
+    async def _request_with_retry(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json: dict | None = None,
+    ) -> dict:
+        """HTTP request with retry on 429 / 5xx / network errors.
+
+        Retries up to _RETRY_MAX_ATTEMPTS times with exponential backoff.
+        For 429, honours the Retry-After header if present. 4xx (other
+        than 429) raises immediately — those are bugs, not transient.
+        """
         url = f"{self._base_url}{path}"
-        response = await client.get(url, headers=self._headers, params=params)
-        response.raise_for_status()
-        return response.json()
+        last_exc: Exception | None = None
+        for attempt in range(_RETRY_MAX_ATTEMPTS):
+            try:
+                if method == "GET":
+                    response = await client.get(url, headers=self._headers, params=params)
+                else:
+                    response = await client.post(url, headers=self._headers, json=json)
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+                last_exc = exc
+                if attempt == _RETRY_MAX_ATTEMPTS - 1:
+                    raise
+                delay = _RETRY_BASE_DELAY_S * (2 ** attempt)
+                logger.warning("GHL %s %s network error (attempt %d/%d): %s — retrying in %.1fs",
+                               method, path, attempt + 1, _RETRY_MAX_ATTEMPTS, exc, delay)
+                await asyncio.sleep(delay)
+                continue
+
+            if response.status_code < 400:
+                return response.json()
+            if response.status_code == 429 or response.status_code >= 500:
+                if attempt == _RETRY_MAX_ATTEMPTS - 1:
+                    response.raise_for_status()
+                # Honour Retry-After if present, otherwise exponential backoff
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    delay = float(retry_after) if retry_after else _RETRY_BASE_DELAY_S * (2 ** attempt)
+                except ValueError:
+                    delay = _RETRY_BASE_DELAY_S * (2 ** attempt)
+                logger.warning("GHL %s %s HTTP %d (attempt %d/%d) — retrying in %.1fs",
+                               method, path, response.status_code, attempt + 1, _RETRY_MAX_ATTEMPTS, delay)
+                await asyncio.sleep(delay)
+                continue
+            # 4xx (not 429) — don't retry
+            response.raise_for_status()
+        # Unreachable: loop either returns or raises
+        raise RuntimeError(f"GHL request exhausted retries: {last_exc}")
+
+    async def _get(self, client: httpx.AsyncClient, path: str, params: dict) -> dict:
+        return await self._request_with_retry(client, "GET", path, params=params)
 
     async def _post(self, client: httpx.AsyncClient, path: str, body: dict) -> dict:
-        url = f"{self._base_url}{path}"
-        response = await client.post(url, headers=self._headers, json=body)
-        response.raise_for_status()
-        return response.json()
+        return await self._request_with_retry(client, "POST", path, json=body)
 
     # ------------------------------------------------------------------
     # Opportunities

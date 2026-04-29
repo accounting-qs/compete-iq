@@ -69,8 +69,19 @@ SyncTrigger = Literal["scheduled", "manual"]
 
 # A row whose heartbeat is older than this is considered dead and will be
 # reaped by the stale-job sweeper. Tuned to be much larger than the longest
-# legitimate gap between heartbeats (one batch ~250 contacts, ~2-10s).
+# legitimate gap between heartbeats (one batch ~1000 contacts, ~5-15s).
 STALE_HEARTBEAT_SECONDS = 600  # 10 minutes
+
+# Upsert batch size. Postgres handles INSERT ... ON CONFLICT for 1000 rows
+# easily (parameter count well under the 65535 limit at ~30 cols/row), and
+# bigger batches mean fewer round-trips to Supabase. Was 250.
+_UPSERT_BATCH_SIZE = 1000
+
+# Pipeline depth between the GHL fetcher (producer) and the DB upserter
+# (consumer). The producer runs ahead by up to this many batches while
+# the consumer drains. Two is the sweet spot — bigger queues just buffer
+# memory without overlapping more I/O, since both halves are I/O-bound.
+_PIPELINE_QUEUE_SIZE = 2
 
 # Lock so only one sync runs at a time in this process
 _sync_lock = asyncio.Lock()
@@ -280,6 +291,73 @@ async def _set_expected_total(state: _SyncState, expected: int) -> None:
     await _heartbeat(state)
 
 
+async def _stream_into_upserts(
+    stream,
+    build_row,
+    upsert_batch,
+    state: _SyncState,
+    *,
+    is_contacts: bool,
+    error_kind: str,
+    batch_kind: str,
+) -> None:
+    """Pipelined fetch + upsert.
+
+    Producer reads `stream` (an async generator of raw GHL records),
+    builds normalized rows, and pushes them in batches of _UPSERT_BATCH_SIZE
+    onto a small bounded queue. Consumer drains the queue, runs each
+    batch through `upsert_batch` against its own DB session, commits, and
+    writes a heartbeat. The two halves run concurrently via asyncio.gather,
+    so GHL fetch latency overlaps Supabase write latency.
+
+    `is_contacts` selects which counter on `state` to bump (contacts_synced
+    vs opportunities_synced). The error_kind / batch_kind strings tag any
+    error_details rows so the UI's error expander shows where it failed.
+    """
+    queue: asyncio.Queue = asyncio.Queue(maxsize=_PIPELINE_QUEUE_SIZE)
+    sentinel = object()
+
+    async def producer() -> None:
+        batch: list[dict] = []
+        async for raw in stream:
+            try:
+                batch.append(build_row(raw))
+            except Exception as exc:
+                state.errors.append({"type": error_kind, "id": raw.get("id"), "error": str(exc)[:500]})
+                logger.exception("Failed to build %s row %s", error_kind, raw.get("id"))
+                continue
+            if len(batch) >= _UPSERT_BATCH_SIZE:
+                await queue.put(batch)
+                batch = []
+        if batch:
+            await queue.put(batch)
+        await queue.put(sentinel)
+
+    async def consumer() -> None:
+        async with AsyncSessionLocal() as db:
+            while True:
+                item = await queue.get()
+                if item is sentinel:
+                    break
+                batch: list[dict] = item
+                try:
+                    await upsert_batch(db, batch)
+                    if is_contacts:
+                        state.contacts_synced += len(batch)
+                    else:
+                        state.opportunities_synced += len(batch)
+                    await db.commit()
+                    await _heartbeat(state)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    state.errors.append({"type": batch_kind, "size": len(batch), "error": str(exc)[:500]})
+                    logger.exception("Failed to upsert %s batch", batch_kind)
+                    await db.rollback()
+
+    await asyncio.gather(producer(), consumer())
+
+
 async def _finalize_run(state: _SyncState, status: str) -> None:
     completed = datetime.now(timezone.utc)
     duration = int((completed - state.started_at).total_seconds())
@@ -392,75 +470,27 @@ async def run_sync(sync_type: SyncType, trigger: SyncTrigger = "scheduled") -> s
             contact_updated_after = updated_after if sync_type_effective == "incremental" else None
             opp_updated_after = updated_after if sync_type_effective == "incremental" else None
 
-            # --- Contacts ---
-            async with AsyncSessionLocal() as db:
-                batch: list[dict] = []
-                async for c in client.stream_contacts(
-                    updated_after=contact_updated_after, filters=contact_filter,
-                ):
-                    try:
-                        batch.append(_build_contact_row(c))
-                    except Exception as exc:
-                        state.errors.append({"type": "contact", "id": c.get("id"), "error": str(exc)[:500]})
-                        logger.exception("Failed to build contact row %s", c.get("id"))
-                        continue
-                    if len(batch) >= 250:
-                        try:
-                            await _upsert_contacts_batch(db, batch)
-                            state.contacts_synced += len(batch)
-                            await db.commit()
-                            await _heartbeat(state)
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as exc:
-                            state.errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
-                            logger.exception("Failed to upsert contact batch")
-                            await db.rollback()
-                        batch = []
-                if batch:
-                    try:
-                        await _upsert_contacts_batch(db, batch)
-                        state.contacts_synced += len(batch)
-                        await db.commit()
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        state.errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
-                        await db.rollback()
-                await _heartbeat(state)
+            await _stream_into_upserts(
+                client.stream_contacts(updated_after=contact_updated_after, filters=contact_filter),
+                _build_contact_row,
+                _upsert_contacts_batch,
+                state,
+                is_contacts=True,
+                error_kind="contact",
+                batch_kind="contact_batch",
+            )
+            await _heartbeat(state)
 
-            # --- Opportunities ---
-            async with AsyncSessionLocal() as db:
-                batch = []
-                async for o in client.stream_opportunities(opp_updated_after):
-                    try:
-                        batch.append(_build_opp_row(o))
-                    except Exception as exc:
-                        state.errors.append({"type": "opportunity", "id": o.get("id"), "error": str(exc)[:500]})
-                        continue
-                    if len(batch) >= 250:
-                        try:
-                            await _upsert_opps_batch(db, batch)
-                            state.opportunities_synced += len(batch)
-                            await db.commit()
-                            await _heartbeat(state)
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as exc:
-                            state.errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
-                            await db.rollback()
-                        batch = []
-                if batch:
-                    try:
-                        await _upsert_opps_batch(db, batch)
-                        state.opportunities_synced += len(batch)
-                        await db.commit()
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        state.errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
-                        await db.rollback()
-                await _heartbeat(state)
+            await _stream_into_upserts(
+                client.stream_opportunities(opp_updated_after),
+                _build_opp_row,
+                _upsert_opps_batch,
+                state,
+                is_contacts=False,
+                error_kind="opportunity",
+                batch_kind="opp_batch",
+            )
+            await _heartbeat(state)
 
             return state.run_id
 
@@ -532,70 +562,30 @@ async def run_webinar_sync(
                 except Exception as exc:
                     state.errors.append({"type": "gcal_count", "error": str(exc)[:500]})
 
-            # --- Contacts ---
-            async with AsyncSessionLocal() as db:
-                batch: list[dict] = []
-                async for c in client.stream_contacts(filters=contact_filter):
-                    try:
-                        batch.append(_build_contact_row(c))
-                    except Exception as exc:
-                        state.errors.append({"type": "contact", "id": c.get("id"), "error": str(exc)[:500]})
-                        continue
-                    if len(batch) >= 250:
-                        try:
-                            await _upsert_contacts_batch(db, batch)
-                            state.contacts_synced += len(batch)
-                            await db.commit()
-                            await _heartbeat(state)
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as exc:
-                            state.errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
-                            logger.exception("Failed to upsert contact batch")
-                            await db.rollback()
-                        batch = []
-                if batch:
-                    try:
-                        await _upsert_contacts_batch(db, batch)
-                        state.contacts_synced += len(batch)
-                        await db.commit()
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        state.errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
-                        await db.rollback()
-                await _heartbeat(state)
+            await _stream_into_upserts(
+                client.stream_contacts(filters=contact_filter),
+                _build_contact_row,
+                _upsert_contacts_batch,
+                state,
+                is_contacts=True,
+                error_kind="contact",
+                batch_kind="contact_batch",
+            )
+            await _heartbeat(state)
 
-            # --- Opportunities (narrow phase only — deep skips) ---
+            # Opportunities are only pulled during the narrow phase — deep
+            # is contact-only and would just waste GHL quota.
             if not deep:
-                async with AsyncSessionLocal() as db:
-                    batch = []
-                    async for o in client.stream_opportunities():
-                        row = _build_opp_row(o)
-                        batch.append(row)
-                        if len(batch) >= 250:
-                            try:
-                                await _upsert_opps_batch(db, batch)
-                                state.opportunities_synced += len(batch)
-                                await db.commit()
-                                await _heartbeat(state)
-                            except asyncio.CancelledError:
-                                raise
-                            except Exception as exc:
-                                state.errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
-                                await db.rollback()
-                            batch = []
-                    if batch:
-                        try:
-                            await _upsert_opps_batch(db, batch)
-                            state.opportunities_synced += len(batch)
-                            await db.commit()
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as exc:
-                            state.errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
-                            await db.rollback()
-                    await _heartbeat(state)
+                await _stream_into_upserts(
+                    client.stream_opportunities(),
+                    _build_opp_row,
+                    _upsert_opps_batch,
+                    state,
+                    is_contacts=False,
+                    error_kind="opportunity",
+                    batch_kind="opp_batch",
+                )
+                await _heartbeat(state)
 
             return state.run_id
 
