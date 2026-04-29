@@ -30,7 +30,7 @@ export interface MetricColumn {
   group: MetricGroup;
   format: MetricFormat;
   decimals?: number;
-  /** Short derivation formula for ratio/per-1k metrics, e.g. "yesMarked / invited". */
+  /** Short derivation formula for ratio/per-1k metrics, e.g. "yesMarked / actuallyUsed (fallback invited)". */
   formulaText?: string;
   /** Raw metric keys this formula reads from. When a derived value is null and
    * any listed source is null on the row, the cell renders a ⚠ icon explaining
@@ -270,9 +270,9 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   },
   {
     key: "maybePer1kInv", label: "/1k Inv", group: "Maybe", format: "per1k",
-    formulaText: "maybeMarked / (invited / 1000)",
-    formulaSources: ["maybeMarked", "invited"],
-    description: "Maybe responders per 1,000 invited.",
+    formulaText: "maybeMarked / (actuallyUsed (fallback invited) / 1000)",
+    formulaSources: ["maybeMarked", "actuallyUsed", "invited"],
+    description: "Maybe responders per 1,000 (Actually Used; falls back to Invited when Actually Used is 0).",
   },
   {
     key: "maybeAttended", label: "Attended", group: "Maybe", format: "number",
@@ -328,9 +328,9 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   },
   {
     key: "maybeBookingsPer1kInv", label: "Book/1k", group: "Maybe", format: "per1k",
-    formulaText: "maybeBookings / (invited / 1000)",
-    formulaSources: ["maybeBookings", "invited"],
-    description: "Maybe-bookings per 1,000 invited.",
+    formulaText: "maybeBookings / (actuallyUsed (fallback invited) / 1000)",
+    formulaSources: ["maybeBookings", "actuallyUsed", "invited"],
+    description: "Maybe-bookings per 1,000 (Actually Used; falls back to Invited when Actually Used is 0).",
   },
 
   // ── Self Reg ──
@@ -341,9 +341,9 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   },
   {
     key: "selfRegPer1kInv", label: "/1k Inv", group: "Self Reg", format: "per1k",
-    formulaText: "selfRegMarked / (invited / 1000)",
-    formulaSources: ["selfRegMarked", "invited"],
-    description: "Self-registrations per 1,000 invited.",
+    formulaText: "selfRegMarked / (actuallyUsed (fallback invited) / 1000)",
+    formulaSources: ["selfRegMarked", "actuallyUsed", "invited"],
+    description: "Self-registrations per 1,000 (Actually Used; falls back to Invited when Actually Used is 0).",
   },
   {
     key: "selfRegAttended", label: "Attended", group: "Self Reg", format: "number",
@@ -384,9 +384,9 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   },
   {
     key: "selfRegBookingsPer1kInv", label: "Book/1k", group: "Self Reg", format: "per1k",
-    formulaText: "selfRegBookings / (invited / 1000)",
-    formulaSources: ["selfRegBookings", "invited"],
-    description: "Self-reg bookings per 1,000 invited.",
+    formulaText: "selfRegBookings / (actuallyUsed (fallback invited) / 1000)",
+    formulaSources: ["selfRegBookings", "actuallyUsed", "invited"],
+    description: "Self-reg bookings per 1,000 (Actually Used; falls back to Invited when Actually Used is 0).",
   },
 
   // ── Attendance ──
@@ -397,9 +397,9 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   },
   {
     key: "invitedToRegPercent", label: "Inv>Reg %", group: "Attendance", format: "percent",
-    formulaText: "totalRegs / invited",
-    formulaSources: ["totalRegs", "invited"],
-    description: "Percentage of invited contacts who registered via WG.",
+    formulaText: "totalRegs / actuallyUsed (fallback invited)",
+    formulaSources: ["totalRegs", "actuallyUsed", "invited"],
+    description: "Registration rate relative to Actually Used (falls back to Invited when Actually Used is 0).",
   },
   {
     key: "totalAttended", label: "Attended", group: "Attendance", format: "number",
@@ -414,15 +414,15 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   },
   {
     key: "invitedToAttendPercent", label: "Inv>Att %", group: "Attendance", format: "percent",
-    formulaText: "totalAttended / invited",
-    formulaSources: ["totalAttended", "invited"],
-    description: "Invited-to-attended conversion rate.",
+    formulaText: "totalAttended / actuallyUsed (fallback invited)",
+    formulaSources: ["totalAttended", "actuallyUsed", "invited"],
+    description: "Attended-to-Actually-Used conversion rate (falls back to Invited when Actually Used is 0).",
   },
   {
     key: "totalAttendedPer1kInv", label: "Att/1k", group: "Attendance", format: "per1k",
-    formulaText: "totalAttended / (invited / 1000)",
-    formulaSources: ["totalAttended", "invited"],
-    description: "Attendees per 1,000 invited.",
+    formulaText: "totalAttended / (actuallyUsed (fallback invited) / 1000)",
+    formulaSources: ["totalAttended", "actuallyUsed", "invited"],
+    description: "Attendees per 1,000 (Actually Used; falls back to Invited when Actually Used is 0).",
   },
   {
     key: "attendBySmsReminder", label: "SMS Remind", group: "Attendance", format: "number",
@@ -442,9 +442,9 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   },
   {
     key: "total10MinPlusPer1kInv", label: "10m/1k", group: "Attendance", format: "per1k",
-    formulaText: "total10MinPlus / (invited / 1000)",
-    formulaSources: ["total10MinPlus", "invited"],
-    description: "10-minute watchers per 1,000 invited.",
+    formulaText: "total10MinPlus / (actuallyUsed (fallback invited) / 1000)",
+    formulaSources: ["total10MinPlus", "actuallyUsed", "invited"],
+    description: "10-minute watchers per 1,000 (Actually Used; falls back to Invited when Actually Used is 0).",
   },
   {
     key: "attend10MinPercent", label: "10m %", group: "Attendance", format: "percent",
@@ -459,9 +459,9 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   },
   {
     key: "total30MinPlusPer1kInv", label: "30m/1k", group: "Attendance", format: "per1k",
-    formulaText: "total30MinPlus / (invited / 1000)",
-    formulaSources: ["total30MinPlus", "invited"],
-    description: "30-minute watchers per 1,000 invited.",
+    formulaText: "total30MinPlus / (actuallyUsed (fallback invited) / 1000)",
+    formulaSources: ["total30MinPlus", "actuallyUsed", "invited"],
+    description: "30-minute watchers per 1,000 (Actually Used; falls back to Invited when Actually Used is 0).",
   },
   {
     key: "attend30MinPercent", label: "30m %", group: "Attendance", format: "percent",
@@ -490,9 +490,9 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   },
   {
     key: "totalBookingsPer1kInv", label: "Book/1k", group: "Sales", format: "per1k",
-    formulaText: "totalBookings / (invited / 1000)",
-    formulaSources: ["totalBookings", "invited"],
-    description: "Bookings per 1,000 invited.",
+    formulaText: "totalBookings / (actuallyUsed (fallback invited) / 1000)",
+    formulaSources: ["totalBookings", "actuallyUsed", "invited"],
+    description: "Bookings per 1,000 (Actually Used; falls back to Invited when Actually Used is 0).",
   },
   {
     key: "totalCallsDatePassed", label: "Calls", group: "Sales", format: "number",
