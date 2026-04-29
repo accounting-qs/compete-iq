@@ -1166,6 +1166,7 @@ export function CopyGeneratorPage() {
                 <th className="text-right px-3 py-2.5 text-[11px] text-zinc-500 uppercase tracking-wider font-medium w-[80px]">Remaining</th>
                 <th className="text-center px-3 py-2.5 text-[11px] text-zinc-500 uppercase tracking-wider font-medium w-[100px]">Countries</th>
                 <th className="text-center px-3 py-2.5 text-[11px] text-zinc-500 uppercase tracking-wider font-medium w-[60px]">Emp</th>
+                <th className="text-left px-3 py-2.5 text-[11px] text-zinc-500 uppercase tracking-wider font-medium w-[90px]">Created</th>
                 <th className="text-left px-3 py-2.5 text-[11px] text-violet-500 dark:text-violet-400 uppercase tracking-wider font-medium">Title</th>
                 <th className="text-left px-3 py-2.5 text-[11px] text-blue-500 dark:text-blue-400 uppercase tracking-wider font-medium">Description</th>
               </tr>
@@ -1173,7 +1174,7 @@ export function CopyGeneratorPage() {
             <tbody>
               {filteredBuckets.length === 0 && buckets.length > 0 && (
                 <tr>
-                  <td colSpan={9} className="px-3 py-10 text-center text-xs text-zinc-500">
+                  <td colSpan={10} className="px-3 py-10 text-center text-xs text-zinc-500">
                     No buckets match the current filters.
                   </td>
                 </tr>
@@ -1211,6 +1212,9 @@ export function CopyGeneratorPage() {
                       <div className="flex gap-1 justify-center">{(bucket.countries || []).map(c => <CountryBadge key={c} code={c} />)}</div>
                     </td>
                     <td className="px-3 py-3 text-center text-xs text-zinc-500 font-mono">{bucket.emp_range}</td>
+                    <td className="px-3 py-3 text-xs text-zinc-500 dark:text-zinc-400 font-mono whitespace-nowrap">
+                      {bucket.created_at ? new Date(bucket.created_at).toLocaleDateString() : "—"}
+                    </td>
 
                     {/* ── Title Cell ───────────────────────────────── */}
                     <td className="px-3 py-2">
@@ -1388,7 +1392,7 @@ export function CopyGeneratorPage() {
                 return groupedBuckets.map((g) => (
                   <React.Fragment key={`grp-${g.key}`}>
                     <tr className="bg-zinc-50 dark:bg-zinc-800/40 border-b border-zinc-200 dark:border-zinc-700/40">
-                      <td colSpan={9} className="px-3 py-1.5 text-[11px] uppercase tracking-wider text-zinc-600 dark:text-zinc-300">
+                      <td colSpan={10} className="px-3 py-1.5 text-[11px] uppercase tracking-wider text-zinc-600 dark:text-zinc-300">
                         <span className="font-semibold">{g.key}</span>
                         <span className="ml-2 text-zinc-400 dark:text-zinc-500 normal-case">
                           · {g.items.length} bucket{g.items.length === 1 ? "" : "s"} · {g.items.reduce((s, b) => s + b.total_contacts, 0).toLocaleString()} contacts
