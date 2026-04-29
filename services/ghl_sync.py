@@ -111,13 +111,29 @@ def _parse_date(value: object):
     return dt.date() if dt else None
 
 
+_INT32_MIN = -2_147_483_648
+_INT32_MAX = 2_147_483_647
+
+
 def _safe_int(value: object) -> int | None:
+    """Parse to int, returning None for unparseable or out-of-range values.
+
+    Out-of-range guard: every Integer column on ghl_contact stores small
+    counts (webinar numbers, attended counts, minutes). Values outside
+    int32 are bad data — typically a malformed date stuffed into the wrong
+    custom field by a GHL workflow. Without this guard, one such value in
+    a 1000-row batch causes Postgres to reject the entire INSERT, losing
+    ~999 good rows. We'd rather silently drop the field than the batch.
+    """
     if value is None or value == "":
         return None
     try:
-        return int(float(str(value)))
+        n = int(float(str(value)))
     except (ValueError, TypeError):
         return None
+    if n < _INT32_MIN or n > _INT32_MAX:
+        return None
+    return n
 
 
 def _build_contact_row(c: dict) -> dict:
