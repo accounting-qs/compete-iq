@@ -5,7 +5,7 @@ import asyncio
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +14,14 @@ from api.auth import require_auth
 from db.models import GHLSyncRun, GHLSyncSettings
 from db.session import get_db
 from services import ghl_scheduler
-from services.ghl_sync import run_sync, run_webinar_sync, run_webinar_sync_full
+from services.ghl_sync import (
+    recover_orphaned_runs,
+    request_cancel,
+    run_sync,
+    run_webinar_sync,
+    run_webinar_sync_full,
+    sweep_stale_runs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +45,13 @@ class SyncRunResponse(BaseModel):
     expected_total: int | None = None
     errors_count: int
     error_details: list | None = None
+    cancel_requested: bool = False
+    last_heartbeat_at: datetime | None = None
+
+
+class SweepResponse(BaseModel):
+    recovered: int
+    swept: int
 
 
 class SyncStatusResponse(BaseModel):
@@ -92,6 +106,8 @@ def _run_to_dict(r: GHLSyncRun) -> dict:
         "expected_total": r.expected_total,
         "errors_count": r.errors_count,
         "error_details": r.error_details,
+        "cancel_requested": r.cancel_requested,
+        "last_heartbeat_at": r.last_heartbeat_at,
     }
 
 
@@ -200,6 +216,42 @@ async def trigger_webinar_sync(
         raise HTTPException(status_code=500, detail="Failed to start webinar sync")
 
     return {"run_id": run.id, "sync_type": run.sync_type, "status": run.status}
+
+
+@router.post("/runs/{run_id}/cancel", response_model=SyncRunResponse)
+async def cancel_run(run_id: str, db: AsyncSession = Depends(get_db)):
+    """Cooperatively cancel a running sync.
+
+    Sets cancel_requested=true and (best-effort) cancels the asyncio task
+    in this process. The sync loop catches asyncio.CancelledError at the
+    next batch boundary and finalizes the row as 'cancelled'. Returns
+    the updated row immediately — the status flips to 'cancelled' a
+    moment later, picked up by the UI's poll.
+    """
+    accepted = await request_cancel(run_id)
+    if not accepted:
+        result = await db.execute(select(GHLSyncRun).where(GHLSyncRun.id == run_id))
+        run = result.scalar_one_or_none()
+        if run is None:
+            raise HTTPException(status_code=404, detail="Sync run not found")
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot cancel run with status '{run.status}'",
+        )
+    result = await db.execute(select(GHLSyncRun).where(GHLSyncRun.id == run_id))
+    run = result.scalar_one()
+    return _run_to_dict(run)
+
+
+@router.post("/admin/recover-stale", response_model=SweepResponse)
+async def admin_recover_stale():
+    """Manually trigger orphan recovery + stale-heartbeat sweep. Useful for
+    cleaning up rows left over from a crash before the periodic sweeper
+    runs its next pass.
+    """
+    recovered = await recover_orphaned_runs()
+    swept = await sweep_stale_runs()
+    return {"recovered": recovered, "swept": swept}
 
 
 @router.get("/settings", response_model=SyncSettingsResponse)

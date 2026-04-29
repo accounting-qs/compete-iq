@@ -13,6 +13,9 @@ class ConnectorCredential(Base):
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
     provider: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
     api_key: Mapped[str] = mapped_column(Text, nullable=False)
+    # Used by providers that need a second piece of identity alongside the
+    # API key (e.g. GHL location id). Null for single-secret providers.
+    location_id: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

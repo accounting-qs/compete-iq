@@ -1298,7 +1298,7 @@ export interface GhlSyncRun {
   id: string;
   sync_type: string; // "full" | "incremental" | "webinar:N:narrow" | "webinar:N:deep"
   trigger: "scheduled" | "manual";
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "cancelled";
   started_at: string;
   completed_at: string | null;
   duration_seconds: number | null;
@@ -1307,6 +1307,8 @@ export interface GhlSyncRun {
   expected_total: number | null;
   errors_count: number;
   error_details: unknown[] | null;
+  cancel_requested: boolean;
+  last_heartbeat_at: string | null;
 }
 
 export interface GhlSyncStatus {
@@ -1359,6 +1361,30 @@ export async function triggerGhlWebinarSync(
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail ?? "Failed to trigger webinar sync");
+  }
+  return res.json();
+}
+
+export async function cancelGhlSyncRun(runId: string): Promise<GhlSyncRun> {
+  const res = await fetch(`${API_URL}/ghl-sync/runs/${runId}/cancel`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to cancel sync");
+  }
+  return res.json();
+}
+
+export async function recoverStaleGhlSyncs(): Promise<{ recovered: number; swept: number }> {
+  const res = await fetch(`${API_URL}/ghl-sync/admin/recover-stale`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to recover stale syncs");
   }
   return res.json();
 }
@@ -1472,6 +1498,39 @@ export async function deleteOpenAiApiKey(): Promise<void> {
     headers: authHeaders(),
   });
   if (!res.ok) throw new Error("Failed to delete OpenAI API key");
+}
+
+/* ── Connectors: GoHighLevel ───────────────────────────────────────────── */
+
+export interface GhlCredentialStatus {
+  configured: boolean;
+  api_key_masked?: string | null;
+  location_id?: string | null;
+  source: "db" | "env" | "none";
+}
+
+export async function fetchGhlConnectorStatus(): Promise<GhlCredentialStatus> {
+  const res = await fetch(`${API_URL}/connectors/ghl`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to fetch GHL status");
+  return res.json();
+}
+
+export async function saveGhlConnector(api_key: string, location_id: string): Promise<GhlCredentialStatus> {
+  const res = await fetch(`${API_URL}/connectors/ghl`, {
+    method: "PUT",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ api_key, location_id }),
+  });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to save GHL credentials"));
+  return res.json();
+}
+
+export async function deleteGhlConnector(): Promise<void> {
+  const res = await fetch(`${API_URL}/connectors/ghl`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to delete GHL credentials");
 }
 
 export async function fetchWgWebinars(opts?: { limit?: number; offset?: number; q?: string }): Promise<{ broadcasts: WgWebinar[]; total: number }> {

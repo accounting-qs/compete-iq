@@ -1,15 +1,23 @@
 """GoHighLevel sync engine — contacts + opportunities → local DB.
 
-Strategy:
-- Stream paged results from GHL API
-- Upsert by GHL ID using INSERT ... ON CONFLICT DO UPDATE (idempotent)
-- Record every run in ghl_sync_run table with status/duration/counts
-- Errors per-record are logged and counted but do not halt the sync
+Sync v2 invariants:
+- Every code path that creates a sync_run row finalizes it (status set to
+  completed | failed | cancelled, completed_at + duration_seconds populated).
+  The lifecycle is owned by `_sync_run`, a context manager wrapping the row
+  create / register / yield / finalize flow.
+- Each sync writes `last_heartbeat_at` on every batch. The scheduler runs a
+  periodic sweeper that marks rows with stale heartbeats as failed, so the
+  UI can never show a forever-running orphan.
+- Cancellation is cooperative: setting `cancel_requested=true` (or calling
+  `task.cancel()` via the registry) raises asyncio.CancelledError at the
+  next batch boundary, which the lifecycle catches and finalizes as
+  'cancelled'.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
@@ -59,9 +67,17 @@ logger = logging.getLogger(__name__)
 SyncType = Literal["full", "incremental"]
 SyncTrigger = Literal["scheduled", "manual"]
 
+# A row whose heartbeat is older than this is considered dead and will be
+# reaped by the stale-job sweeper. Tuned to be much larger than the longest
+# legitimate gap between heartbeats (one batch ~250 contacts, ~2-10s).
+STALE_HEARTBEAT_SECONDS = 600  # 10 minutes
 
 # Lock so only one sync runs at a time in this process
 _sync_lock = asyncio.Lock()
+
+# Registry of running sync tasks, keyed by run_id, so the cancel endpoint
+# can interrupt them via task.cancel(). Populated by `_sync_run`.
+_active_tasks: dict[str, asyncio.Task] = {}
 
 
 def _parse_dt(value: object) -> datetime | None:
@@ -156,15 +172,10 @@ def _build_opp_row(o: dict) -> dict:
 
 
 async def _upsert_contacts_batch(db: AsyncSession, rows: list[dict]) -> None:
-    """Batch upsert many contacts in a single round-trip.
-
-    Uses INSERT ... VALUES (...), (...) ON CONFLICT (ghl_contact_id) DO UPDATE.
-    On Supabase remote DB this is ~10-50x faster than per-row upserts.
-    """
+    """Batch upsert many contacts in a single round-trip."""
     if not rows:
         return
     stmt = pg_insert(GHLContact).values(rows)
-    # Column list is the same for every row, derived from the first row's keys.
     update_cols = {k: getattr(stmt.excluded, k) for k in rows[0].keys() if k != "ghl_contact_id"}
     stmt = stmt.on_conflict_do_update(
         index_elements=["ghl_contact_id"], set_=update_cols,
@@ -210,27 +221,131 @@ async def _upsert_opps_batch(db: AsyncSession, rows: list[dict]) -> None:
     await db.execute(stmt)
 
 
-async def _update_run_progress(
-    run_id: str,
-    contacts_synced: int,
-    opps_synced: int,
-    expected_total: int | None = None,
-) -> None:
-    """Persist live progress on the running sync_run row so the UI can poll it."""
+# ---------------------------------------------------------------------------
+# Sync v2: lifecycle, heartbeats, cancellation, recovery
+# ---------------------------------------------------------------------------
+
+class _SyncState:
+    """Mutable per-run state passed to the work block by `_sync_run`.
+
+    The work block bumps `contacts_synced` / `opportunities_synced` /
+    `expected_total` / `errors`; the lifecycle code reads them at finalize
+    and at every heartbeat.
+    """
+    __slots__ = ("run_id", "started_at", "contacts_synced", "opportunities_synced", "expected_total", "errors")
+
+    def __init__(self, run_id: str, started_at: datetime) -> None:
+        self.run_id = run_id
+        self.started_at = started_at
+        self.contacts_synced = 0
+        self.opportunities_synced = 0
+        self.expected_total: int | None = None
+        self.errors: list[dict] = []
+
+
+async def _heartbeat(state: _SyncState) -> None:
+    """Persist progress + heartbeat. Raise CancelledError if a cancel was
+    requested via the DB flag (defensive — the cancel endpoint also calls
+    task.cancel(), but the flag handles cross-process cancellation if we
+    ever scale to multiple workers).
+    """
     try:
         async with AsyncSessionLocal() as db:
+            now = datetime.now(timezone.utc)
             values: dict = {
-                "contacts_synced": contacts_synced,
-                "opportunities_synced": opps_synced,
+                "contacts_synced": state.contacts_synced,
+                "opportunities_synced": state.opportunities_synced,
+                "last_heartbeat_at": now,
             }
-            if expected_total is not None:
-                values["expected_total"] = expected_total
+            if state.expected_total is not None:
+                values["expected_total"] = state.expected_total
             await db.execute(
-                update(GHLSyncRun).where(GHLSyncRun.id == run_id).values(**values)
+                update(GHLSyncRun).where(GHLSyncRun.id == state.run_id).values(**values)
             )
             await db.commit()
+
+            cancel_check = await db.execute(
+                select(GHLSyncRun.cancel_requested).where(GHLSyncRun.id == state.run_id)
+            )
+            if cancel_check.scalar_one_or_none():
+                raise asyncio.CancelledError("Cancellation requested via DB flag")
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
-        logger.warning("Failed to persist sync progress: %s", exc)
+        logger.warning("Failed to write heartbeat/progress for %s: %s", state.run_id, exc)
+
+
+async def _set_expected_total(state: _SyncState, expected: int) -> None:
+    state.expected_total = expected
+    await _heartbeat(state)
+
+
+async def _finalize_run(state: _SyncState, status: str) -> None:
+    completed = datetime.now(timezone.utc)
+    duration = int((completed - state.started_at).total_seconds())
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                update(GHLSyncRun)
+                .where(GHLSyncRun.id == state.run_id)
+                .values(
+                    status=status,
+                    completed_at=completed,
+                    duration_seconds=duration,
+                    contacts_synced=state.contacts_synced,
+                    opportunities_synced=state.opportunities_synced,
+                    errors_count=len(state.errors),
+                    error_details=state.errors or None,
+                )
+            )
+            await db.commit()
+        logger.info(
+            "Sync %s finalized: status=%s contacts=%d opps=%d errors=%d %ds",
+            state.run_id, status, state.contacts_synced, state.opportunities_synced,
+            len(state.errors), duration,
+        )
+    except Exception:
+        logger.exception("Failed to finalize sync run %s", state.run_id)
+
+
+@asynccontextmanager
+async def _sync_run(sync_type: str, trigger: SyncTrigger):
+    """Lifecycle wrapper: create row, register task, yield state, guarantee
+    finalization on every exit path (success, error, cancellation).
+    """
+    started = datetime.now(timezone.utc)
+    async with AsyncSessionLocal() as db:
+        run = GHLSyncRun(
+            sync_type=sync_type,
+            trigger=trigger,
+            status="running",
+            started_at=started,
+            last_heartbeat_at=started,
+        )
+        db.add(run)
+        await db.commit()
+        await db.refresh(run)
+        run_id = run.id
+
+    state = _SyncState(run_id=run_id, started_at=started)
+
+    task = asyncio.current_task()
+    if task is not None:
+        _active_tasks[run_id] = task
+
+    try:
+        yield state
+        await _finalize_run(state, status="completed")
+    except asyncio.CancelledError:
+        state.errors.append({"type": "cancelled", "error": "Sync cancelled by user or sweeper"})
+        await _finalize_run(state, status="cancelled")
+        raise
+    except Exception as exc:
+        logger.exception("Sync %s failed", run_id)
+        state.errors.append({"type": "fatal", "error": str(exc)[:500]})
+        await _finalize_run(state, status="failed")
+    finally:
+        _active_tasks.pop(run_id, None)
 
 
 async def _get_last_successful_sync_start(db: AsyncSession) -> datetime | None:
@@ -244,36 +359,23 @@ async def _get_last_successful_sync_start(db: AsyncSession) -> datetime | None:
     return run.started_at if run else None
 
 
-async def run_sync(sync_type: SyncType, trigger: SyncTrigger = "scheduled") -> str:
-    """Run a full or incremental GHL sync.
+# ---------------------------------------------------------------------------
+# Sync entry points
+# ---------------------------------------------------------------------------
 
-    Returns the GHLSyncRun.id (so a manual trigger can poll it).
-    Idempotent on ghl_contact_id / ghl_opportunity_id. Errors per-record
-    are counted but do not halt the sync.
-    """
+async def run_sync(sync_type: SyncType, trigger: SyncTrigger = "scheduled") -> str:
+    """Run a full or incremental GHL sync. Returns the GHLSyncRun.id."""
     if _sync_lock.locked():
         logger.warning("Sync already running — skipping this trigger (%s/%s)", sync_type, trigger)
         raise RuntimeError("A sync is already running")
 
     async with _sync_lock:
-        # Create sync run row
-        async with AsyncSessionLocal() as db:
-            run = GHLSyncRun(
-                sync_type=sync_type,
-                trigger=trigger,
-                status="running",
-                started_at=datetime.now(timezone.utc),
-            )
-            db.add(run)
-            await db.commit()
-            await db.refresh(run)
-            run_id = run.id
-            run_started_at = run.started_at
-
-            # For incremental, look up the previous completed run
+        async with _sync_run(sync_type, trigger) as state:
+            # Resolve incremental window before opening the GHL client
             updated_after: datetime | None = None
             if sync_type == "incremental":
-                last_start = await _get_last_successful_sync_start(db)
+                async with AsyncSessionLocal() as db:
+                    last_start = await _get_last_successful_sync_start(db)
                 if last_start is None:
                     logger.info("No previous sync found — upgrading incremental → full")
                     sync_type_effective = "full"
@@ -284,20 +386,13 @@ async def run_sync(sync_type: SyncType, trigger: SyncTrigger = "scheduled") -> s
             else:
                 sync_type_effective = "full"
 
-        client = GHLClient()
-        contacts_synced = 0
-        opps_synced = 0
-        errors: list[dict] = []
+            client = await GHLClient.create()  # may raise — caught and finalized by `_sync_run`
 
-        # Scheduled sync uses the narrow filter — excludes the 4.2M-row
-        # calendar_webinar_series_history wildcard. Per-webinar sync (run_webinar_sync)
-        # handles the wide case on demand.
-        contact_filter = GHLClient.narrow_webinar_filter()
-        contact_updated_after = updated_after if sync_type_effective == "incremental" else None
-        opp_updated_after = updated_after if sync_type_effective == "incremental" else None
+            contact_filter = GHLClient.narrow_webinar_filter()
+            contact_updated_after = updated_after if sync_type_effective == "incremental" else None
+            opp_updated_after = updated_after if sync_type_effective == "incremental" else None
 
-        try:
-            # Sync contacts — batched upserts per page for speed
+            # --- Contacts ---
             async with AsyncSessionLocal() as db:
                 batch: list[dict] = []
                 async for c in client.stream_contacts(
@@ -306,90 +401,68 @@ async def run_sync(sync_type: SyncType, trigger: SyncTrigger = "scheduled") -> s
                     try:
                         batch.append(_build_contact_row(c))
                     except Exception as exc:
-                        errors.append({"type": "contact", "id": c.get("id"), "error": str(exc)[:500]})
+                        state.errors.append({"type": "contact", "id": c.get("id"), "error": str(exc)[:500]})
                         logger.exception("Failed to build contact row %s", c.get("id"))
                         continue
                     if len(batch) >= 250:
                         try:
                             await _upsert_contacts_batch(db, batch)
-                            contacts_synced += len(batch)
+                            state.contacts_synced += len(batch)
                             await db.commit()
-                            await _update_run_progress(run_id, contacts_synced, opps_synced)
+                            await _heartbeat(state)
+                        except asyncio.CancelledError:
+                            raise
                         except Exception as exc:
-                            errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
+                            state.errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
                             logger.exception("Failed to upsert contact batch")
                             await db.rollback()
                         batch = []
                 if batch:
                     try:
                         await _upsert_contacts_batch(db, batch)
-                        contacts_synced += len(batch)
+                        state.contacts_synced += len(batch)
                         await db.commit()
+                    except asyncio.CancelledError:
+                        raise
                     except Exception as exc:
-                        errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
+                        state.errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
                         await db.rollback()
-                await _update_run_progress(run_id, contacts_synced, opps_synced)
+                await _heartbeat(state)
 
-            # Sync opportunities
+            # --- Opportunities ---
             async with AsyncSessionLocal() as db:
                 batch = []
                 async for o in client.stream_opportunities(opp_updated_after):
                     try:
                         batch.append(_build_opp_row(o))
                     except Exception as exc:
-                        errors.append({"type": "opportunity", "id": o.get("id"), "error": str(exc)[:500]})
+                        state.errors.append({"type": "opportunity", "id": o.get("id"), "error": str(exc)[:500]})
                         continue
                     if len(batch) >= 250:
                         try:
                             await _upsert_opps_batch(db, batch)
-                            opps_synced += len(batch)
+                            state.opportunities_synced += len(batch)
                             await db.commit()
-                            await _update_run_progress(run_id, contacts_synced, opps_synced)
+                            await _heartbeat(state)
+                        except asyncio.CancelledError:
+                            raise
                         except Exception as exc:
-                            errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
+                            state.errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
                             await db.rollback()
                         batch = []
                 if batch:
                     try:
                         await _upsert_opps_batch(db, batch)
-                        opps_synced += len(batch)
+                        state.opportunities_synced += len(batch)
                         await db.commit()
+                    except asyncio.CancelledError:
+                        raise
                     except Exception as exc:
-                        errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
+                        state.errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
                         await db.rollback()
-                await _update_run_progress(run_id, contacts_synced, opps_synced)
+                await _heartbeat(state)
 
-            status = "completed"
-
-        except Exception as exc:
-            logger.exception("Sync failed")
-            errors.append({"type": "fatal", "error": str(exc)[:500]})
-            status = "failed"
-
-        # Finalize the run row
-        completed = datetime.now(timezone.utc)
-        duration = int((completed - run_started_at).total_seconds())
-        async with AsyncSessionLocal() as db:
-            await db.execute(
-                update(GHLSyncRun)
-                .where(GHLSyncRun.id == run_id)
-                .values(
-                    status=status,
-                    completed_at=completed,
-                    duration_seconds=duration,
-                    contacts_synced=contacts_synced,
-                    opportunities_synced=opps_synced,
-                    errors_count=len(errors),
-                    error_details=errors or None,
-                )
-            )
-            await db.commit()
-
-        logger.info(
-            "Sync %s (%s/%s): status=%s, contacts=%d, opps=%d, errors=%d, %ds",
-            run_id, sync_type, trigger, status, contacts_synced, opps_synced, len(errors), duration,
-        )
-        return run_id
+            return state.run_id
 
 
 async def _upsert_webinar_stats(webinar_number: int, gcal_invited_count: int) -> None:
@@ -415,107 +488,85 @@ async def run_webinar_sync(
     trigger: SyncTrigger = "manual",
     deep: bool = False,
 ) -> str:
-    """Sync one phase of a per-webinar pull. Returns run_id.
-
-    Narrow phase (deep=False, default):
-      - gcal_invited_count captured in ghl_webinar_stats (drives gcalInvitedGhl)
-      - Contacts matching invite_response contains eN / non_joiners contains eN
-        / booked_call_webinar_series = N (~1,500 contacts for W136, ~2 min)
-      - Opportunities with webinar_source_number = N
-
-    Deep phase (deep=True):
-      - Contacts matching calendar_webinar_series_history contains eN (~200k
-        for W136, ~3 hours). Run after narrow so stats become usable quickly.
-      - Opportunities skipped (already synced in narrow).
-    """
+    """Sync one phase (narrow or deep) of a per-webinar pull. Returns run_id."""
     if _sync_lock.locked():
         raise RuntimeError("A sync is already running")
 
     async with _sync_lock:
         phase_label = "deep" if deep else "narrow"
         sync_type = f"webinar:{webinar_number}:{phase_label}"
-        async with AsyncSessionLocal() as db:
-            run = GHLSyncRun(
-                sync_type=sync_type,
-                trigger=trigger,
-                status="running",
-                started_at=datetime.now(timezone.utc),
-            )
-            db.add(run)
-            await db.commit()
-            await db.refresh(run)
-            run_id = run.id
-            run_started_at = run.started_at
 
-        client = GHLClient()
-        contacts_synced = 0
-        opps_synced = 0
-        errors: list[dict] = []
+        async with _sync_run(sync_type, trigger) as state:
+            client = await GHLClient.create()  # may raise — caught and finalized by `_sync_run`
 
-        try:
             # Capture expected_total + (narrow only) gcal_invited_count
             if deep:
                 contact_filter = GHLClient.gcal_invited_count_filter(webinar_number)
                 try:
                     expected = await client.count_contacts_with_filter(contact_filter)
-                    await _update_run_progress(run_id, 0, 0, expected_total=expected)
+                    await _set_expected_total(state, expected)
                     logger.info("W%d deep phase expects %d contacts", webinar_number, expected)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:
-                    errors.append({"type": "expected_count", "error": str(exc)[:500]})
+                    state.errors.append({"type": "expected_count", "error": str(exc)[:500]})
             else:
                 contact_filter = GHLClient.webinar_number_filter(webinar_number, deep=False)
                 try:
                     expected = await client.count_contacts_with_filter(contact_filter)
-                    await _update_run_progress(run_id, 0, 0, expected_total=expected)
+                    await _set_expected_total(state, expected)
                     logger.info("W%d narrow phase expects %d contacts", webinar_number, expected)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:
-                    errors.append({"type": "expected_count", "error": str(exc)[:500]})
+                    state.errors.append({"type": "expected_count", "error": str(exc)[:500]})
 
-                # Also record the gcal_invited_count while we're making count calls
                 try:
                     gcal_count = await client.count_contacts_with_filter(
                         GHLClient.gcal_invited_count_filter(webinar_number)
                     )
                     await _upsert_webinar_stats(webinar_number, gcal_count)
                     logger.info("W%d gcal_invited_count = %d", webinar_number, gcal_count)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:
-                    errors.append({"type": "gcal_count", "error": str(exc)[:500]})
+                    state.errors.append({"type": "gcal_count", "error": str(exc)[:500]})
 
-            # Contacts — batched upserts
+            # --- Contacts ---
             async with AsyncSessionLocal() as db:
                 batch: list[dict] = []
                 async for c in client.stream_contacts(filters=contact_filter):
                     try:
                         batch.append(_build_contact_row(c))
                     except Exception as exc:
-                        errors.append({"type": "contact", "id": c.get("id"), "error": str(exc)[:500]})
+                        state.errors.append({"type": "contact", "id": c.get("id"), "error": str(exc)[:500]})
                         continue
                     if len(batch) >= 250:
                         try:
                             await _upsert_contacts_batch(db, batch)
-                            contacts_synced += len(batch)
+                            state.contacts_synced += len(batch)
                             await db.commit()
-                            await _update_run_progress(run_id, contacts_synced, opps_synced)
+                            await _heartbeat(state)
+                        except asyncio.CancelledError:
+                            raise
                         except Exception as exc:
-                            errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
+                            state.errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
                             logger.exception("Failed to upsert contact batch")
                             await db.rollback()
                         batch = []
                 if batch:
                     try:
                         await _upsert_contacts_batch(db, batch)
-                        contacts_synced += len(batch)
+                        state.contacts_synced += len(batch)
                         await db.commit()
+                    except asyncio.CancelledError:
+                        raise
                     except Exception as exc:
-                        errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
+                        state.errors.append({"type": "contact_batch", "size": len(batch), "error": str(exc)[:500]})
                         await db.rollback()
-                await _update_run_progress(run_id, contacts_synced, opps_synced)
+                await _heartbeat(state)
 
-            # Opportunities (narrow phase only — deep skips)
-            # Store ALL opps encountered — bookings are counted at read time by
-            # UNION of (opps with webinar_source_number = N) + (contacts with
-            # booked_call_webinar_series = N), which catches opps whose custom
-            # field isn't set but whose contact has the webinar tag.
+            # --- Opportunities (narrow phase only — deep skips) ---
             if not deep:
                 async with AsyncSessionLocal() as db:
                     batch = []
@@ -525,66 +576,139 @@ async def run_webinar_sync(
                         if len(batch) >= 250:
                             try:
                                 await _upsert_opps_batch(db, batch)
-                                opps_synced += len(batch)
+                                state.opportunities_synced += len(batch)
                                 await db.commit()
-                                await _update_run_progress(run_id, contacts_synced, opps_synced)
+                                await _heartbeat(state)
+                            except asyncio.CancelledError:
+                                raise
                             except Exception as exc:
-                                errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
+                                state.errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
                                 await db.rollback()
                             batch = []
                     if batch:
                         try:
                             await _upsert_opps_batch(db, batch)
-                            opps_synced += len(batch)
+                            state.opportunities_synced += len(batch)
                             await db.commit()
+                        except asyncio.CancelledError:
+                            raise
                         except Exception as exc:
-                            errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
+                            state.errors.append({"type": "opp_batch", "size": len(batch), "error": str(exc)[:500]})
                             await db.rollback()
-                    await _update_run_progress(run_id, contacts_synced, opps_synced)
+                    await _heartbeat(state)
 
-            status = "completed"
-
-        except Exception as exc:
-            logger.exception("Webinar sync failed")
-            errors.append({"type": "fatal", "error": str(exc)[:500]})
-            status = "failed"
-
-        completed = datetime.now(timezone.utc)
-        duration = int((completed - run_started_at).total_seconds())
-        async with AsyncSessionLocal() as db:
-            await db.execute(
-                update(GHLSyncRun)
-                .where(GHLSyncRun.id == run_id)
-                .values(
-                    status=status,
-                    completed_at=completed,
-                    duration_seconds=duration,
-                    contacts_synced=contacts_synced,
-                    opportunities_synced=opps_synced,
-                    errors_count=len(errors),
-                    error_details=errors or None,
-                )
-            )
-            await db.commit()
-
-        logger.info(
-            "Webinar sync %s (W%d/%s): status=%s, contacts=%d, opps=%d, errors=%d, %ds",
-            run_id, webinar_number, trigger, status, contacts_synced, opps_synced, len(errors), duration,
-        )
-        return run_id
+            return state.run_id
 
 
 async def run_webinar_sync_full(webinar_number: int, trigger: SyncTrigger = "manual") -> list[str]:
-    """Run both phases sequentially: narrow first (fast, metrics usable), then
-    deep (slow, backfills the 200k-row GCal-invited base).
-
-    Returns both run_ids. Each phase is recorded as a separate row in
-    ghl_sync_run so the history shows "webinar:136:narrow" and
-    "webinar:136:deep" with their own durations.
-    """
+    """Run both phases sequentially: narrow first (fast), then deep (slow)."""
     narrow_id = await run_webinar_sync(webinar_number, trigger=trigger, deep=False)
     deep_id = await run_webinar_sync(webinar_number, trigger=trigger, deep=True)
     return [narrow_id, deep_id]
+
+
+# ---------------------------------------------------------------------------
+# Cancellation + recovery (called by the router and the scheduler)
+# ---------------------------------------------------------------------------
+
+async def request_cancel(run_id: str) -> bool:
+    """Request cancellation of a running sync. Returns True if the row was
+    found in 'running' state and the cancel was accepted, False otherwise.
+    Sets the DB flag and (best-effort) cancels the in-process asyncio task.
+    """
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(GHLSyncRun).where(GHLSyncRun.id == run_id))
+        run = result.scalar_one_or_none()
+        if run is None or run.status != "running":
+            return False
+        await db.execute(
+            update(GHLSyncRun).where(GHLSyncRun.id == run_id).values(cancel_requested=True)
+        )
+        await db.commit()
+
+    task = _active_tasks.get(run_id)
+    if task is not None and not task.done():
+        task.cancel()
+    return True
+
+
+async def recover_orphaned_runs() -> int:
+    """Mark every 'running' row whose task is not in this process's registry
+    as failed. Called at scheduler startup; on a fresh process, no tasks are
+    in the registry, so any 'running' row is by definition an orphan from
+    before the deploy.
+    """
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(GHLSyncRun).where(GHLSyncRun.status == "running")
+        )
+        runs = result.scalars().all()
+        recovered = 0
+        for run in runs:
+            if run.id in _active_tasks:
+                continue
+            now = datetime.now(timezone.utc)
+            duration = int((now - run.started_at).total_seconds())
+            errors = list(run.error_details) if run.error_details else []
+            errors.append({"type": "orphaned", "reason": "process_restart_or_crash"})
+            await db.execute(
+                update(GHLSyncRun)
+                .where(GHLSyncRun.id == run.id)
+                .values(
+                    status="failed",
+                    completed_at=now,
+                    duration_seconds=duration,
+                    errors_count=len(errors),
+                    error_details=errors,
+                )
+            )
+            recovered += 1
+        if recovered:
+            await db.commit()
+            logger.warning("Recovered %d orphaned sync run(s)", recovered)
+    return recovered
+
+
+async def sweep_stale_runs() -> int:
+    """Periodic sweeper: any 'running' row with a heartbeat older than
+    STALE_HEARTBEAT_SECONDS (or no heartbeat at all and started_at older
+    than the threshold) is considered dead and marked failed.
+    """
+    threshold = datetime.now(timezone.utc) - timedelta(seconds=STALE_HEARTBEAT_SECONDS)
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(GHLSyncRun).where(GHLSyncRun.status == "running")
+        )
+        runs = result.scalars().all()
+        swept = 0
+        for run in runs:
+            last = run.last_heartbeat_at or run.started_at
+            if last is None or last >= threshold:
+                continue
+            if run.id in _active_tasks and not _active_tasks[run.id].done():
+                # Task is still alive in this process — heartbeat write may have
+                # transiently failed; don't reap it.
+                continue
+            now = datetime.now(timezone.utc)
+            duration = int((now - run.started_at).total_seconds())
+            errors = list(run.error_details) if run.error_details else []
+            errors.append({"type": "stale_heartbeat", "last_heartbeat_at": last.isoformat() if last else None})
+            await db.execute(
+                update(GHLSyncRun)
+                .where(GHLSyncRun.id == run.id)
+                .values(
+                    status="failed",
+                    completed_at=now,
+                    duration_seconds=duration,
+                    errors_count=len(errors),
+                    error_details=errors,
+                )
+            )
+            swept += 1
+        if swept:
+            await db.commit()
+            logger.warning("Swept %d stale sync run(s)", swept)
+    return swept
 
 
 async def get_sync_settings() -> dict:
@@ -593,7 +717,6 @@ async def get_sync_settings() -> dict:
         result = await db.execute(select(GHLSyncSettings).where(GHLSyncSettings.id == 1))
         s = result.scalar_one_or_none()
         if s is None:
-            # Seed if missing
             s = GHLSyncSettings(id=1)
             db.add(s)
             await db.commit()

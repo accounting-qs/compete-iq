@@ -102,6 +102,8 @@ class GHLSyncRun(Base):
     expected_total: Mapped[Optional[int]] = mapped_column(Integer)
     errors_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     error_details: Mapped[Optional[list]] = mapped_column(JSONB)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    last_heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         Index("ix_ghl_sync_run_started", started_at.desc()),

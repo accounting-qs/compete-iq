@@ -5,8 +5,10 @@ import { useEffect, useState } from "react";
 import {
   fetchWgStatus,
   fetchOpenAiStatus,
+  fetchGhlConnectorStatus,
   type WgCredentialStatus,
   type OpenAiCredentialStatus,
+  type GhlCredentialStatus,
 } from "@/lib/api";
 
 type Status = "connected" | "not_connected" | "loading";
@@ -14,6 +16,7 @@ type Status = "connected" | "not_connected" | "loading";
 export function ConnectorsLanding() {
   const [wg, setWg] = useState<Status>("loading");
   const [openai, setOpenai] = useState<Status>("loading");
+  const [ghl, setGhl] = useState<Status>("loading");
 
   useEffect(() => {
     fetchWgStatus()
@@ -22,6 +25,9 @@ export function ConnectorsLanding() {
     fetchOpenAiStatus()
       .then((s: OpenAiCredentialStatus) => setOpenai(s.configured ? "connected" : "not_connected"))
       .catch(() => setOpenai("not_connected"));
+    fetchGhlConnectorStatus()
+      .then((s: GhlCredentialStatus) => setGhl(s.configured ? "connected" : "not_connected"))
+      .catch(() => setGhl("not_connected"));
   }, []);
 
   return (
@@ -51,6 +57,17 @@ export function ConnectorsLanding() {
           icon={
             <svg className="w-5 h-5 text-violet-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <polygon points="5 3 19 12 5 21 5 3" />
+            </svg>
+          }
+        />
+        <ConnectorCard
+          href="/connectors/ghl"
+          name="GoHighLevel"
+          description="Connect your GHL location to sync contacts and opportunities for the Statistics dashboard."
+          status={ghl}
+          icon={
+            <svg className="w-5 h-5 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
             </svg>
           }
         />

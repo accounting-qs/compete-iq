@@ -7,6 +7,8 @@ import {
   triggerGhlSync,
   fetchGhlSyncSettings,
   updateGhlSyncSettings,
+  cancelGhlSyncRun,
+  recoverStaleGhlSyncs,
   type GhlSyncRun,
   type GhlSyncStatus,
   type GhlSyncSettings,
@@ -97,21 +99,36 @@ function formatElapsed(startedAt: string): string {
   return formatDuration(diffS);
 }
 
-function StatusPill({ status }: { status: string }) {
+function StatusPill({ status, cancelRequested }: { status: string; cancelRequested?: boolean }) {
   const colors: Record<string, string> = {
     running: "bg-amber-500/15 text-amber-500 border-amber-500/30",
     completed: "bg-emerald-500/15 text-emerald-500 border-emerald-500/30",
     failed: "bg-red-500/15 text-red-400 border-red-500/30",
+    cancelled: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30",
   };
-  const label = status === "completed" ? "✓ completed"
+  const isCancelling = status === "running" && cancelRequested;
+  const label = isCancelling ? "⌛ cancelling"
+    : status === "completed" ? "✓ completed"
     : status === "running" ? "• running"
     : status === "failed" ? "✗ failed"
+    : status === "cancelled" ? "⊘ cancelled"
     : status;
+  const className = isCancelling ? colors.cancelled : (colors[status] ?? "bg-zinc-500/15 text-zinc-400 border-zinc-500/30");
   return (
-    <span className={`px-2 py-0.5 rounded text-[10px] font-semibold border uppercase tracking-wider ${colors[status] ?? "bg-zinc-500/15 text-zinc-400 border-zinc-500/30"}`}>
+    <span className={`px-2 py-0.5 rounded text-[10px] font-semibold border uppercase tracking-wider ${className}`}>
       {label}
     </span>
   );
+}
+
+const STALE_HEARTBEAT_SECONDS = 600; // matches backend STALE_HEARTBEAT_SECONDS
+
+function isStaleHeartbeat(run: GhlSyncRun): boolean {
+  if (run.status !== "running") return false;
+  const last = run.last_heartbeat_at ?? run.started_at;
+  if (!last) return false;
+  const ageSec = (Date.now() - new Date(last).getTime()) / 1000;
+  return ageSec > STALE_HEARTBEAT_SECONDS;
 }
 
 interface Stats {
@@ -163,6 +180,8 @@ export function SyncPage() {
   const [triggering, setTriggering] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [expandedErrors, setExpandedErrors] = useState<Set<string>>(new Set());
+  const [cancellingIds, setCancellingIds] = useState<Set<string>>(new Set());
+  const [recovering, setRecovering] = useState(false);
   const pollRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
@@ -216,6 +235,38 @@ export function SyncPage() {
     }
   };
 
+  const handleCancel = async (run: GhlSyncRun) => {
+    if (cancellingIds.has(run.id)) return;
+    if (!window.confirm(`Stop ${formatSyncType(run.sync_type)}? The sync will exit at the next batch boundary (usually within seconds).`)) return;
+    setCancellingIds((prev) => new Set(prev).add(run.id));
+    try {
+      await cancelGhlSyncRun(run.id);
+      await refresh();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to cancel sync");
+    } finally {
+      setCancellingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(run.id);
+        return next;
+      });
+    }
+  };
+
+  const handleRecoverStale = async () => {
+    if (recovering) return;
+    setRecovering(true);
+    try {
+      const res = await recoverStaleGhlSyncs();
+      await refresh();
+      alert(`Recovered ${res.recovered} orphan(s) and swept ${res.swept} stale run(s).`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to recover stale syncs");
+    } finally {
+      setRecovering(false);
+    }
+  };
+
   const handleSettingsChange = async (patch: Partial<GhlSyncSettings>) => {
     if (!settings) return;
     setSavingSettings(true);
@@ -259,6 +310,14 @@ export function SyncPage() {
             <span className="text-[11px] text-zinc-500">All times in your local timezone</span>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={handleRecoverStale}
+              disabled={recovering}
+              title="Mark orphaned 'running' rows as failed (one-shot scan; the scheduler also runs this every 2 min)"
+              className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {recovering ? "Recovering…" : "Recover Stale"}
+            </button>
             <button
               onClick={() => handleTrigger("incremental")}
               disabled={triggering || status?.is_running}
@@ -323,6 +382,7 @@ export function SyncPage() {
                   <th className="px-4 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] text-right">Contacts</th>
                   <th className="px-4 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] text-right">Opportunities</th>
                   <th className="px-4 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] text-right">Errors</th>
+                  <th className="px-4 py-2 text-zinc-500 font-semibold uppercase tracking-wider text-[10px] text-right"></th>
                 </tr>
               </thead>
               <tbody>
@@ -332,10 +392,12 @@ export function SyncPage() {
                   const progressPct = (isRunning && r.expected_total && r.expected_total > 0)
                     ? Math.min(100, Math.round((r.contacts_synced / r.expected_total) * 100))
                     : null;
+                  const stale = isStaleHeartbeat(r);
+                  const isCancelling = cancellingIds.has(r.id) || (isRunning && r.cancel_requested);
                   return (
                   <tr
                     key={r.id}
-                    className={`border-t border-zinc-200 dark:border-zinc-800/20 ${r.errors_count > 0 ? "cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/30" : ""}`}
+                    className={`border-t border-zinc-200 dark:border-zinc-800/20 ${stale ? "bg-red-500/5" : ""} ${r.errors_count > 0 ? "cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/30" : ""}`}
                     onClick={r.errors_count > 0 ? () => toggleErrorExpand(r.id) : undefined}
                   >
                     <td className="px-4 py-2.5 text-zinc-700 dark:text-zinc-300 whitespace-nowrap">
@@ -353,7 +415,19 @@ export function SyncPage() {
                       </span>
                     </td>
                     <td className="px-4 py-2.5 text-zinc-600 dark:text-zinc-400 capitalize">{r.trigger}</td>
-                    <td className="px-4 py-2.5"><StatusPill status={r.status} /></td>
+                    <td className="px-4 py-2.5">
+                      <div className="flex items-center gap-1.5">
+                        <StatusPill status={r.status} cancelRequested={r.cancel_requested} />
+                        {stale && (
+                          <span
+                            title={`No heartbeat for >${STALE_HEARTBEAT_SECONDS / 60} min — sweeper will mark this failed shortly`}
+                            className="px-1.5 py-0.5 rounded text-[9px] font-semibold border bg-red-500/10 text-red-400 border-red-500/30 uppercase tracking-wider"
+                          >
+                            stale
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-4 py-2.5 text-right font-mono text-zinc-700 dark:text-zinc-300 whitespace-nowrap">
                       {isRunning ? (
                         <div className="text-right">
@@ -377,6 +451,17 @@ export function SyncPage() {
                     <td className="px-4 py-2.5 text-right font-mono text-zinc-700 dark:text-zinc-300">{r.opportunities_synced.toLocaleString()}</td>
                     <td className={`px-4 py-2.5 text-right font-mono ${r.errors_count > 0 ? "text-red-400" : "text-zinc-500"}`}>
                       {r.errors_count}
+                    </td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      {isRunning && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleCancel(r); }}
+                          disabled={isCancelling}
+                          className="px-2 py-0.5 text-[10px] font-semibold rounded border border-red-500/40 text-red-400 hover:bg-red-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors uppercase tracking-wider"
+                        >
+                          {isCancelling ? "Stopping…" : "Stop"}
+                        </button>
+                      )}
                     </td>
                   </tr>
                   );

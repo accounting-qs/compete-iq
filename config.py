@@ -57,8 +57,6 @@ class Settings(BaseSettings):
     GHL_LOCATION_ID: Optional[str] = None
     GHL_PIPELINE_ID: Optional[str] = None
     GHL_API_BASE_URL: str = "https://services.leadconnectorhq.com"
-    GHL_PAGE_DELAY_MS: int = 150
-    GHL_PAGE_SIZE: int = 100
 
     class Config:
         env_file = ".env"

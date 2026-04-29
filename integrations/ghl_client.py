@@ -11,10 +11,88 @@ from datetime import datetime
 from typing import AsyncGenerator
 
 import httpx
+from sqlalchemy import select
 
 from config import settings
+from db.models import ConnectorCredential
+from db.session import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
+
+GHL_PROVIDER = "ghl"
+
+# Pagination knobs are intentionally hardcoded — they're tuned for GHL's
+# v2 API limits (contacts/search caps at 500 per page) and we never want
+# them changed at runtime. Was previously env-configurable.
+GHL_PAGE_SIZE = 500
+GHL_PAGE_DELAY_S = 0.1
+
+
+async def get_ghl_credentials() -> tuple[str, str, str | None]:
+    """Resolve GHL credentials with DB-first, env-fallback semantics.
+
+    Returns (api_key, location_id, pipeline_id). The pipeline ID stays
+    env-only — the connector UI exposes only the two values that change
+    between environments.
+
+    Raises RuntimeError if neither source has the required pair.
+    """
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(ConnectorCredential).where(ConnectorCredential.provider == GHL_PROVIDER)
+        )
+        cred = result.scalar_one_or_none()
+        if cred and cred.api_key and cred.location_id:
+            return cred.api_key, cred.location_id, settings.GHL_PIPELINE_ID
+
+    if settings.GHL_API_KEY and settings.GHL_LOCATION_ID:
+        return settings.GHL_API_KEY, settings.GHL_LOCATION_ID, settings.GHL_PIPELINE_ID
+
+    raise RuntimeError(
+        "GHL not configured. Add API key + location ID in the Connectors tab "
+        "(or set GHL_API_KEY and GHL_LOCATION_ID env vars)."
+    )
+
+
+async def get_ghl_location_id() -> str | None:
+    """Return the configured GHL location id, or None if unconfigured.
+    Used by non-sync code (e.g. statistics URL builders) that just needs
+    to render links and shouldn't crash if GHL isn't connected.
+    """
+    try:
+        _, location_id, _ = await get_ghl_credentials()
+        return location_id
+    except RuntimeError:
+        return None
+
+
+async def verify_credentials(api_key: str, location_id: str) -> tuple[bool, str | None]:
+    """Verify a candidate (api_key, location_id) pair against GHL.
+
+    Returns (ok, error). On 200, ok=True. On 401/403 or 404 we treat the
+    credentials as bad and return ok=False with a helpful message. Network
+    errors propagate as ok=False with the error string — the caller should
+    surface that to the user without persisting the credentials.
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Version": "2021-07-28",
+        "Accept": "application/json",
+    }
+    url = f"{settings.GHL_API_BASE_URL}/locations/{location_id}"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        return False, f"Network error contacting GHL: {exc}"
+
+    if r.status_code == 200:
+        return True, None
+    if r.status_code in (401, 403):
+        return False, "API key rejected by GHL (unauthorized)"
+    if r.status_code == 404:
+        return False, "Location ID not found for this API key"
+    return False, f"GHL responded with HTTP {r.status_code}"
 
 
 # Opportunity custom field IDs
@@ -59,22 +137,33 @@ SMS_CLICK_TAG = "webinar reminder sms clicked"
 class GHLClient:
     """Async GHL API v2 client."""
 
-    def __init__(self) -> None:
-        if not settings.GHL_API_KEY:
-            raise RuntimeError("GHL_API_KEY not configured")
-        if not settings.GHL_LOCATION_ID:
-            raise RuntimeError("GHL_LOCATION_ID not configured")
-
+    def __init__(
+        self,
+        api_key: str,
+        location_id: str,
+        pipeline_id: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
         self._headers = {
-            "Authorization": f"Bearer {settings.GHL_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Version": "2021-07-28",
             "Accept": "application/json",
         }
-        self._base_url = settings.GHL_API_BASE_URL
-        self._location_id = settings.GHL_LOCATION_ID
-        self._pipeline_id = settings.GHL_PIPELINE_ID
-        self._page_delay_s = settings.GHL_PAGE_DELAY_MS / 1000.0
-        self._page_size = settings.GHL_PAGE_SIZE
+        self._base_url = base_url or settings.GHL_API_BASE_URL
+        self._location_id = location_id
+        self._pipeline_id = pipeline_id
+        self._page_delay_s = GHL_PAGE_DELAY_S
+        self._page_size = GHL_PAGE_SIZE
+
+    @classmethod
+    async def create(cls) -> "GHLClient":
+        """Construct a client by resolving credentials from DB (Connectors
+        tab) with env-var fallback. Raises RuntimeError if neither source
+        provides a valid (api_key, location_id) pair — which the sync
+        lifecycle catches and finalizes the run as failed.
+        """
+        api_key, location_id, pipeline_id = await get_ghl_credentials()
+        return cls(api_key=api_key, location_id=location_id, pipeline_id=pipeline_id)
 
     async def _get(self, client: httpx.AsyncClient, path: str, params: dict) -> dict:
         url = f"{self._base_url}{path}"

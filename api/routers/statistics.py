@@ -247,7 +247,8 @@ async def list_contacts_for_metric(
         r = await db.execute(text(sql).bindparams(**params))
         rows = r.mappings().all()
 
-        loc = settings.GHL_LOCATION_ID or ""
+        from integrations.ghl_client import get_ghl_location_id
+        loc = (await get_ghl_location_id()) or ""
         items: list[dict] = []
         for row in rows:
             contact_id = row.get("ghl_contact_id")
