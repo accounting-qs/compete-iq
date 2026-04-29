@@ -25,6 +25,7 @@ class StatisticsMetrics(BaseModel):
     gcalInvitedGhl: float | None = None
     accountsNeeded: float | None = None
     invited: float | None = None
+    actuallyUsed: float | None = None
     unsubscribes: float | None = None
     ghlPageViews: float | None = None
     lpRegs: float | None = None
