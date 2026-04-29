@@ -65,12 +65,14 @@ class GhlCredentialStatus(BaseModel):
     configured: bool
     api_key_masked: Optional[str] = None
     location_id: Optional[str] = None
+    pipeline_id: Optional[str] = None
     source: str  # "db" | "env" | "none"
 
 
 class SetGhlCredentialRequest(BaseModel):
     api_key: str
     location_id: str
+    pipeline_id: Optional[str] = None
 
 
 class BroadcastOut(BaseModel):
@@ -306,20 +308,22 @@ async def get_ghl_status(db: AsyncSession = Depends(get_db)):
     row = (await db.execute(
         select(ConnectorCredential).where(ConnectorCredential.provider == GHL_PROVIDER)
     )).scalar_one_or_none()
+    from config import settings as _settings
     if row and row.api_key and row.location_id:
         return GhlCredentialStatus(
             configured=True,
             api_key_masked=_mask(row.api_key),
             location_id=row.location_id,
+            pipeline_id=row.pipeline_id or _settings.GHL_PIPELINE_ID,
             source="db",
         )
     # Env fallback — keeps the UI honest about where the key is coming from
-    from config import settings as _settings
     if _settings.GHL_API_KEY and _settings.GHL_LOCATION_ID:
         return GhlCredentialStatus(
             configured=True,
             api_key_masked=_mask(_settings.GHL_API_KEY),
             location_id=_settings.GHL_LOCATION_ID,
+            pipeline_id=_settings.GHL_PIPELINE_ID,
             source="env",
         )
     return GhlCredentialStatus(configured=False, source="none")
@@ -329,6 +333,7 @@ async def get_ghl_status(db: AsyncSession = Depends(get_db)):
 async def set_ghl_credential(body: SetGhlCredentialRequest, db: AsyncSession = Depends(get_db)):
     api_key = body.api_key.strip()
     location_id = body.location_id.strip()
+    pipeline_id = body.pipeline_id.strip() if body.pipeline_id else None
     if not api_key:
         raise HTTPException(status_code=400, detail="api_key is required")
     if not location_id:
@@ -342,13 +347,17 @@ async def set_ghl_credential(body: SetGhlCredentialRequest, db: AsyncSession = D
         raise HTTPException(status_code=400, detail=err or "Failed to verify GHL credentials")
 
     stmt = pg_insert(ConnectorCredential).values(
-        provider=GHL_PROVIDER, api_key=api_key, location_id=location_id,
+        provider=GHL_PROVIDER,
+        api_key=api_key,
+        location_id=location_id,
+        pipeline_id=pipeline_id,
     )
     stmt = stmt.on_conflict_do_update(
         index_elements=["provider"],
         set_={
             "api_key": api_key,
             "location_id": location_id,
+            "pipeline_id": pipeline_id,
             "updated_at": datetime.now(timezone.utc),
         },
     )
@@ -357,6 +366,7 @@ async def set_ghl_credential(body: SetGhlCredentialRequest, db: AsyncSession = D
         configured=True,
         api_key_masked=_mask(api_key),
         location_id=location_id,
+        pipeline_id=pipeline_id,
         source="db",
     )
 

@@ -31,11 +31,12 @@ GHL_PAGE_DELAY_S = 0.1
 async def get_ghl_credentials() -> tuple[str, str, str | None]:
     """Resolve GHL credentials with DB-first, env-fallback semantics.
 
-    Returns (api_key, location_id, pipeline_id). The pipeline ID stays
-    env-only — the connector UI exposes only the two values that change
-    between environments.
+    Returns (api_key, location_id, pipeline_id). All three are configurable
+    via the Connectors tab; pipeline_id is optional and falls back to env
+    if the DB row doesn't have it set.
 
-    Raises RuntimeError if neither source has the required pair.
+    Raises RuntimeError if neither source has the required (api_key,
+    location_id) pair.
     """
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -43,7 +44,8 @@ async def get_ghl_credentials() -> tuple[str, str, str | None]:
         )
         cred = result.scalar_one_or_none()
         if cred and cred.api_key and cred.location_id:
-            return cred.api_key, cred.location_id, settings.GHL_PIPELINE_ID
+            pipeline = cred.pipeline_id or settings.GHL_PIPELINE_ID
+            return cred.api_key, cred.location_id, pipeline
 
     if settings.GHL_API_KEY and settings.GHL_LOCATION_ID:
         return settings.GHL_API_KEY, settings.GHL_LOCATION_ID, settings.GHL_PIPELINE_ID

@@ -1506,6 +1506,7 @@ export interface GhlCredentialStatus {
   configured: boolean;
   api_key_masked?: string | null;
   location_id?: string | null;
+  pipeline_id?: string | null;
   source: "db" | "env" | "none";
 }
 
@@ -1515,11 +1516,15 @@ export async function fetchGhlConnectorStatus(): Promise<GhlCredentialStatus> {
   return res.json();
 }
 
-export async function saveGhlConnector(api_key: string, location_id: string): Promise<GhlCredentialStatus> {
+export async function saveGhlConnector(
+  api_key: string,
+  location_id: string,
+  pipeline_id?: string | null,
+): Promise<GhlCredentialStatus> {
   const res = await fetch(`${API_URL}/connectors/ghl`, {
     method: "PUT",
     headers: jsonHeaders(),
-    body: JSON.stringify({ api_key, location_id }),
+    body: JSON.stringify({ api_key, location_id, pipeline_id: pipeline_id || null }),
   });
   if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to save GHL credentials"));
   return res.json();

@@ -13,6 +13,7 @@ export function GhlConnectorPage() {
   const [status, setStatus] = useState<GhlCredentialStatus | null>(null);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [locationIdInput, setLocationIdInput] = useState("");
+  const [pipelineIdInput, setPipelineIdInput] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -23,6 +24,7 @@ export function GhlConnectorPage() {
       .then((s) => {
         setStatus(s);
         if (s.configured && s.location_id) setLocationIdInput(s.location_id);
+        if (s.configured && s.pipeline_id) setPipelineIdInput(s.pipeline_id);
       })
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to load GHL status"))
       .finally(() => setLoadingStatus(false));
@@ -33,7 +35,11 @@ export function GhlConnectorPage() {
     setMessage(null);
     setSaving(true);
     try {
-      const s = await saveGhlConnector(apiKeyInput.trim(), locationIdInput.trim());
+      const s = await saveGhlConnector(
+        apiKeyInput.trim(),
+        locationIdInput.trim(),
+        pipelineIdInput.trim() || null,
+      );
       setStatus(s);
       setApiKeyInput("");
       setMessage("GHL credentials saved and verified.");
@@ -51,6 +57,7 @@ export function GhlConnectorPage() {
       const s = await fetchGhlConnectorStatus();
       setStatus(s);
       setLocationIdInput(s.location_id ?? "");
+      setPipelineIdInput(s.pipeline_id ?? "");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete GHL credentials");
     }
@@ -107,16 +114,22 @@ export function GhlConnectorPage() {
 
         {status?.configured && status?.source === "db" && (
           <div className="space-y-3">
-            <div className="flex items-center gap-3">
-              <div className="flex-1">
+            <div className="flex items-start gap-3">
+              <div className="flex-1 min-w-0">
                 <label className="block text-[10px] uppercase tracking-wider text-zinc-500 font-semibold mb-1">API Key</label>
-                <div className="font-mono text-xs text-zinc-700 dark:text-zinc-300">{status.api_key_masked}</div>
+                <div className="font-mono text-xs text-zinc-700 dark:text-zinc-300 truncate">{status.api_key_masked}</div>
               </div>
-              <div className="flex-1">
+              <div className="flex-1 min-w-0">
                 <label className="block text-[10px] uppercase tracking-wider text-zinc-500 font-semibold mb-1">Location ID</label>
-                <div className="font-mono text-xs text-zinc-700 dark:text-zinc-300">{status.location_id}</div>
+                <div className="font-mono text-xs text-zinc-700 dark:text-zinc-300 truncate">{status.location_id}</div>
               </div>
-              <span className="px-2 py-0.5 rounded text-[10px] font-semibold border bg-emerald-500/15 text-emerald-500 border-emerald-500/30">
+              <div className="flex-1 min-w-0">
+                <label className="block text-[10px] uppercase tracking-wider text-zinc-500 font-semibold mb-1">Pipeline ID</label>
+                <div className="font-mono text-xs text-zinc-700 dark:text-zinc-300 truncate">
+                  {status.pipeline_id || <span className="text-zinc-500 italic">not set</span>}
+                </div>
+              </div>
+              <span className="px-2 py-0.5 rounded text-[10px] font-semibold border bg-emerald-500/15 text-emerald-500 border-emerald-500/30 whitespace-nowrap">
                 Connected
               </span>
               <button
@@ -163,6 +176,18 @@ export function GhlConnectorPage() {
                 className="w-full bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700/60 rounded-md px-3 py-1.5 text-xs font-mono text-zinc-800 dark:text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
               />
             </div>
+            <div>
+              <label className="block text-[10px] uppercase tracking-wider text-zinc-500 font-semibold mb-1">
+                Pipeline ID <span className="text-zinc-500 normal-case font-normal">(optional — required for opportunity sync)</span>
+              </label>
+              <input
+                type="text"
+                value={pipelineIdInput}
+                onChange={(e) => setPipelineIdInput(e.target.value)}
+                placeholder="e.g. zbI8YxmB9qhk1h4cInnq"
+                className="w-full bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700/60 rounded-md px-3 py-1.5 text-xs font-mono text-zinc-800 dark:text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+              />
+            </div>
             <div className="flex justify-end">
               <button
                 onClick={handleSave}
@@ -175,7 +200,8 @@ export function GhlConnectorPage() {
             <p className="text-[11px] text-zinc-500">
               Generate a Private Integration Token from your GHL agency settings → Private Integrations.
               The token must have <span className="font-mono">contacts.readonly</span> and{" "}
-              <span className="font-mono">opportunities.readonly</span> scopes.
+              <span className="font-mono">opportunities.readonly</span> scopes. Pipeline ID can be
+              found in the URL when viewing a pipeline in GHL.
             </p>
           </div>
         )}

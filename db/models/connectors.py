@@ -16,6 +16,8 @@ class ConnectorCredential(Base):
     # Used by providers that need a second piece of identity alongside the
     # API key (e.g. GHL location id). Null for single-secret providers.
     location_id: Mapped[Optional[str]] = mapped_column(Text)
+    # GHL-only: pipeline used for opportunity streaming. Null elsewhere.
+    pipeline_id: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
