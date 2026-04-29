@@ -1780,27 +1780,7 @@ export function PlanningPage() {
 
                           {/* Assignment form — row 1: source + sender + volume */}
                           <div className="flex items-end gap-3 mb-2">
-                            {assignTab === "custom_lists" ? (
-                              <div className="flex-1 min-w-[200px]">
-                                <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Custom List</label>
-                                <Dropdown
-                                  placeholder="Select custom list..."
-                                  value={assignCustomList}
-                                  onChange={(val) => {
-                                    setAssignCustomList(val);
-                                    const cl = customLists.find((l) => l.id === val);
-                                    if (cl) {
-                                      setAssignVolume(cl.available_contacts);
-                                      setAssignAccounts(0);
-                                    }
-                                  }}
-                                  options={customLists.filter((l) => l.available_contacts > 0).map((l) => ({
-                                    value: l.id,
-                                    label: `${l.name} (${l.available_contacts.toLocaleString()} available)`,
-                                  }))}
-                                />
-                              </div>
-                            ) : (
+                            {assignTab === "buckets" && (
                             <div className="flex-1 min-w-[200px]">
                               <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Bucket</label>
                               <Dropdown
@@ -1835,7 +1815,7 @@ export function PlanningPage() {
                               />
                             </div>
                             )}
-                            <div className="w-56">
+                            <div className="w-56 ml-auto">
                               <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Sender</label>
                               <Dropdown
                                 placeholder="Select..."
@@ -1870,14 +1850,14 @@ export function PlanningPage() {
                               <label className="text-[10px] text-zinc-500 uppercase tracking-wider block mb-1">Contacts</label>
                               <input type="number" value={assignVolume || ""} onChange={(e) => { setAssignVolume(parseInt(e.target.value) || 0); setAssignAccounts(0); }} className="w-full bg-zinc-100 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-md px-3 py-1.5 text-sm text-zinc-800 dark:text-zinc-200 font-mono focus:outline-none focus:ring-1 focus:ring-violet-500" />
                             </div>
-                            <button onClick={() => handleAssign(w.id)} disabled={!assignBucket || !assignSender || assignVolume <= 0}
+                            <button onClick={() => handleAssign(w.id)} disabled={(assignTab === "custom_lists" ? !assignCustomList : !assignBucket) || !assignSender || assignVolume <= 0}
                               className="px-4 py-1.5 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-200 dark:bg-zinc-700 disabled:text-zinc-500 text-white text-xs font-semibold rounded-lg transition-colors whitespace-nowrap">
                               Assign →
                             </button>
                           </div>
 
                           {/* Assignment form — row 2: sending config (shown when bucket + sender selected) */}
-                          {assignBucket && assignSender && (() => {
+                          {(assignTab === "custom_lists" ? assignCustomList : assignBucket) && assignSender && (() => {
                             const s = senders.find((s) => s.id === assignSender);
                             if (!s) return null;
                             const usedAccts = getAccountsUsedForSender(w.id, s.id);
@@ -1965,29 +1945,27 @@ export function PlanningPage() {
                             );
                           })()}
 
-                          {/* Available buckets mini-table */}
+                          {/* Available sources mini-table */}
                           <div className="rounded-lg border border-zinc-200 dark:border-zinc-800/40 overflow-hidden max-h-[200px] overflow-y-auto">
                             <table className="w-full text-xs">
-                              <thead>
-                                {(() => {
-                                  const availBuckets = buckets.filter((b) => b.remaining_contacts > 0);
-                                  const totalSum = availBuckets.reduce((s, b) => s + b.total_contacts, 0);
-                                  const remainSum = availBuckets.reduce((s, b) => s + b.remaining_contacts, 0);
-                                  const uniqueCountries = new Set(availBuckets.flatMap((b) => b.countries));
-                                  const uniqueEmpRanges = new Set(availBuckets.map((b) => b.emp_range).filter(Boolean));
-                                  return (
-                                    <tr className="bg-zinc-100 dark:bg-zinc-800/40">
-                                      <th className="text-left px-3 py-1.5 text-zinc-500 font-medium">Bucket <span className="text-zinc-400 font-normal">{availBuckets.length}</span></th>
-                                      <th className="text-right px-3 py-1.5 text-zinc-500 font-medium">Total <span className="text-zinc-400 font-normal">{totalSum.toLocaleString()}</span></th>
-                                      <th className="text-right px-3 py-1.5 text-zinc-500 font-medium">Remaining <span className="text-violet-400/70 font-normal">{remainSum.toLocaleString()}</span></th>
-                                      <th className="text-left px-3 py-1.5 text-zinc-500 font-medium">Countries <span className="text-zinc-400 font-normal">{uniqueCountries.size}</span></th>
-                                      <th className="text-left px-3 py-1.5 text-zinc-500 font-medium">Emp Range <span className="text-zinc-400 font-normal">{uniqueEmpRanges.size}</span></th>
-                                    </tr>
-                                  );
-                                })()}
-                              </thead>
-                              <tbody className="divide-y divide-zinc-800/20">
-                                {buckets.filter((b) => b.remaining_contacts > 0).map((b) => (
+                              {assignTab === "buckets" ? (
+                                <>
+                                  <thead>
+                                    {(() => {
+                                      const availBuckets = buckets.filter((b) => b.remaining_contacts > 0);
+                                      const totalSum = availBuckets.reduce((s, b) => s + b.total_contacts, 0);
+                                      const remainSum = availBuckets.reduce((s, b) => s + b.remaining_contacts, 0);
+                                      return (
+                                        <tr className="bg-zinc-100 dark:bg-zinc-800/40">
+                                          <th className="text-left px-3 py-1.5 text-zinc-500 font-medium">Bucket <span className="text-zinc-400 font-normal">{availBuckets.length}</span></th>
+                                          <th className="text-right px-3 py-1.5 text-zinc-500 font-medium">Total <span className="text-zinc-400 font-normal">{totalSum.toLocaleString()}</span></th>
+                                          <th className="text-right px-3 py-1.5 text-zinc-500 font-medium">Remaining <span className="text-violet-400/70 font-normal">{remainSum.toLocaleString()}</span></th>
+                                        </tr>
+                                      );
+                                    })()}
+                                  </thead>
+                                  <tbody className="divide-y divide-zinc-800/20">
+                                    {buckets.filter((b) => b.remaining_contacts > 0).map((b) => (
                                       <tr key={b.id} onClick={() => {
                                         setAssignBucket(b.id);
                                         setAssignCountries((b.countries || []).join(", "));
@@ -2010,13 +1988,42 @@ export function PlanningPage() {
                                         <td className="px-3 py-1.5 text-zinc-800 dark:text-zinc-300 font-medium">{b.name}</td>
                                         <td className="px-3 py-1.5 text-right font-mono text-zinc-600 dark:text-zinc-400">{b.total_contacts.toLocaleString()}</td>
                                         <td className="px-3 py-1.5 text-right font-mono text-violet-400">{b.remaining_contacts.toLocaleString()}</td>
-                                        <td className="px-3 py-1.5">
-                                          <div className="flex gap-1">{b.countries.map((c) => <span key={c} className="px-1 py-0.5 text-[9px] bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 rounded">{c}</span>)}</div>
-                                        </td>
-                                        <td className="px-3 py-1.5 text-zinc-600 dark:text-zinc-400">{b.emp_range}</td>
                                       </tr>
                                     ))}
-                              </tbody>
+                                  </tbody>
+                                </>
+                              ) : (
+                                <>
+                                  <thead>
+                                    {(() => {
+                                      const availLists = customLists.filter((l) => l.available_contacts > 0);
+                                      const totalSum = availLists.reduce((s, l) => s + l.total_contacts, 0);
+                                      const remainSum = availLists.reduce((s, l) => s + l.available_contacts, 0);
+                                      return (
+                                        <tr className="bg-zinc-100 dark:bg-zinc-800/40">
+                                          <th className="text-left px-3 py-1.5 text-zinc-500 font-medium">Custom List <span className="text-zinc-400 font-normal">{availLists.length}</span></th>
+                                          <th className="text-right px-3 py-1.5 text-zinc-500 font-medium">Total <span className="text-zinc-400 font-normal">{totalSum.toLocaleString()}</span></th>
+                                          <th className="text-right px-3 py-1.5 text-zinc-500 font-medium">Remaining <span className="text-violet-400/70 font-normal">{remainSum.toLocaleString()}</span></th>
+                                        </tr>
+                                      );
+                                    })()}
+                                  </thead>
+                                  <tbody className="divide-y divide-zinc-800/20">
+                                    {customLists.filter((l) => l.available_contacts > 0).map((l) => (
+                                      <tr key={l.id} onClick={() => {
+                                        setAssignCustomList(l.id);
+                                        setAssignVolume(l.available_contacts);
+                                        setAssignAccounts(0);
+                                      }}
+                                        className={`cursor-pointer transition-colors ${assignCustomList === l.id ? "bg-violet-500/10" : "hover:bg-zinc-200 dark:hover:bg-zinc-800/30"}`}>
+                                        <td className="px-3 py-1.5 text-zinc-800 dark:text-zinc-300 font-medium">{l.name}</td>
+                                        <td className="px-3 py-1.5 text-right font-mono text-zinc-600 dark:text-zinc-400">{l.total_contacts.toLocaleString()}</td>
+                                        <td className="px-3 py-1.5 text-right font-mono text-violet-400">{l.available_contacts.toLocaleString()}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </>
+                              )}
                             </table>
                           </div>
                         </div>
