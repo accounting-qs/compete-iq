@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import {
   fetchBuckets,
   generateCopiesBulk as apiGenerateCopiesBulk,
@@ -409,6 +409,7 @@ export function CopyGeneratorPage() {
   // Filters
   const [genFilter, setGenFilter] = useState<"all" | "missing_title" | "missing_desc" | "missing_any" | "complete">("all");
   const [primaryFilter, setPrimaryFilter] = useState<"all" | "picked" | "not_picked">("all");
+  const [groupSimilar, setGroupSimilar] = useState(false);
 
   /* ── Load buckets with copies from API on mount ─────────────────────── */
   useEffect(() => {
@@ -484,6 +485,29 @@ export function CopyGeneratorPage() {
     if (primaryFilter === "not_picked" && bothPicked) return false;
     return true;
   });
+
+  /* ── Similar-name grouping (client-only view aid) ─────────────────────
+   * Strips trailing comma-delimited qualifiers ("emp", country, range) from
+   * the bucket name so e.g. "Cybersecurity Software & MSSP, 5-50 emp, US"
+   * clusters with "Cybersecurity Software & MSSP, 50-200 emp, EU". */
+  const normalizeBucketName = (name: string): string => {
+    const head = name.split(",")[0] ?? name;
+    return head.toLowerCase().replace(/\s+/g, " ").trim();
+  };
+
+  const groupedBuckets = useMemo(() => {
+    if (!groupSimilar) return null;
+    const groups = new Map<string, typeof filteredBuckets>();
+    for (const b of filteredBuckets) {
+      const key = normalizeBucketName(b.name);
+      const arr = groups.get(key);
+      if (arr) arr.push(b);
+      else groups.set(key, [b]);
+    }
+    return Array.from(groups.entries())
+      .map(([key, items]) => ({ key, items }))
+      .sort((a, b) => b.items.length - a.items.length || a.key.localeCompare(b.key));
+  }, [filteredBuckets, groupSimilar]);
 
   /* ── Selection ───────────────────────────────────────────────────────── */
 
@@ -1038,6 +1062,17 @@ export function CopyGeneratorPage() {
               Clear filters
             </button>
           )}
+          <div className="ml-auto flex items-center gap-2">
+            <label className="flex items-center gap-1.5 text-[11px] text-zinc-500 uppercase tracking-wider font-medium cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={groupSimilar}
+                onChange={(e) => setGroupSimilar(e.target.checked)}
+                className="w-3.5 h-3.5 rounded border-zinc-300 dark:border-zinc-600 text-violet-600 focus:ring-violet-500 cursor-pointer accent-violet-600"
+              />
+              Group similar names
+            </label>
+          </div>
         </div>
 
         {/* ── Buckets Table ────────────────────────────────────────────── */}
@@ -1067,7 +1102,8 @@ export function CopyGeneratorPage() {
                   </td>
                 </tr>
               )}
-              {filteredBuckets.map((bucket) => {
+              {(() => {
+              const renderBucketRow = (bucket: ApiBucket) => {
                 const isSelected = selectedIds.has(bucket.id);
                 const titleStatus = getStatus(bucket.id, "title");
                 const descStatus = getStatus(bucket.id, "description");
@@ -1271,7 +1307,38 @@ export function CopyGeneratorPage() {
                     </td>
                   </tr>
                 );
-              })}
+              };
+              if (groupSimilar && groupedBuckets) {
+                return groupedBuckets.map((g) => (
+                  <React.Fragment key={`grp-${g.key}`}>
+                    <tr className="bg-zinc-50 dark:bg-zinc-800/40 border-b border-zinc-200 dark:border-zinc-700/40">
+                      <td colSpan={9} className="px-3 py-1.5 text-[11px] uppercase tracking-wider text-zinc-600 dark:text-zinc-300">
+                        <span className="font-semibold">{g.key}</span>
+                        <span className="ml-2 text-zinc-400 dark:text-zinc-500 normal-case">
+                          · {g.items.length} bucket{g.items.length === 1 ? "" : "s"} · {g.items.reduce((s, b) => s + b.total_contacts, 0).toLocaleString()} contacts
+                        </span>
+                        {g.items.length > 1 && (
+                          <button
+                            onClick={() => {
+                              setSelectedIds((prev) => {
+                                const next = new Set(prev);
+                                g.items.forEach((b) => next.add(b.id));
+                                return next;
+                              });
+                            }}
+                            className="ml-3 text-[10px] normal-case text-violet-600 dark:text-violet-400 hover:underline"
+                          >
+                            Select group
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                    {g.items.map(renderBucketRow)}
+                  </React.Fragment>
+                ));
+              }
+              return filteredBuckets.map(renderBucketRow);
+              })()}
             </tbody>
           </table>
         </div>
