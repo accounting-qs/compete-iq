@@ -487,25 +487,101 @@ export function CopyGeneratorPage() {
   });
 
   /* ── Similar-name grouping (client-only view aid) ─────────────────────
-   * Strips trailing comma-delimited qualifiers ("emp", country, range) from
-   * the bucket name so e.g. "Cybersecurity Software & MSSP, 5-50 emp, US"
-   * clusters with "Cybersecurity Software & MSSP, 50-200 emp, EU". */
-  const normalizeBucketName = (name: string): string => {
-    const head = name.split(",")[0] ?? name;
-    return head.toLowerCase().replace(/\s+/g, " ").trim();
-  };
-
+   * Cluster buckets by shared topic word in their names. Tokenize each
+   * name (drop stopwords + qualifiers like "USA"/"emp"/"5-50"), then
+   * union-find any two buckets that share ≥1 token. The cluster label is
+   * the most-common token across the cluster's names — so "Accounting,
+   * Audit & Tax Services" and "Accounting Firms USA" cluster under
+   * "Accounting", and the various "… Agency" buckets cluster under
+   * "Agency". */
   const groupedBuckets = useMemo(() => {
     if (!groupSimilar) return null;
-    const groups = new Map<string, typeof filteredBuckets>();
-    for (const b of filteredBuckets) {
-      const key = normalizeBucketName(b.name);
-      const arr = groups.get(key);
-      if (arr) arr.push(b);
-      else groups.set(key, [b]);
+
+    const STOP = new Set<string>([
+      "and", "or", "of", "for", "the", "a", "an", "with", "to", "in", "at", "on", "by",
+      "services", "service", "solutions", "solution", "group", "groups",
+      "company", "companies", "firm", "firms", "llc", "inc", "ltd", "co", "corp",
+      "us", "usa", "uk", "eu", "emea", "apac", "na",
+      "emp", "employee", "employees",
+    ]);
+    const tokensFor = (name: string): Set<string> => {
+      const out = new Set<string>();
+      for (const t of name.toLowerCase().split(/[^a-z0-9]+/)) {
+        if (t.length < 3) continue;
+        if (/^\d+$/.test(t)) continue;
+        if (STOP.has(t)) continue;
+        out.add(t);
+      }
+      return out;
+    };
+
+    const tokenMap = new Map<string, Set<string>>();
+    filteredBuckets.forEach((b) => tokenMap.set(b.id, tokensFor(b.name)));
+
+    const parent = new Map<string, string>();
+    filteredBuckets.forEach((b) => parent.set(b.id, b.id));
+    const find = (x: string): string => {
+      let r = x;
+      while (parent.get(r)! !== r) r = parent.get(r)!;
+      let c = x;
+      while (parent.get(c)! !== c) {
+        const n = parent.get(c)!;
+        parent.set(c, r);
+        c = n;
+      }
+      return r;
+    };
+    const union = (a: string, b: string) => {
+      const ra = find(a);
+      const rb = find(b);
+      if (ra !== rb) parent.set(ra, rb);
+    };
+
+    for (let i = 0; i < filteredBuckets.length; i++) {
+      const ti = tokenMap.get(filteredBuckets[i].id)!;
+      if (ti.size === 0) continue;
+      for (let j = i + 1; j < filteredBuckets.length; j++) {
+        const tj = tokenMap.get(filteredBuckets[j].id)!;
+        let shared = false;
+        for (const t of ti) {
+          if (tj.has(t)) { shared = true; break; }
+        }
+        if (shared) union(filteredBuckets[i].id, filteredBuckets[j].id);
+      }
     }
-    return Array.from(groups.entries())
-      .map(([key, items]) => ({ key, items }))
+
+    const clusters = new Map<string, ApiBucket[]>();
+    filteredBuckets.forEach((b) => {
+      const r = find(b.id);
+      const arr = clusters.get(r);
+      if (arr) arr.push(b);
+      else clusters.set(r, [b]);
+    });
+
+    const labelFor = (items: ApiBucket[]): string => {
+      const counts = new Map<string, number>();
+      for (const it of items) {
+        for (const t of tokenMap.get(it.id)!) {
+          counts.set(t, (counts.get(t) ?? 0) + 1);
+        }
+      }
+      let best = "";
+      let bestCount = -1;
+      for (const [t, c] of counts) {
+        if (c > bestCount || (c === bestCount && best && t < best)) {
+          best = t;
+          bestCount = c;
+        }
+      }
+      if (!best) {
+        const first = items[0].name.split(/[^a-zA-Z0-9]+/).find((w) => w.length > 0);
+        return first ?? items[0].name;
+      }
+      return best.charAt(0).toUpperCase() + best.slice(1);
+    };
+
+    return Array.from(clusters.values())
+      .map((items) => ({ key: labelFor(items), items }))
       .sort((a, b) => b.items.length - a.items.length || a.key.localeCompare(b.key));
   }, [filteredBuckets, groupSimilar]);
 
