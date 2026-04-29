@@ -33,9 +33,7 @@ COLUMN_MAP: dict[int, str] = {
     7: "sendInfo",
     8: "descLabel",
     9: "titleText",
-    10: "listSize",
-    11: "listRemain",
-    12: "gcalInvited",
+    # 10–12 (listSize/listRemain/gcalInvited) removed from Statistics — skipped on export
     13: "accountsNeeded",
     14: "createdDate",
     15: "industry",
@@ -43,7 +41,7 @@ COLUMN_MAP: dict[int, str] = {
     17: "country",
     18: "invited",
     19: "unsubscribes",
-    20: "ghlPageViews",
+    # 20 (ghlPageViews) removed — not synced, intentionally skipped
     21: "lpRegs",
     22: "yesMarked",
     23: "yesAttended",

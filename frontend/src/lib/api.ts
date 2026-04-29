@@ -1092,15 +1092,11 @@ export async function markContactsUsed(
 
 export interface StatisticsMetrics {
   // Raw source fields
-  listSize: number | null;
-  listRemain: number | null;
-  gcalInvited: number | null;
   gcalInvitedGhl: number | null;
   accountsNeeded: number | null;
   invited: number | null;
   actuallyUsed: number | null;
   unsubscribes: number | null;
-  ghlPageViews: number | null;
   lpRegs: number | null;
   yesMarked: number | null;
   yesAttended: number | null;
@@ -1138,8 +1134,6 @@ export interface StatisticsMetrics {
   avgClosedDealValue: number | null;
   // Derived fields
   unsubPercent: number | null;
-  ctrPercent: number | null;
-  lpRegPercent: number | null;
   yesPer1kInv: number | null;
   yesPercent: number | null;
   yesAttendPercent: number | null;

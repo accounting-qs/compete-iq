@@ -32,6 +32,10 @@ export interface MetricColumn {
   decimals?: number;
   /** Short derivation formula for ratio/per-1k metrics, e.g. "yesMarked / invited". */
   formulaText?: string;
+  /** Raw metric keys this formula reads from. When a derived value is null and
+   * any listed source is null on the row, the cell renders a ⚠ icon explaining
+   * which source is missing. Populate alongside `formulaText`. */
+  formulaSources?: string[];
   /** One-sentence description of what this column tracks. */
   description?: string;
   /** Narrative explanation of data source + filter (shown as prose in the modal). */
@@ -45,8 +49,6 @@ export interface MetricColumn {
 // field IDs stay consistent and centrally updatable.
 
 const F_WLA_VOLUME: FieldRef = { entity: "Planning Assignment", field: "volume" };
-const F_WLA_REMAIN: FieldRef = { entity: "Planning Assignment", field: "remaining" };
-const F_WLA_GCAL: FieldRef = { entity: "Planning Assignment", field: "gcal_invited" };
 const F_WLA_ACCTS: FieldRef = { entity: "Planning Assignment", field: "accounts_used" };
 
 const F_CONTACT_INVITE_RESP: FieldRef = {
@@ -138,36 +140,16 @@ export const METRIC_GROUPS: MetricGroup[] = [
 export const METRIC_COLUMNS: MetricColumn[] = [
   // ── Base ──
   {
-    key: "listSize", label: "List Size", group: "Base", format: "number",
-    description: "Number of contacts planned for this list in Campaign Planning.",
-    fieldsUsed: [{ ...F_WLA_VOLUME, filter: "SUM over assignments where webinar_id = this webinar" }],
-  },
-  {
-    key: "listRemain", label: "Remain", group: "Base", format: "number",
-    description: "Planned contacts still remaining (not yet used).",
-    fieldsUsed: [{ ...F_WLA_REMAIN, filter: "SUM over assignments" }],
-  },
-  {
     key: "accountsNeeded", label: "Accts", group: "Base", format: "number", decimals: 1,
     description: "Sender accounts needed to deliver this list at the planned volume.",
     fieldsUsed: [{ ...F_WLA_ACCTS, filter: "SUM over assignments" }],
-  },
-  {
-    key: "gcalInvited", label: "GCal Inv", group: "Base", format: "number",
-    description: "Google Calendar invite count recorded on the Planning assignment (manually entered).",
-    fieldsUsed: [{ ...F_WLA_GCAL, filter: "SUM over assignments" }],
-  },
-  {
-    key: "gcalInvitedGhl", label: "GCal Inv (GHL)", group: "Base", format: "number",
-    description: "Contacts whose GHL Calendar webinar series history includes this webinar number. At webinar level a single GHL API count call; at list level joins Planning contacts to GHL contacts by email.",
-    fieldsUsed: [{ ...F_CONTACT_SERIES_HISTORY, filter: "contains 'e{N}' (word-boundary \\\\y)" }],
   },
 
   // ── Delivery ──
   {
     key: "invited", label: "Invited (Planned)", group: "Delivery", format: "number",
     description: "Originally planned send volume — preserved as the comparison baseline. Used as the fallback denominator for rate metrics when `actuallyUsed` is 0 (e.g. legacy webinars where contacts were never explicitly marked sent).",
-    fieldsUsed: [{ ...F_WLA_VOLUME, filter: "SUM over assignments (= List Size)" }],
+    fieldsUsed: [{ ...F_WLA_VOLUME, filter: "SUM over assignments" }],
   },
   {
     key: "actuallyUsed", label: "Actually Used", group: "Delivery", format: "number",
@@ -175,40 +157,31 @@ export const METRIC_COLUMNS: MetricColumn[] = [
     fieldsUsed: [{ entity: "Planning Assignment", field: "contacts", filter: "COUNT WHERE assignment in this webinar AND outreach_status='used'" }],
   },
   {
+    key: "gcalInvitedGhl", label: "GCal Inv (GHL)", group: "Delivery", format: "number",
+    description: "Contacts whose GHL Calendar webinar series history includes this webinar number. At webinar level a single GHL API count call; at list level joins Planning contacts to GHL contacts by email.",
+    fieldsUsed: [{ ...F_CONTACT_SERIES_HISTORY, filter: "contains 'e{N}' (word-boundary \\\\y)" }],
+  },
+  {
     key: "unsubscribes", label: "Unsubs", group: "Delivery", format: "number",
-    description: "Contacts who unsubscribed during the window between the previous webinar and this one (30-day fallback when no prior webinar).",
+    description: "Contacts who unsubscribed during the window between the previous webinar (exclusive) and this one (inclusive). 7-day fallback when no prior webinar.",
     fieldsUsed: [{
       ...F_CONTACT_UNSUB_DATE,
-      filter: "BETWEEN prev_webinar_date AND current_webinar_date",
+      filter: "> prev_webinar_date AND <= current_webinar_date",
     }],
   },
   {
     key: "unsubPercent", label: "Unsub %", group: "Delivery", format: "percent",
-    formulaText: "unsubscribes / invited",
-    description: "Unsubscribe rate relative to invited contacts.",
-  },
-  {
-    key: "ghlPageViews", label: "Page Views", group: "Delivery", format: "number",
-    description: "GHL landing page views for this webinar.",
-    source: "Not currently synced — intentionally skipped per product decision.",
-  },
-  {
-    key: "ctrPercent", label: "CTR %", group: "Delivery", format: "percent",
-    formulaText: "ghlPageViews / invited",
-    description: "Click-through rate from invite to landing page.",
+    formulaText: "unsubscribes / actuallyUsed (fallback invited)",
+    formulaSources: ["unsubscribes", "actuallyUsed", "invited"],
+    description: "Unsubscribe rate relative to Actually Used (falls back to Invited when Actually Used is 0).",
   },
   {
     key: "lpRegs", label: "LP Regs", group: "Delivery", format: "number",
-    description: "Landing page registrations in this webinar's window (same formula as Self Reg Marked).",
+    description: "Landing page registrations in this webinar's window (same formula as Self Reg Marked). For NO LIST DATA, also includes contacts not on any planned list whose registration falls in the window.",
     fieldsUsed: [{
       ...F_CONTACT_REG_DATE,
-      filter: "BETWEEN prev_webinar_date AND current_webinar_date",
+      filter: "> prev_webinar_date AND <= current_webinar_date",
     }],
-  },
-  {
-    key: "lpRegPercent", label: "LP Reg %", group: "Delivery", format: "percent",
-    formulaText: "lpRegs / ghlPageViews",
-    description: "Landing page conversion rate (regs per page view).",
   },
 
   // ── Yes ──
@@ -220,11 +193,13 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "yesPer1kInv", label: "/1k Inv", group: "Yes", format: "per1k",
     formulaText: "yesMarked / (invited / 1000)",
+    formulaSources: ["yesMarked", "invited"],
     description: "Yes responders per 1,000 invited.",
   },
   {
     key: "yesPercent", label: "% Inv", group: "Yes", format: "percent",
     formulaText: "yesMarked / invited",
+    formulaSources: ["yesMarked", "invited"],
     description: "Yes response rate relative to invited.",
   },
   {
@@ -239,6 +214,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "yesAttendPercent", label: "Attend %", group: "Yes", format: "percent",
     formulaText: "yesAttended / yesMarked",
+    formulaSources: ["yesAttended", "yesMarked"],
     description: "Of the Yes-responders, what % actually attended.",
   },
   {
@@ -253,6 +229,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "yesStay10MinPercent", label: "Stay 10m %", group: "Yes", format: "percent",
     formulaText: "yes10MinPlus / yesAttended",
+    formulaSources: ["yes10MinPlus", "yesAttended"],
     description: "Of Yes attendees, what % watched at least 10 minutes.",
   },
   {
@@ -267,6 +244,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "yesAttendBySmsClickPercent", label: "SMS %", group: "Yes", format: "percent",
     formulaText: "yesAttendBySmsClick / yesAttended",
+    formulaSources: ["yesAttendBySmsClick", "yesAttended"],
     description: "Share of Yes attendees driven by the SMS reminder click.",
   },
   {
@@ -280,6 +258,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "yesBookingsPer1kInv", label: "Book/1k", group: "Yes", format: "per1k",
     formulaText: "yesBookings / (invited / 1000)",
+    formulaSources: ["yesBookings", "invited"],
     description: "Yes-bookings per 1,000 invited.",
   },
 
@@ -292,6 +271,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "maybePer1kInv", label: "/1k Inv", group: "Maybe", format: "per1k",
     formulaText: "maybeMarked / (invited / 1000)",
+    formulaSources: ["maybeMarked", "invited"],
     description: "Maybe responders per 1,000 invited.",
   },
   {
@@ -305,6 +285,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "maybeAttendPercent", label: "Attend %", group: "Maybe", format: "percent",
     formulaText: "maybeAttended / maybeMarked",
+    formulaSources: ["maybeAttended", "maybeMarked"],
     description: "Of Maybe-responders, what % attended.",
   },
   {
@@ -319,6 +300,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "maybeStay10MinPercent", label: "Stay 10m %", group: "Maybe", format: "percent",
     formulaText: "maybe10MinPlus / maybeAttended",
+    formulaSources: ["maybe10MinPlus", "maybeAttended"],
     description: "Of Maybe attendees, what % stayed 10 minutes+.",
   },
   {
@@ -333,6 +315,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "maybeAttendBySmsClickPercent", label: "SMS %", group: "Maybe", format: "percent",
     formulaText: "maybeAttendBySmsClick / maybeAttended",
+    formulaSources: ["maybeAttendBySmsClick", "maybeAttended"],
     description: "Share of Maybe attendees driven by the SMS reminder click.",
   },
   {
@@ -346,6 +329,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "maybeBookingsPer1kInv", label: "Book/1k", group: "Maybe", format: "per1k",
     formulaText: "maybeBookings / (invited / 1000)",
+    formulaSources: ["maybeBookings", "invited"],
     description: "Maybe-bookings per 1,000 invited.",
   },
 
@@ -358,6 +342,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "selfRegPer1kInv", label: "/1k Inv", group: "Self Reg", format: "per1k",
     formulaText: "selfRegMarked / (invited / 1000)",
+    formulaSources: ["selfRegMarked", "invited"],
     description: "Self-registrations per 1,000 invited.",
   },
   {
@@ -371,6 +356,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "selfRegAttendPercent", label: "Attend %", group: "Self Reg", format: "percent",
     formulaText: "selfRegAttended / selfRegMarked",
+    formulaSources: ["selfRegAttended", "selfRegMarked"],
     description: "Of self-registrants, what % attended.",
   },
   {
@@ -385,6 +371,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "selfRegStay10MinPercent", label: "Stay 10m %", group: "Self Reg", format: "percent",
     formulaText: "selfReg10MinPlus / selfRegAttended",
+    formulaSources: ["selfReg10MinPlus", "selfRegAttended"],
     description: "Of self-reg attendees, what % stayed 10 minutes+.",
   },
   {
@@ -398,6 +385,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "selfRegBookingsPer1kInv", label: "Book/1k", group: "Self Reg", format: "per1k",
     formulaText: "selfRegBookings / (invited / 1000)",
+    formulaSources: ["selfRegBookings", "invited"],
     description: "Self-reg bookings per 1,000 invited.",
   },
 
@@ -410,6 +398,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "invitedToRegPercent", label: "Inv>Reg %", group: "Attendance", format: "percent",
     formulaText: "totalRegs / invited",
+    formulaSources: ["totalRegs", "invited"],
     description: "Percentage of invited contacts who registered via WG.",
   },
   {
@@ -420,16 +409,19 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "regToAttendPercent", label: "Reg>Att %", group: "Attendance", format: "percent",
     formulaText: "totalAttended / totalRegs",
+    formulaSources: ["totalAttended", "totalRegs"],
     description: "Of WG registrants, what % attended.",
   },
   {
     key: "invitedToAttendPercent", label: "Inv>Att %", group: "Attendance", format: "percent",
     formulaText: "totalAttended / invited",
+    formulaSources: ["totalAttended", "invited"],
     description: "Invited-to-attended conversion rate.",
   },
   {
     key: "totalAttendedPer1kInv", label: "Att/1k", group: "Attendance", format: "per1k",
     formulaText: "totalAttended / (invited / 1000)",
+    formulaSources: ["totalAttended", "invited"],
     description: "Attendees per 1,000 invited.",
   },
   {
@@ -440,6 +432,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "attendBySmsReminderPercent", label: "SMS Rem %", group: "Attendance", format: "percent",
     formulaText: "attendBySmsReminder / totalAttended",
+    formulaSources: ["attendBySmsReminder", "totalAttended"],
     description: "Share of attendees attributable to the SMS reminder click.",
   },
   {
@@ -450,11 +443,13 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "total10MinPlusPer1kInv", label: "10m/1k", group: "Attendance", format: "per1k",
     formulaText: "total10MinPlus / (invited / 1000)",
+    formulaSources: ["total10MinPlus", "invited"],
     description: "10-minute watchers per 1,000 invited.",
   },
   {
     key: "attend10MinPercent", label: "10m %", group: "Attendance", format: "percent",
     formulaText: "total10MinPlus / totalAttended",
+    formulaSources: ["total10MinPlus", "totalAttended"],
     description: "Of attendees, what % stayed 10 minutes+.",
   },
   {
@@ -465,11 +460,13 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "total30MinPlusPer1kInv", label: "30m/1k", group: "Attendance", format: "per1k",
     formulaText: "total30MinPlus / (invited / 1000)",
+    formulaSources: ["total30MinPlus", "invited"],
     description: "30-minute watchers per 1,000 invited.",
   },
   {
     key: "attend30MinPercent", label: "30m %", group: "Attendance", format: "percent",
     formulaText: "total30MinPlus / totalAttended",
+    formulaSources: ["total30MinPlus", "totalAttended"],
     description: "Of attendees, what % stayed 30 minutes+.",
   },
 
@@ -482,16 +479,19 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "bookingsPerAttended", label: "Book/Att", group: "Sales", format: "ratio",
     formulaText: "totalBookings / totalAttended",
+    formulaSources: ["totalBookings", "totalAttended"],
     description: "Bookings per attendee.",
   },
   {
     key: "bookingsPerPast10Min", label: "Book/10m", group: "Sales", format: "ratio",
     formulaText: "totalBookings / total10MinPlus",
+    formulaSources: ["totalBookings", "total10MinPlus"],
     description: "Bookings per 10-minute viewer.",
   },
   {
     key: "totalBookingsPer1kInv", label: "Book/1k", group: "Sales", format: "per1k",
     formulaText: "totalBookings / (invited / 1000)",
+    formulaSources: ["totalBookings", "invited"],
     description: "Bookings per 1,000 invited.",
   },
   {
@@ -512,6 +512,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "showPercent", label: "Show %", group: "Sales", format: "percent",
     formulaText: "shows / totalBookings",
+    formulaSources: ["shows", "totalBookings"],
     description: "Show-up rate for booked calls.",
   },
   {
@@ -532,6 +533,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "closeRatePercent", label: "Close %", group: "Sales", format: "percent",
     formulaText: "won / shows",
+    formulaSources: ["won", "shows"],
     description: "Close rate on calls that actually showed up.",
   },
   {
@@ -563,6 +565,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "qualPercent", label: "Qual %", group: "Quality", format: "percent",
     formulaText: "qualified / shows",
+    formulaSources: ["qualified", "shows"],
     description: "Of shows, what % were qualified.",
   },
   {

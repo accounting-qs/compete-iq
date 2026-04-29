@@ -257,7 +257,7 @@ const DRILLDOWN_KEYS = new Set([
 ]);
 
 function MetricCell({
-  value, col, bold, boundary, webinarNumber, assignmentId, listLabel,
+  value, col, bold, boundary, webinarNumber, assignmentId, listLabel, rowMetrics,
 }: {
   value: number | null | undefined;
   col: MetricColumn;
@@ -266,11 +266,22 @@ function MetricCell({
   webinarNumber?: number;
   assignmentId?: string | null;
   listLabel?: string | null;
+  rowMetrics?: Record<string, number | null>;
 }) {
   const formatted = formatMetricValue(value, col);
   const isNull = value === null || value === undefined;
   const isNonZero = typeof value === "number" && value > 0;
   const drillable = webinarNumber != null && DRILLDOWN_KEYS.has(col.key) && isNonZero;
+
+  // Source-missing warning: only fires when the cell is null AND the metric
+  // has declared formulaSources AND at least one of those sources is null on
+  // this row. Zero-valued sources are NOT warnings — that's "no data yet",
+  // not "data missing because not synced".
+  const missingSources: string[] =
+    isNull && col.formulaSources && rowMetrics
+      ? col.formulaSources.filter((k) => rowMetrics[k] === null || rowMetrics[k] === undefined)
+      : [];
+  const hasWarning = missingSources.length > 0;
 
   const content = drillable ? (
     <a
@@ -301,6 +312,15 @@ function MetricCell({
     } ${isNull ? "text-zinc-400" : bold ? "text-zinc-800 dark:text-zinc-200" : "text-zinc-700 dark:text-zinc-300"} ${
       boundary ? GROUP_BOUNDARY_CLASSES : ""
     }`}>
+      {hasWarning && (
+        <span
+          title={`Formula uses ${col.formulaSources!.join(", ")}; missing/not synced: ${missingSources.join(", ")}`}
+          className="mr-1 text-amber-500 cursor-help"
+          aria-label="Source data missing"
+        >
+          ⚠
+        </span>
+      )}
       {content}
     </td>
   );
@@ -445,7 +465,7 @@ function placeholderWebinar(
 
 /* ─── Bucket-grouped child-row renderer ─────────────────────────────── */
 
-const BASE_SUM_KEYS = ["listSize", "listRemain", "gcalInvited", "accountsNeeded", "invited", "actuallyUsed"] as const;
+const BASE_SUM_KEYS = ["accountsNeeded", "invited", "actuallyUsed"] as const;
 
 function sumMetric(rows: ApiStatisticsRow[], key: string): number {
   let total = 0;
@@ -580,6 +600,7 @@ function renderGroupedRows(
           webinarNumber={w.number}
           assignmentId={row.assignmentId}
           listLabel={row.description}
+          rowMetrics={row.metrics}
         />
       ))}
     </tr>
@@ -1144,6 +1165,7 @@ export function StatisticsPage() {
                       boundary={isGroupBoundary(idx)}
                       webinarNumber={w.number}
                       listLabel={`Webinar ${w.number}`}
+                      rowMetrics={w.summary}
                     />
                   ))}
                 </tr>

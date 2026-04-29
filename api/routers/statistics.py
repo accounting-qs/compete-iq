@@ -19,15 +19,11 @@ router = APIRouter(dependencies=[Depends(require_auth)])
 
 class StatisticsMetrics(BaseModel):
     # Raw source fields
-    listSize: float | None = None
-    listRemain: float | None = None
-    gcalInvited: float | None = None
     gcalInvitedGhl: float | None = None
     accountsNeeded: float | None = None
     invited: float | None = None
     actuallyUsed: float | None = None
     unsubscribes: float | None = None
-    ghlPageViews: float | None = None
     lpRegs: float | None = None
     yesMarked: float | None = None
     yesAttended: float | None = None
@@ -66,8 +62,6 @@ class StatisticsMetrics(BaseModel):
 
     # Derived fields
     unsubPercent: float | None = None
-    ctrPercent: float | None = None
-    lpRegPercent: float | None = None
     yesPer1kInv: float | None = None
     yesPercent: float | None = None
     yesAttendPercent: float | None = None

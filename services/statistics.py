@@ -80,8 +80,6 @@ def compute_derived_metrics(
         **m,
         # Delivery
         "unsubPercent": _safe_div(m.get("unsubscribes"), inv),
-        "ctrPercent": _safe_div(m.get("ghlPageViews"), inv),
-        "lpRegPercent": _safe_div(m.get("lpRegs"), m.get("ghlPageViews")),
         # Yes
         "yesPer1kInv": _safe_per1k(m.get("yesMarked"), inv),
         "yesPercent": _safe_div(m.get("yesMarked"), inv),
@@ -149,8 +147,8 @@ def compute_derived_metrics(
 
 # Keys that should be summed across children
 _SUM_KEYS = [
-    "listSize", "listRemain", "gcalInvited", "accountsNeeded",
-    "invited", "actuallyUsed", "unsubscribes", "ghlPageViews", "lpRegs",
+    "accountsNeeded",
+    "invited", "actuallyUsed", "unsubscribes", "lpRegs",
     "yesMarked", "yesAttended", "yes10MinPlus", "yesAttendBySmsClick", "yesBookings",
     "maybeMarked", "maybeAttended", "maybe10MinPlus", "maybeAttendBySmsClick", "maybeBookings",
     "selfRegMarked", "selfRegAttended", "selfReg10MinPlus", "selfRegBookings",

@@ -73,13 +73,11 @@ def _webinar_series_regex(webinar_number: int) -> str:
 async def _webinar_summary_from_app(
     db: AsyncSession, webinar_id: str
 ) -> dict[str, float | None]:
-    """Fetch invited/listSize/listRemain/accountsNeeded from app-side assignments,
-    plus the live actuallyUsed count from contacts.outreach_status='used'."""
+    """Fetch invited/accountsNeeded from app-side assignments, plus the live
+    actuallyUsed count from contacts.outreach_status='used'."""
     result = await db.execute(
         select(
             func.coalesce(func.sum(WebinarListAssignment.volume), 0).label("list_size"),
-            func.coalesce(func.sum(WebinarListAssignment.remaining), 0).label("list_remain"),
-            func.coalesce(func.sum(WebinarListAssignment.gcal_invited), 0).label("gcal_invited"),
             func.coalesce(func.sum(WebinarListAssignment.accounts_used), 0).label("accts_used"),
         ).where(WebinarListAssignment.webinar_id == webinar_id)
     )
@@ -102,9 +100,6 @@ async def _webinar_summary_from_app(
     actually_used = int(used_result.scalar() or 0)
 
     return {
-        "listSize": list_size,
-        "listRemain": int(row.list_remain) if row.list_remain is not None else 0,
-        "gcalInvited": int(row.gcal_invited) if row.gcal_invited is not None else 0,
         "accountsNeeded": int(row.accts_used) if row.accts_used is not None else 0,
         "invited": list_size,  # app-side: invited = sum of planned volumes
         "actuallyUsed": actually_used,
@@ -164,8 +159,8 @@ async def _count_attended_for_broadcast_filtered(
     if registration_between:
         start_date, end_date = registration_between
         q = q.where(
-            GHLContact.webinar_registration_in_form_date >= start_date,
-            GHLContact.webinar_registration_in_form_date < end_date,
+            GHLContact.webinar_registration_in_form_date > start_date,
+            GHLContact.webinar_registration_in_form_date <= end_date,
         )
 
     if require_sms_tag:
@@ -214,17 +209,13 @@ def _row_kind_from_assignment(a: WebinarListAssignment) -> str:
 def _row_for_assignment(a: WebinarListAssignment, webinar_status: str) -> dict[str, Any]:
     """Build a child row dict from a Planning WebinarListAssignment.
 
-    Base metrics (listSize / listRemain / gcalInvited / accountsNeeded / invited)
-    are attributed to this list. GHL / WebinarGeek metrics are left null on the
-    list row since they don't decompose per list — they're computed per-webinar
-    and shown in the summary.
+    Base metrics (accountsNeeded / invited) are attributed to this list. GHL /
+    WebinarGeek metrics are left null on the list row since they don't
+    decompose per list — they're computed per-webinar and shown in the summary.
     """
     sender_name = a.sender.name if a.sender else None
     sender_color = a.sender.color if a.sender else None
     metrics: dict[str, float | None] = {
-        "listSize": a.volume or 0,
-        "listRemain": a.remaining or 0,
-        "gcalInvited": a.gcal_invited or 0,
         "accountsNeeded": a.accounts_used or 0,
         "invited": a.volume or 0,
         # actuallyUsed is filled in by _compute_per_list_metrics — count of
@@ -353,15 +344,17 @@ class GoHighLevelStatisticsSource:
 
     @staticmethod
     def _date_windows(webinars: list[Webinar]) -> dict[str, tuple[Any, Any]]:
-        """{webinar_id: (prev_date, current_date)} — defaults to 30-day fallback
-        when no prior webinar exists, mirroring the original loop behaviour."""
+        """{webinar_id: (prev_date, current_date)} — window is (prev, current],
+        i.e. excludes the previous webinar's day, includes the current's. When
+        no prior webinar exists, falls back to a 7-day window that includes
+        the current webinar's date (prev = current - 7)."""
         from datetime import timedelta
         out: dict[str, tuple[Any, Any]] = {}
         for idx, w in enumerate(webinars):
             prev_date = webinars[idx - 1].date if idx > 0 else None
             current_date = w.date
             if prev_date is None and current_date is not None:
-                prev_date = current_date - timedelta(days=30)
+                prev_date = current_date - timedelta(days=7)
             out[w.id] = (prev_date, current_date)
         return out
 
@@ -438,9 +431,6 @@ class GoHighLevelStatisticsSource:
 
         # Nonjoiners row metrics
         nj_metrics: dict[str, float | None] = {
-            "listSize": None,
-            "listRemain": None,
-            "gcalInvited": None,
             "accountsNeeded": None,
             "invited": nj_count,  # treat nonjoiners as part of the invited pool
             "actuallyUsed": None,  # not from our planning system → fallback to invited
@@ -456,18 +446,42 @@ class GoHighLevelStatisticsSource:
         # Use LEFT JOIN anti-pattern on LOWER(email) — 156k planned emails
         # is too large for `NOT IN` without hash support; LEFT JOIN ... WHERE
         # planned.email IS NULL compiles to a hash anti-join.
-        nld_counts_sql = """
+        # LP Regs (= Self Reg Marked) for NO LIST DATA also counts contacts
+        # with `webinar_registration_in_form_date` in this webinar's window
+        # (prev, current] even when they're NOT on a planned list.
+        has_window = bool(prev_date and current_date)
+        nld_params: dict[str, Any] = {
+            "wid": wid, "yes_re": yes_re, "maybe_re": maybe_re,
+            "nj_re": series_nj_re, "N": N,
+        }
+        if has_window:
+            nld_params["sr_start"] = prev_date
+            nld_params["sr_end"] = current_date
+            relevant_window_pred = (
+                "OR (g.webinar_registration_in_form_date > :sr_start "
+                "AND g.webinar_registration_in_form_date <= :sr_end)"
+            )
+            self_reg_filter = (
+                "wrd > :sr_start AND wrd <= :sr_end"
+            )
+        else:
+            relevant_window_pred = ""
+            self_reg_filter = "FALSE"
+
+        nld_counts_sql = f"""
             WITH
             relevant AS (
                 SELECT g.ghl_contact_id, LOWER(g.email) AS lem,
                        g.calendar_invite_response_history AS irh,
-                       g.booked_call_webinar_series AS bcws
+                       g.booked_call_webinar_series AS bcws,
+                       g.webinar_registration_in_form_date AS wrd
                 FROM ghl_contact g
                 WHERE g.calendar_invite_response_history ~* :yes_re
                    OR g.calendar_invite_response_history ~* :maybe_re
                    OR g.calendar_webinar_series_non_joiners ~* :nj_re
                    OR g.booked_call_webinar_series = :N
                    OR g.webinar_registration_number = :N
+                   {relevant_window_pred}
             ),
             planned AS (
                 SELECT DISTINCT LOWER(c.email) AS email
@@ -486,24 +500,25 @@ class GoHighLevelStatisticsSource:
                 COUNT(DISTINCT ghl_contact_id)                          AS total_unplanned,
                 COUNT(DISTINCT ghl_contact_id) FILTER (WHERE irh ~* :yes_re)   AS yes_unplanned,
                 COUNT(DISTINCT ghl_contact_id) FILTER (WHERE irh ~* :maybe_re) AS maybe_unplanned,
-                COUNT(DISTINCT ghl_contact_id) FILTER (WHERE bcws = :N)        AS booked_unplanned
+                COUNT(DISTINCT ghl_contact_id) FILTER (WHERE bcws = :N)        AS booked_unplanned,
+                COUNT(DISTINCT ghl_contact_id) FILTER (WHERE {self_reg_filter}) AS lp_regs_unplanned
             FROM unplanned
         """
-        r = await db.execute(sa_text(nld_counts_sql).bindparams(
-            wid=wid, yes_re=yes_re, maybe_re=maybe_re, nj_re=series_nj_re, N=N,
-        ))
+        r = await db.execute(sa_text(nld_counts_sql).bindparams(**nld_params))
         row = r.one_or_none()
-        total_u, yes_u, maybe_u, booked_u = (int(row[0] or 0), int(row[1] or 0), int(row[2] or 0), int(row[3] or 0)) if row else (0, 0, 0, 0)
+        total_u, yes_u, maybe_u, booked_u, lp_regs_u = (
+            (int(row[0] or 0), int(row[1] or 0), int(row[2] or 0), int(row[3] or 0), int(row[4] or 0))
+            if row else (0, 0, 0, 0, 0)
+        )
 
         nld_metrics: dict[str, float | None] = {
-            "listSize": None,
-            "listRemain": None,
-            "gcalInvited": None,
             "accountsNeeded": None,
             "invited": total_u,
             "actuallyUsed": None,  # not from our planning system → fallback to invited
             "yesMarked": yes_u,
             "maybeMarked": maybe_u,
+            "selfRegMarked": lp_regs_u,
+            "lpRegs": lp_regs_u,
             "totalBookings": booked_u,
         }
 
@@ -618,8 +633,8 @@ class GoHighLevelStatisticsSource:
         if has_window:
             ghl_params["sr_start"] = prev_date
             ghl_params["sr_end"] = current_date
-            window_filter_marker = "g.webinar_registration_in_form_date >= :sr_start AND g.webinar_registration_in_form_date < :sr_end"
-            unsub_filter = "g.cold_calendar_unsubscribe_date >= :sr_start AND g.cold_calendar_unsubscribe_date < :sr_end"
+            window_filter_marker = "g.webinar_registration_in_form_date > :sr_start AND g.webinar_registration_in_form_date <= :sr_end"
+            unsub_filter = "g.cold_calendar_unsubscribe_date > :sr_start AND g.cold_calendar_unsubscribe_date <= :sr_end"
         else:
             unsub_filter = "FALSE"
         ghl_sql = f"""
@@ -811,9 +826,6 @@ class GoHighLevelStatisticsSource:
         """Aggregated base metrics (sum over lists) + webinar-wide GHL/WG metrics."""
         summary: dict[str, float | None] = {
             # Base — aggregate from lists
-            "listSize": sum((a.volume or 0) for a in assignments),
-            "listRemain": sum((a.remaining or 0) for a in assignments),
-            "gcalInvited": sum((a.gcal_invited or 0) for a in assignments),
             "accountsNeeded": sum((a.accounts_used or 0) for a in assignments),
             "invited": sum((a.volume or 0) for a in assignments),
         }
@@ -866,8 +878,8 @@ class GoHighLevelStatisticsSource:
         if has_window:
             ghl_params["sr_start"] = prev_date
             ghl_params["sr_end"] = current_date
-            window_filter = "g.webinar_registration_in_form_date >= :sr_start AND g.webinar_registration_in_form_date < :sr_end"
-            unsub_filter = "g.cold_calendar_unsubscribe_date >= :sr_start AND g.cold_calendar_unsubscribe_date < :sr_end"
+            window_filter = "g.webinar_registration_in_form_date > :sr_start AND g.webinar_registration_in_form_date <= :sr_end"
+            unsub_filter = "g.cold_calendar_unsubscribe_date > :sr_start AND g.cold_calendar_unsubscribe_date <= :sr_end"
         else:
             window_filter = "FALSE"
             unsub_filter = "FALSE"
@@ -1014,8 +1026,6 @@ class GoHighLevelStatisticsSource:
         ]
         metrics["avgClosedDealValue"] = sum(won_vals) if won_vals else None
 
-        # --- Skipped ---
-        metrics["ghlPageViews"] = None
         metrics.setdefault("lpRegs", None)
 
         return metrics
