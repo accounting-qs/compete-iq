@@ -1252,6 +1252,7 @@ export interface ApiStatisticsWebinarSummary {
   title: string | null;
   status: string | null;
   listCount: number;
+  broadcastId: string | null;
 }
 
 export async function fetchStatisticsWebinarList(

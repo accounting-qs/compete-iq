@@ -319,6 +319,7 @@ class GoHighLevelStatisticsSource:
                 "title": w.main_title,
                 "status": w.status,
                 "listCount": counts.get(str(w.id), 0),
+                "broadcastId": w.broadcast_id,
             })
         return out
 

@@ -162,6 +162,7 @@ class ApiStatisticsWebinarSummary(BaseModel):
     title: str | None = None
     status: str | None = None
     listCount: int = 0
+    broadcastId: str | None = None
 
 
 class StatisticsListResponse(BaseModel):
