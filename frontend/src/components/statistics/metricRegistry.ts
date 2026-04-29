@@ -337,7 +337,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
   {
     key: "selfRegMarked", label: "Marked", group: "Self Reg", format: "number",
     description: "Contacts who self-registered via the landing page in this webinar's window.",
-    fieldsUsed: [{ ...F_CONTACT_REG_DATE, filter: "BETWEEN prev_webinar_date AND current_webinar_date" }],
+    fieldsUsed: [{ ...F_CONTACT_REG_DATE, filter: "> prev_webinar_date AND <= current_webinar_date" }],
   },
   {
     key: "selfRegPer1kInv", label: "/1k Inv", group: "Self Reg", format: "per1k",
@@ -349,7 +349,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
     key: "selfRegAttended", label: "Attended", group: "Self Reg", format: "number",
     description: "Self-registrants who actually attended.",
     fieldsUsed: [
-      { ...F_CONTACT_REG_DATE, filter: "BETWEEN prev_date AND current_date" },
+      { ...F_CONTACT_REG_DATE, filter: "> prev_webinar_date AND <= current_webinar_date" },
       F_WG_BROADCAST, F_WG_WATCHED,
     ],
   },
@@ -363,7 +363,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
     key: "selfReg10MinPlus", label: "10m+", group: "Self Reg", format: "number",
     description: "Self-registrants who watched ≥10 minutes.",
     fieldsUsed: [
-      { ...F_CONTACT_REG_DATE, filter: "BETWEEN prev_date AND current_date" },
+      { ...F_CONTACT_REG_DATE, filter: "> prev_webinar_date AND <= current_webinar_date" },
       F_WG_BROADCAST,
       { entity: "WebinarGeek Subscriber", field: "minutes_viewing", filter: ">= 10" },
     ],
@@ -378,7 +378,7 @@ export const METRIC_COLUMNS: MetricColumn[] = [
     key: "selfRegBookings", label: "Bookings", group: "Self Reg", format: "number",
     description: "Self-registrants who booked a call for this webinar.",
     fieldsUsed: [
-      { ...F_CONTACT_REG_DATE, filter: "BETWEEN prev_date AND current_date" },
+      { ...F_CONTACT_REG_DATE, filter: "> prev_webinar_date AND <= current_webinar_date" },
       { ...F_CONTACT_BOOKED_CALL, filter: "= {N}" },
     ],
   },
