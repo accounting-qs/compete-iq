@@ -1059,7 +1059,7 @@ export function CopyGeneratorPage() {
 
         {/* ── Floating Action Bar ──────────────────────────────────────── */}
         {someSelected && (
-          <div className="mb-4 flex items-center gap-3 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800/40 rounded-xl px-4 py-3 shadow-sm">
+          <div className="fixed left-1/2 -translate-x-1/2 bottom-5 z-40 flex items-center gap-3 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800/40 rounded-xl px-4 py-3 shadow-lg">
             <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
               {selectedIds.size} bucket{selectedIds.size !== 1 ? "s" : ""} selected
             </span>
