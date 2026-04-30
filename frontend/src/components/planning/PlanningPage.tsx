@@ -185,6 +185,37 @@ const COLOR_CLASS_MAP: Record<string, string> = {
 };
 const DEFAULT_BADGE_CLS = "bg-zinc-200 dark:bg-zinc-700/30 text-zinc-600 dark:text-zinc-400 border-zinc-600/30";
 
+function CopyVariantButton({ text, tone }: { text: string; tone: "title" | "description" }) {
+  const [copied, setCopied] = useState(false);
+  const tones = tone === "title"
+    ? { hover: "hover:text-violet-500 hover:bg-violet-50 dark:hover:bg-violet-500/10", badge: "bg-violet-100 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400" }
+    : { hover: "hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-500/10", badge: "bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400" };
+  return (
+    <span className="inline-flex items-center gap-1">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          navigator.clipboard.writeText(text).then(() => {
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1500);
+          });
+        }}
+        title={`Copy ${tone}`}
+        className={`p-0.5 rounded text-zinc-400 transition-colors ${tones.hover}`}
+      >
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+      </button>
+      {copied && (
+        <span className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${tones.badge}`}>
+          Copied
+        </span>
+      )}
+    </span>
+  );
+}
+
+
 function SenderBadge({ name, color }: { name: string; color?: string }) {
   if (!name) return <span className="text-zinc-600">—</span>;
   const cls = (color && COLOR_CLASS_MAP[color]) || DEFAULT_BADGE_CLS;
@@ -2166,14 +2197,7 @@ export function PlanningPage() {
                                       V{selectedTitle.variantIndex + 1}
                                     </span>
                                   )}
-                                  <button
-                                    type="button"
-                                    onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(selectedTitle.text); }}
-                                    title="Copy title"
-                                    className="p-0.5 rounded text-zinc-400 hover:text-violet-500 hover:bg-violet-50 dark:hover:bg-violet-500/10 transition-colors"
-                                  >
-                                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
-                                  </button>
+                                  <CopyVariantButton text={selectedTitle.text} tone="title" />
                                 </span>
                               );
                             })()}
@@ -2210,14 +2234,7 @@ export function PlanningPage() {
                                       V{selectedDesc.variantIndex + 1}
                                     </span>
                                   )}
-                                  <button
-                                    type="button"
-                                    onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(selectedDesc.text); }}
-                                    title="Copy description"
-                                    className="p-0.5 rounded text-zinc-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-500/10 transition-colors"
-                                  >
-                                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
-                                  </button>
+                                  <CopyVariantButton text={selectedDesc.text} tone="description" />
                                 </span>
                               )}
                               <span className="text-zinc-700 dark:text-zinc-300 text-[10px] leading-snug truncate block overflow-hidden group-hover/desc:text-blue-600 dark:group-hover/desc:text-blue-400 transition-colors" title={descText}>{descText.split("\n")[0]}</span>
