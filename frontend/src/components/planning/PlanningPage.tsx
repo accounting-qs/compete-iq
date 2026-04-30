@@ -2157,11 +2157,25 @@ export function PlanningPage() {
                           >
                             {(() => {
                               const selectedTitle = l.titleVariants?.find(v => v.selected);
-                              return selectedTitle && l.titleVariants && l.titleVariants.length > 1 ? (
-                                <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-violet-100 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400 inline-block mb-0.5">
-                                  V{selectedTitle.variantIndex + 1}
+                              if (!selectedTitle) return null;
+                              const showVariantBadge = l.titleVariants && l.titleVariants.length > 1;
+                              return (
+                                <span className="inline-flex items-center gap-1 mb-0.5">
+                                  {showVariantBadge && (
+                                    <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-violet-100 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400">
+                                      V{selectedTitle.variantIndex + 1}
+                                    </span>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(selectedTitle.text); }}
+                                    title="Copy title"
+                                    className="p-0.5 rounded text-zinc-400 hover:text-violet-500 hover:bg-violet-50 dark:hover:bg-violet-500/10 transition-colors"
+                                  >
+                                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                                  </button>
                                 </span>
-                              ) : null;
+                              );
                             })()}
                             <span className="text-zinc-700 dark:text-zinc-300 text-[10px] leading-snug truncate block overflow-hidden group-hover/title:text-violet-600 dark:group-hover/title:text-violet-400 transition-colors" title={l.title}>{l.title}</span>
                             <span className="text-[9px] text-violet-500 font-medium mt-0.5 block">
@@ -2189,9 +2203,21 @@ export function PlanningPage() {
                               className="max-w-[240px] cursor-pointer group/desc"
                               onClick={() => openVariationsModal(l.id, w.id, "description")}
                             >
-                              {selectedDesc && l.descVariants && l.descVariants.length > 1 && (
-                                <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400 inline-block mb-0.5">
-                                  V{selectedDesc.variantIndex + 1}
+                              {selectedDesc && (
+                                <span className="inline-flex items-center gap-1 mb-0.5">
+                                  {l.descVariants && l.descVariants.length > 1 && (
+                                    <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400">
+                                      V{selectedDesc.variantIndex + 1}
+                                    </span>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(selectedDesc.text); }}
+                                    title="Copy description"
+                                    className="p-0.5 rounded text-zinc-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-500/10 transition-colors"
+                                  >
+                                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                                  </button>
                                 </span>
                               )}
                               <span className="text-zinc-700 dark:text-zinc-300 text-[10px] leading-snug truncate block overflow-hidden group-hover/desc:text-blue-600 dark:group-hover/desc:text-blue-400 transition-colors" title={descText}>{descText.split("\n")[0]}</span>
