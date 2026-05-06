@@ -11,6 +11,7 @@ import {
   regenerateCopy as apiRegenerateCopy,
   deleteCopy as apiDeleteCopy,
   mergeBuckets as apiMergeBuckets,
+  updateBucket as apiUpdateBucket,
   MergeBlockedError,
   type ApiBucket,
   type ApiCopy,
@@ -405,6 +406,44 @@ export function CopyGeneratorPage() {
   const [editingCell, setEditingCell] = useState<{ bucketId: string; type: "title" | "description" } | null>(null);
   const [editCellText, setEditCellText] = useState("");
   const editRef = useRef<HTMLTextAreaElement>(null);
+  /** Inline-rename state for the bucket-name cell. `editingBucketName.id`
+   * is the id of the bucket currently being renamed. Errors (e.g. duplicate
+   * name from the backend's 409) surface inline below the input. */
+  const [editingBucketName, setEditingBucketName] = useState<{ id: string; value: string; error: string | null; saving: boolean } | null>(null);
+  const bucketNameInputRef = useRef<HTMLInputElement>(null);
+
+  function startBucketRename(b: ApiBucket) {
+    setEditingBucketName({ id: b.id, value: b.name, error: null, saving: false });
+    // Focus + select the input on the next tick after it mounts.
+    setTimeout(() => {
+      bucketNameInputRef.current?.focus();
+      bucketNameInputRef.current?.select();
+    }, 0);
+  }
+
+  async function commitBucketRename() {
+    const edit = editingBucketName;
+    if (!edit) return;
+    const trimmed = edit.value.trim();
+    const original = buckets.find((b) => b.id === edit.id);
+    // Empty / unchanged → just close the editor without an API call.
+    if (!trimmed || trimmed === original?.name) {
+      setEditingBucketName(null);
+      return;
+    }
+    setEditingBucketName({ ...edit, saving: true, error: null });
+    try {
+      const updated = await apiUpdateBucket(edit.id, { name: trimmed });
+      setBuckets((prev) => prev.map((b) => (b.id === edit.id ? { ...b, name: updated.name } : b)));
+      setEditingBucketName(null);
+    } catch (e) {
+      setEditingBucketName({
+        ...edit,
+        saving: false,
+        error: e instanceof Error ? e.message : "Rename failed",
+      });
+    }
+  }
 
   // Filters
   const [genFilter, setGenFilter] = useState<"all" | "missing_title" | "missing_desc" | "missing_any" | "complete">("all");
@@ -1204,7 +1243,62 @@ export function CopyGeneratorPage() {
                       <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(bucket.id)}
                         className="w-3.5 h-3.5 rounded border-zinc-300 dark:border-zinc-600 text-violet-600 focus:ring-violet-500 cursor-pointer accent-violet-600" />
                     </td>
-                    <td className="px-3 py-3 font-medium text-zinc-800 dark:text-zinc-200 text-[13px]">{bucket.name}</td>
+                    <td className="px-3 py-3 font-medium text-zinc-800 dark:text-zinc-200 text-[13px] group/name">
+                      {editingBucketName?.id === bucket.id ? (
+                        <div className="flex flex-col gap-1">
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              ref={bucketNameInputRef}
+                              type="text"
+                              value={editingBucketName.value}
+                              disabled={editingBucketName.saving}
+                              onChange={(e) =>
+                                setEditingBucketName((prev) => prev && { ...prev, value: e.target.value, error: null })
+                              }
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  commitBucketRename();
+                                } else if (e.key === "Escape") {
+                                  e.preventDefault();
+                                  setEditingBucketName(null);
+                                }
+                              }}
+                              onBlur={() => {
+                                // Defer slightly so a click on Save lands first.
+                                setTimeout(() => {
+                                  if (!editingBucketName?.saving) commitBucketRename();
+                                }, 100);
+                              }}
+                              className="flex-1 min-w-0 bg-white dark:bg-zinc-900 border border-violet-500/60 focus:border-violet-500 rounded px-2 py-1 text-[13px] text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                            />
+                            {editingBucketName.saving && (
+                              <span className="inline-block w-3 h-3 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
+                            )}
+                          </div>
+                          {editingBucketName.error && (
+                            <span className="text-[10px] text-red-500">{editingBucketName.error}</span>
+                          )}
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => startBucketRename(bucket)}
+                          title="Rename bucket"
+                          className="inline-flex items-center gap-1.5 text-left rounded px-1 -mx-1 py-0.5 hover:bg-zinc-100 dark:hover:bg-zinc-800/40 transition-colors"
+                        >
+                          <span className="truncate">{bucket.name}</span>
+                          <svg
+                            width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                            className="text-zinc-400 opacity-0 group-hover/name:opacity-100 transition-opacity flex-shrink-0"
+                          >
+                            <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                            <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                          </svg>
+                        </button>
+                      )}
+                    </td>
                     <td className="px-3 py-3 text-zinc-500 dark:text-zinc-400 text-xs">{bucket.industry}</td>
                     <td className="px-3 py-3 text-right font-mono text-zinc-700 dark:text-zinc-300 text-xs">{bucket.total_contacts.toLocaleString()}</td>
                     <td className="px-3 py-3 text-right font-mono text-violet-600 dark:text-violet-400 text-xs">{bucket.remaining_contacts.toLocaleString()}</td>

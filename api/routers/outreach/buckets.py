@@ -160,7 +160,27 @@ async def update_bucket(
     bucket = result.scalar_one_or_none()
     if not bucket:
         raise HTTPException(404, "Bucket not found")
-    for field, val in body.model_dump(exclude_unset=True).items():
+
+    updates = body.model_dump(exclude_unset=True)
+
+    # Pre-check the (user_id, name) uniqueness so we surface a friendly 409
+    # instead of a 500 from the IntegrityError. Only checks among non-deleted
+    # rows since soft-deleted buckets keep their old names but don't block
+    # reuse from the operator's perspective.
+    new_name = updates.get("name")
+    if new_name is not None and new_name != bucket.name:
+        clash = await db.execute(
+            select(OutreachBucket.id).where(
+                OutreachBucket.user_id == LLOYD_USER_ID,
+                OutreachBucket.name == new_name,
+                OutreachBucket.id != bucket_id,
+                OutreachBucket.deleted_at.is_(None),
+            )
+        )
+        if clash.scalar_one_or_none():
+            raise HTTPException(409, f"A bucket named '{new_name}' already exists.")
+
+    for field, val in updates.items():
         setattr(bucket, field, val)
     await db.flush()
     return bucket_dict(bucket)

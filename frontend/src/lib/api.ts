@@ -229,7 +229,10 @@ export async function updateBucket(
     headers: jsonHeaders(),
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error("Failed to update bucket");
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to update bucket");
+  }
   return res.json();
 }
 
