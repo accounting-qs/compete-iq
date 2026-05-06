@@ -11,7 +11,12 @@ class ConnectorCredential(Base):
     __tablename__ = "connector_credentials"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
-    provider: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    # Names a single credential within a provider. 'default' is the row
+    # used when no specific selection is made (matches pre-multi-credential
+    # behavior). Variants (e.g. WebinarGeek A/B accounts) get their own
+    # named row and reference it via Webinar.webinargeek_credential_id.
+    name: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
     api_key: Mapped[str] = mapped_column(Text, nullable=False)
     # Used by providers that need a second piece of identity alongside the
     # API key (e.g. GHL location id). Null for single-secret providers.
@@ -20,6 +25,10 @@ class ConnectorCredential(Base):
     pipeline_id: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("provider", "name", name="uq_connector_credentials_provider_name"),
+    )
 
 
 class WebinarGeekWebinar(Base):

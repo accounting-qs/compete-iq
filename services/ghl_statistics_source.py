@@ -276,11 +276,15 @@ class GoHighLevelStatisticsSource:
     async def get_raw_webinars(self) -> list[dict[str, Any]]:
         webinars = await self._load_webinars()
         date_windows = self._date_windows(webinars)
+        siblings_map = self._sibling_webinar_ids(webinars)
         raw_webinars: list[dict[str, Any]] = []
         for w in webinars:
             prev_date, current_date = date_windows[w.id]
             raw_webinars.append(
-                await self._build_raw_webinar(w, prev_date, current_date)
+                await self._build_raw_webinar(
+                    w, prev_date, current_date,
+                    sibling_webinar_ids=siblings_map.get(w.id, []),
+                )
             )
         raw_webinars.reverse()  # descending by number for the UI
         return raw_webinars
@@ -290,9 +294,16 @@ class GoHighLevelStatisticsSource:
 
         Powers the progressive-load UI: the page renders the parent rows
         immediately, then fetches per-webinar metrics in priority order.
+        Each A/B variant is its own row (its own `webinarId`); the
+        frontend renders them as two separate parent rows.
         """
         async with AsyncSessionLocal() as db:
-            result = await db.execute(select(Webinar).order_by(Webinar.number.desc()))
+            result = await db.execute(
+                select(Webinar).order_by(
+                    Webinar.number.desc(),
+                    Webinar.variant_label.asc().nullsfirst(),
+                )
+            )
             webinars = list(result.scalars().all())
 
             counts_q = await db.execute(
@@ -303,9 +314,14 @@ class GoHighLevelStatisticsSource:
 
         out: list[dict[str, Any]] = []
         for w in webinars:
+            # Append the variant label to the synthetic id so two siblings
+            # on the same number don't collide in any client-side Map.
+            id_suffix = f"-{w.variant_label}" if w.variant_label else ""
             out.append({
-                "id": f"stat-w{w.number}",
+                "id": f"stat-w{w.number}{id_suffix}",
+                "webinarId": w.id,
                 "number": w.number,
+                "variantLabel": w.variant_label,
                 "date": w.date.isoformat() if w.date else None,
                 "title": w.main_title,
                 "status": w.status,
@@ -314,15 +330,37 @@ class GoHighLevelStatisticsSource:
             })
         return out
 
-    async def get_raw_webinar(self, number: int) -> dict[str, Any] | None:
-        """Fully-processed single webinar (summary + per-list rows + specials)."""
+    async def get_raw_webinar(self, webinar_id: str) -> dict[str, Any] | None:
+        """Fully-processed single webinar (summary + per-list rows + specials).
+
+        Looks up by webinar_id so A/B variants on the same number can be
+        addressed unambiguously. Callers that still have only a number
+        should resolve to a webinar_id at the API layer first.
+        """
         webinars = await self._load_webinars()
         date_windows = self._date_windows(webinars)
+        siblings_map = self._sibling_webinar_ids(webinars)
         for w in webinars:
-            if w.number == number:
+            if w.id == webinar_id:
                 prev_date, current_date = date_windows[w.id]
-                return await self._build_raw_webinar(w, prev_date, current_date)
+                return await self._build_raw_webinar(
+                    w, prev_date, current_date,
+                    sibling_webinar_ids=siblings_map.get(w.id, []),
+                )
         return None
+
+    @staticmethod
+    def _sibling_webinar_ids(webinars: list[Webinar]) -> dict[str, list[str]]:
+        """{webinar_id: [other webinars sharing the same (user_id, number)]}.
+        Empty list when this webinar is the only one for its number."""
+        by_key: dict[tuple[str, int], list[str]] = {}
+        for w in webinars:
+            by_key.setdefault((w.user_id, w.number), []).append(w.id)
+        out: dict[str, list[str]] = {}
+        for w in webinars:
+            ids = by_key.get((w.user_id, w.number), [])
+            out[w.id] = [wid for wid in ids if wid != w.id]
+        return out
 
     async def _load_webinars(self) -> list[Webinar]:
         async with AsyncSessionLocal() as db:
@@ -347,11 +385,32 @@ class GoHighLevelStatisticsSource:
         """{webinar_id: (prev_date, current_date)} — window is (prev, current],
         i.e. excludes the previous webinar's day, includes the current's. When
         no prior webinar exists, falls back to a 7-day window that includes
-        the current webinar's date (prev = current - 7)."""
+        the current webinar's date (prev = current - 7).
+
+        Variant-aware: when two webinars share the same `number` (A/B test),
+        neither counts as "the previous webinar" for the other. We walk
+        distinct numbers, so all variants of N share the same prev_date —
+        the date of the most-recent webinar with `number < N`.
+        """
         from datetime import timedelta
+
+        # Map each distinct number to its anchor date — when multiple
+        # variants share a number, take the latest date among them so the
+        # window for the *next* number's webinar starts after both.
+        date_by_number: dict[int, Any] = {}
+        for w in webinars:
+            existing = date_by_number.get(w.number)
+            if existing is None or (w.date is not None and existing < w.date):
+                date_by_number[w.number] = w.date
+
+        sorted_numbers = sorted(date_by_number.keys())
+        prev_date_by_number: dict[int, Any] = {}
+        for i, n in enumerate(sorted_numbers):
+            prev_date_by_number[n] = date_by_number[sorted_numbers[i - 1]] if i > 0 else None
+
         out: dict[str, tuple[Any, Any]] = {}
-        for idx, w in enumerate(webinars):
-            prev_date = webinars[idx - 1].date if idx > 0 else None
+        for w in webinars:
+            prev_date = prev_date_by_number.get(w.number)
             current_date = w.date
             if prev_date is None and current_date is not None:
                 prev_date = current_date - timedelta(days=7)
@@ -359,8 +418,22 @@ class GoHighLevelStatisticsSource:
         return out
 
     async def _build_raw_webinar(
-        self, w: Webinar, prev_date, current_date,
+        self,
+        w: Webinar,
+        prev_date,
+        current_date,
+        sibling_webinar_ids: list[str] | None = None,
     ) -> dict[str, Any]:
+        """Build the full raw-stats dict for one webinar.
+
+        `sibling_webinar_ids` is the list of OTHER webinars that share this
+        webinar's `number` (i.e. A/B variants). When non-empty, we (a) sum
+        per-list rows for the parent summary instead of using webinar-wide
+        N counts, and (b) exclude all sibling variants' planned contacts
+        from NO LIST DATA so siblings don't leak into each other's leftovers.
+        """
+        siblings = sibling_webinar_ids or []
+        is_variant = bool(siblings)
         assignments = sorted(
             w.assignments,
             key=lambda a: (a.display_order or 0, a.created_at or 0),
@@ -368,9 +441,7 @@ class GoHighLevelStatisticsSource:
         rows = [_row_for_assignment(a, w.status) for a in assignments]
 
         async with AsyncSessionLocal() as db:
-            summary = await self._compute_webinar_summary(
-                db, w, assignments, prev_date, current_date,
-            )
+            # Per-list first so the variant summary can sum from it.
             per_list = await self._compute_per_list_metrics(
                 db, w, assignments, prev_date, current_date,
             )
@@ -378,20 +449,65 @@ class GoHighLevelStatisticsSource:
                 extra = per_list.get(a.id, {})
                 r["metrics"].update(extra)
 
+            if is_variant:
+                summary = self._summary_from_per_list(assignments, per_list)
+            else:
+                summary = await self._compute_webinar_summary(
+                    db, w, assignments, prev_date, current_date,
+                )
+
             synthetic = await self._synthetic_special_rows(
                 db, w, assignments, prev_date, current_date,
+                sibling_webinar_ids=siblings,
             )
             rows.extend(synthetic)
 
         return {
             "number": w.number,
+            "variantLabel": w.variant_label,
+            "webinarId": w.id,
             "date": w.date.isoformat() if w.date else None,
             "title": w.main_title,
             "workbookRow": 0,
             "rows": rows,
             "summary": summary,
             "status": w.status,
+            # Operators read this on the stats page to know whether
+            # rate-metric denominators are split per variant.
+            "hasSiblingVariants": is_variant,
         }
+
+    @staticmethod
+    def _summary_from_per_list(
+        assignments: list[WebinarListAssignment],
+        per_list: dict[str, dict[str, float | None]],
+    ) -> dict[str, float | None]:
+        """Build a parent summary by summing the per-list child rows.
+
+        Used for variants — webinar-wide N counts would conflate sibling
+        variants since GHL custom fields don't carry variant info. For
+        non-variant webinars the existing webinar-wide aggregate stays.
+        """
+        keys: set[str] = set()
+        for m in per_list.values():
+            keys.update(m.keys())
+        summary: dict[str, float | None] = {
+            "accountsNeeded": sum((a.accounts_used or 0) for a in assignments),
+            "invited": sum((a.volume or 0) for a in assignments),
+        }
+        for k in keys:
+            if k in summary:
+                continue
+            total: float = 0.0
+            any_value = False
+            for m in per_list.values():
+                v = m.get(k)
+                if v is None:
+                    continue
+                total += float(v)
+                any_value = True
+            summary[k] = total if any_value else None
+        return summary
 
     async def _synthetic_special_rows(
         self,
@@ -400,6 +516,7 @@ class GoHighLevelStatisticsSource:
         assignments: list[WebinarListAssignment],
         prev_date,
         current_date,
+        sibling_webinar_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Build synthetic Nonjoiners + No List Data rows for this webinar.
 
@@ -410,6 +527,9 @@ class GoHighLevelStatisticsSource:
           non-joiners, booked_call=N, registration_number=N, self-reg in
           window) whose email is NOT in any Planning assignment for this
           webinar. "Leftover" counts not attributable to a planned list.
+          When this webinar has sibling variants on the same number, the
+          `planned` CTE unions across all siblings so a sibling's planned
+          contacts don't appear in this variant's leftover pool.
         """
         from sqlalchemy import text as sa_text
 
@@ -419,6 +539,10 @@ class GoHighLevelStatisticsSource:
         maybe_re = _invite_response_regex(N, "Maybe")
         broadcast_id = w.broadcast_id
         wid = w.id
+        sibling_ids = sibling_webinar_ids or []
+        # Union of all webinars (this + siblings) whose planned contacts
+        # should be excluded from "leftover" leaked-signal counts.
+        planned_webinar_ids: list[str] = [wid] + list(sibling_ids)
 
         # ── Nonjoiners ────────────────────────────────────────────────
         r = await db.execute(sa_text("""
@@ -450,8 +574,12 @@ class GoHighLevelStatisticsSource:
         # with `webinar_registration_in_form_date` in this webinar's window
         # (prev, current] even when they're NOT on a planned list.
         has_window = bool(prev_date and current_date)
+        # Postgres can take a UUID[] via the asyncpg driver. We pass the
+        # union of (this webinar + sibling variants) so the planned CTE
+        # excludes everyone covered by any plan for this number.
         nld_params: dict[str, Any] = {
-            "wid": wid, "yes_re": yes_re, "maybe_re": maybe_re,
+            "planned_wids": planned_webinar_ids,
+            "yes_re": yes_re, "maybe_re": maybe_re,
             "nj_re": series_nj_re, "N": N,
         }
         if has_window:
@@ -487,7 +615,7 @@ class GoHighLevelStatisticsSource:
                 SELECT DISTINCT LOWER(c.email) AS email
                 FROM contacts c
                 JOIN webinar_list_assignments wla ON c.assignment_id = wla.id
-                WHERE wla.webinar_id = CAST(:wid AS uuid)
+                WHERE wla.webinar_id = ANY(CAST(:planned_wids AS uuid[]))
                   AND c.email IS NOT NULL
             ),
             unplanned AS (
@@ -565,6 +693,12 @@ class GoHighLevelStatisticsSource:
                 "employeeRange": None,
                 "country": None,
                 "metrics": nld_metrics,
+                # When sibling variants exist for this number, the GHL
+                # custom-field signals (Yes/Maybe/booked) carry only N —
+                # they cannot be split between variants. The same numbers
+                # therefore appear on both variants' NO LIST DATA rows. The
+                # frontend reads this flag to show a "shared signals" tag.
+                "sharedAcrossVariants": bool(sibling_ids),
             })
         return rows_out
 

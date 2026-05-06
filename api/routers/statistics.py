@@ -151,7 +151,13 @@ class StatisticsResponse(BaseModel):
 class ApiStatisticsWebinarSummary(BaseModel):
     """Lightweight webinar identity used by the progressive-load list."""
     id: str
+    # Underlying Webinar UUID. The progressive-load endpoint addresses
+    # rows by this value so A/B variants sharing a `number` don't collide.
+    webinarId: str | None = None
     number: int
+    # Free-text variant tag, e.g. "Account A". NULL for the unique row of
+    # a non-variant number.
+    variantLabel: str | None = None
     date: str | None = None
     title: str | None = None
     status: str | None = None
@@ -189,6 +195,7 @@ class ContactDrilldownItem(BaseModel):
 class ContactDrilldownResponse(BaseModel):
     metric: str
     webinar_number: int
+    webinar_id: str | None = None
     assignment_id: str | None = None
     unit: str  # "contact" | "opportunity"
     total: int
@@ -199,36 +206,72 @@ class ContactDrilldownResponse(BaseModel):
 
 @router.get("/contacts", response_model=ContactDrilldownResponse)
 async def list_contacts_for_metric(
-    webinar: int,
     metric: str,
+    webinar: int | None = None,
+    webinar_id: str | None = None,
     assignment: str | None = None,
     limit: int = 500,
 ):
     """Return contacts (or opportunities) behind a specific metric on the
     Statistics dashboard. Each item has a GHL deep-link for opening the
-    contact / opportunity in a new tab."""
-    from config import settings
-    from datetime import date, timedelta
+    contact / opportunity in a new tab.
+
+    With variants in play, prefer `webinar_id` (UUID) — it picks exactly
+    one variant. The legacy `webinar` (number) param still works for
+    back-compat: it resolves to the unlabeled webinar for that number, or
+    fails if all rows for that number are labeled variants (in which case
+    the caller must pass `webinar_id`).
+    """
+    from datetime import timedelta
     from sqlalchemy import select, text
-    from sqlalchemy.ext.asyncio import AsyncSession
     from db.models import Webinar as WebinarModel
     from db.session import AsyncSessionLocal
     from services.statistics_metric_filters import spec_for_metric, build_contacts_query
 
+    if webinar_id is None and webinar is None:
+        raise HTTPException(400, "Either webinar (number) or webinar_id (UUID) is required")
+
     async with AsyncSessionLocal() as db:
-        # Resolve webinar
-        r = await db.execute(select(WebinarModel).where(WebinarModel.number == webinar))
-        w = r.scalar_one_or_none()
+        # Resolve webinar — UUID takes precedence; bare number falls back to
+        # the unlabeled row.
+        if webinar_id is not None:
+            r = await db.execute(select(WebinarModel).where(WebinarModel.id == webinar_id))
+            w = r.scalar_one_or_none()
+        else:
+            r = await db.execute(
+                select(WebinarModel).where(
+                    WebinarModel.number == webinar,
+                    WebinarModel.variant_label.is_(None),
+                )
+            )
+            w = r.scalar_one_or_none()
+            if w is None:
+                # All rows for this number are labeled variants; require explicit webinar_id.
+                ambig = await db.execute(select(WebinarModel).where(WebinarModel.number == webinar))
+                if ambig.scalar_one_or_none() is not None:
+                    return {
+                        "metric": metric, "webinar_number": webinar, "webinar_id": None,
+                        "assignment_id": assignment, "unit": "contact", "total": 0, "items": [],
+                        "available": False,
+                        "reason": (
+                            f"Webinar {webinar} has multiple variants — pass webinar_id to disambiguate."
+                        ),
+                    }
         if w is None:
             return {
-                "metric": metric, "webinar_number": webinar, "assignment_id": assignment,
-                "unit": "contact", "total": 0, "items": [],
-                "available": False, "reason": f"Webinar {webinar} not found",
+                "metric": metric, "webinar_number": webinar or 0, "webinar_id": webinar_id,
+                "assignment_id": assignment, "unit": "contact", "total": 0, "items": [],
+                "available": False, "reason": "Webinar not found",
             }
+        webinar = w.number  # for response field below
 
-        # Compute prev_date (mirrors the source: 30-day fallback when no prior webinar)
+        # Compute prev_date — walk distinct numbers so sibling variants don't
+        # count as "the previous webinar" for date windows.
         prev_r = await db.execute(
-            select(WebinarModel).where(WebinarModel.number < webinar).order_by(WebinarModel.number.desc()).limit(1)
+            select(WebinarModel)
+            .where(WebinarModel.number < w.number)
+            .order_by(WebinarModel.number.desc(), WebinarModel.date.desc())
+            .limit(1)
         )
         prev_w = prev_r.scalar_one_or_none()
         prev_date = prev_w.date if prev_w else None
@@ -237,19 +280,19 @@ async def list_contacts_for_metric(
             prev_date = current_date - timedelta(days=30)
 
         spec = spec_for_metric(
-            metric, webinar, broadcast_id=w.broadcast_id,
+            metric, w.number, broadcast_id=w.broadcast_id,
             prev_date=prev_date, current_date=current_date,
         )
         if spec is None:
             return {
-                "metric": metric, "webinar_number": webinar, "assignment_id": assignment,
-                "unit": "contact", "total": 0, "items": [],
+                "metric": metric, "webinar_number": w.number, "webinar_id": w.id,
+                "assignment_id": assignment, "unit": "contact", "total": 0, "items": [],
                 "available": False, "reason": f"Metric '{metric}' not supported for drill-down",
             }
         if spec.unavailable:
             return {
-                "metric": metric, "webinar_number": webinar, "assignment_id": assignment,
-                "unit": spec.unit, "total": 0, "items": [],
+                "metric": metric, "webinar_number": w.number, "webinar_id": w.id,
+                "assignment_id": assignment, "unit": spec.unit, "total": 0, "items": [],
                 "available": False,
                 "reason": "Required data missing (broadcast not linked or no prior webinar for date window)",
             }
@@ -287,7 +330,8 @@ async def list_contacts_for_metric(
 
         return {
             "metric": metric,
-            "webinar_number": webinar,
+            "webinar_number": w.number,
+            "webinar_id": w.id,
             "assignment_id": assignment,
             "unit": spec.unit,
             "total": len(items),
@@ -328,10 +372,15 @@ async def list_statistics_webinar_summaries(source: str = "auto"):
     return {"webinars": webinars, "meta": meta}
 
 
-@router.get("/webinars/{number}", response_model=ApiStatisticsWebinar)
-async def get_statistics_webinar(number: int, source: str = "auto"):
-    """Fully-processed single webinar by number."""
-    webinar = await stats_svc.get_statistics_webinar_one(source=source, number=number)
+@router.get("/webinars/{webinar_id}", response_model=ApiStatisticsWebinar)
+async def get_statistics_webinar(webinar_id: str, source: str = "auto"):
+    """Fully-processed single webinar by webinar_id (the row's UUID, or
+    the synthetic `stat-wNNN` id from the workbook source).
+
+    Path used to take a number; switched to webinar_id so A/B variants
+    sharing a number can be addressed separately.
+    """
+    webinar = await stats_svc.get_statistics_webinar_one(source=source, webinar_id=webinar_id)
     if webinar is None:
-        raise HTTPException(status_code=404, detail=f"Webinar {number} not found")
+        raise HTTPException(status_code=404, detail=f"Webinar {webinar_id} not found")
     return webinar

@@ -102,6 +102,13 @@ export interface ApiSender {
 export interface ApiWebinar {
   id: string;
   number: number;
+  /** Free-text A/B variant label, e.g. "Account A". null for the unique
+   * row of a non-variant number. Two webinars with the same `number` must
+   * have different `variant_label`s; one row per number may have null. */
+  variant_label: string | null;
+  /** ConnectorCredential.id of the WebinarGeek account this variant uses
+   * for sync. null → use the credential row named 'default'. */
+  webinargeek_credential_id: string | null;
   date: string;
   status: string;
   broadcast_id: string | null;
@@ -536,7 +543,12 @@ export async function fetchWebinars(): Promise<{ webinars: ApiWebinar[] }> {
   return res.json();
 }
 
-export async function createWebinar(data: { number: number; date: string }): Promise<ApiWebinar> {
+export async function createWebinar(data: {
+  number: number;
+  date: string;
+  variant_label?: string | null;
+  webinargeek_credential_id?: string | null;
+}): Promise<ApiWebinar> {
   const res = await fetch(`${API_URL}/outreach/webinars`, {
     method: "POST",
     headers: jsonHeaders(),
@@ -551,14 +563,84 @@ export async function createWebinar(data: { number: number; date: string }): Pro
 
 export async function updateWebinar(
   webinarId: string,
-  data: Partial<{ number: number; date: string; status: string; broadcast_id: string; main_title: string; registration_link: string; unsubscribe_link: string }>
+  data: Partial<{
+    number: number;
+    date: string;
+    status: string;
+    broadcast_id: string;
+    main_title: string;
+    registration_link: string;
+    unsubscribe_link: string;
+    variant_label: string | null;
+    webinargeek_credential_id: string | null;
+  }>
 ): Promise<ApiWebinar> {
   const res = await fetch(`${API_URL}/outreach/webinars/${webinarId}`, {
     method: "PUT",
     headers: jsonHeaders(),
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error("Failed to update webinar");
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to update webinar");
+  }
+  return res.json();
+}
+
+/* ── WebinarGeek connector credentials (multi-account) ────────────────── */
+
+export interface ApiWgCredential {
+  id: string;
+  name: string;
+  api_key_masked: string;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export async function fetchWgCredentials(): Promise<{ credentials: ApiWgCredential[] }> {
+  const res = await fetch(`${API_URL}/connectors/webinargeek/credentials`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to fetch WebinarGeek credentials");
+  return res.json();
+}
+
+export async function createWgCredential(data: { name: string; api_key: string }): Promise<ApiWgCredential> {
+  const res = await fetch(`${API_URL}/connectors/webinargeek/credentials`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to create credential");
+  }
+  return res.json();
+}
+
+export async function updateWgCredential(
+  credentialId: string,
+  data: { name?: string; api_key?: string },
+): Promise<ApiWgCredential> {
+  const res = await fetch(`${API_URL}/connectors/webinargeek/credentials/${credentialId}`, {
+    method: "PUT",
+    headers: jsonHeaders(),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to update credential");
+  }
+  return res.json();
+}
+
+export async function deleteWgCredential(credentialId: string): Promise<{ deleted: boolean }> {
+  const res = await fetch(`${API_URL}/connectors/webinargeek/credentials/${credentialId}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? "Failed to delete credential");
+  }
   return res.json();
 }
 
@@ -1202,11 +1284,22 @@ export interface ApiStatisticsRow {
    * was null/0 — surfaces a tag on the row so operators know the
    * denominator is the planned number, not the live sent number. */
   usedFallback: boolean;
+  /** Set on the synthetic NO LIST DATA row only, when sibling A/B variants
+   * exist for this webinar's number. The Yes/Maybe/booked-call portion of
+   * NO LIST DATA can't be split between variants (GHL stores only N), so
+   * the same numbers appear on both variants' NO LIST DATA rows. The UI
+   * renders a "shared signals" tag when this is true. */
+  sharedAcrossVariants?: boolean;
 }
 
 export interface ApiStatisticsWebinar {
   id: string;
+  /** Underlying Webinar.id (UUID). Use this for drill-down requests and
+   * client-side keying so A/B variants don't collide. */
+  webinarId: string | null;
   number: number;
+  /** Free-text variant tag — null for non-variant webinars. */
+  variantLabel: string | null;
   date: string | null;
   title: string | null;
   workbookRow: number;
@@ -1215,6 +1308,9 @@ export interface ApiStatisticsWebinar {
   /** Same fallback semantics as ApiStatisticsRow.usedFallback — applies
    * to the parent summary's rate metrics. */
   usedFallback: boolean;
+  /** True when another webinar shares this `number` (A/B variant). The
+   * UI renders a small variant pill and uses this to scope state by id. */
+  hasSiblingVariants: boolean;
   rows: ApiStatisticsRow[];
 }
 
@@ -1240,8 +1336,16 @@ export async function fetchStatisticsWebinars(source: "auto" | "ghl" | "workbook
 }
 
 export interface ApiStatisticsWebinarSummary {
+  /** Synthetic id like "stat-w136" or "stat-w136-Account A". Stable per
+   * variant — used as a React key. */
   id: string;
+  /** Underlying Webinar.id (UUID). Pass to fetchStatisticsWebinar() and
+   * fetchStatisticsContacts() to disambiguate variants. */
+  webinarId: string | null;
   number: number;
+  /** Free-text variant tag, e.g. "Account A". null for the unique row of
+   * a non-variant number. */
+  variantLabel: string | null;
   date: string | null;
   title: string | null;
   status: string | null;
@@ -1260,13 +1364,13 @@ export async function fetchStatisticsWebinarList(
 }
 
 export async function fetchStatisticsWebinar(
-  number: number,
+  webinarId: string,
   source: "auto" | "ghl" | "workbook" = "auto",
 ): Promise<ApiStatisticsWebinar> {
-  const res = await fetch(`${API_URL}/statistics/webinars/${number}?source=${source}`, {
+  const res = await fetch(`${API_URL}/statistics/webinars/${webinarId}?source=${source}`, {
     headers: authHeaders(),
   });
-  if (!res.ok) throw new Error(`Failed to fetch webinar ${number}`);
+  if (!res.ok) throw new Error(`Failed to fetch webinar ${webinarId}`);
   return res.json();
 }
 
@@ -1290,6 +1394,7 @@ export interface ContactDrilldownItem {
 export interface ContactDrilldownResponse {
   metric: string;
   webinar_number: number;
+  webinar_id: string | null;
   assignment_id: string | null;
   unit: "contact" | "opportunity";
   total: number;
@@ -1299,15 +1404,17 @@ export interface ContactDrilldownResponse {
 }
 
 export async function fetchStatisticsContacts(params: {
-  webinar: number;
+  /** Either webinarId (preferred — disambiguates A/B variants) or
+   * webinarNumber (back-compat; resolves to the unlabeled variant). */
+  webinarId?: string | null;
+  webinarNumber?: number | null;
   metric: string;
   assignment?: string | null;
   limit?: number;
 }): Promise<ContactDrilldownResponse> {
-  const qs = new URLSearchParams({
-    webinar: String(params.webinar),
-    metric: params.metric,
-  });
+  const qs = new URLSearchParams({ metric: params.metric });
+  if (params.webinarId) qs.set("webinar_id", params.webinarId);
+  else if (params.webinarNumber != null) qs.set("webinar", String(params.webinarNumber));
   if (params.assignment) qs.set("assignment", params.assignment);
   if (params.limit) qs.set("limit", String(params.limit));
   const res = await fetch(`${API_URL}/statistics/contacts?${qs.toString()}`, {

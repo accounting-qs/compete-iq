@@ -12,6 +12,11 @@ import {
   syncAllWgSubscribers,
   fetchWgSubscribers,
   wgSubscribersCsvUrl,
+  fetchWgCredentials,
+  createWgCredential,
+  updateWgCredential,
+  deleteWgCredential,
+  type ApiWgCredential,
   type WgCredentialStatus,
   type WgWebinar,
   type WgSubscriber,
@@ -185,10 +190,28 @@ function ConfigTab(props: {
 }) {
   const { status, apiKeyInput, setApiKeyInput, onSave, onDelete, saving } = props;
   return (
+    <div className="space-y-4">
+      <DefaultWgConfigCard {...{ status, apiKeyInput, setApiKeyInput, onSave, onDelete, saving }} />
+      <AdditionalWgCredentialsCard />
+    </div>
+  );
+}
+
+/* ─── Default WG credential — legacy single-credential editor ─────────── */
+function DefaultWgConfigCard(props: {
+  status: WgCredentialStatus | null;
+  apiKeyInput: string;
+  setApiKeyInput: (v: string) => void;
+  onSave: () => void;
+  onDelete: () => void;
+  saving: boolean;
+}) {
+  const { status, apiKeyInput, setApiKeyInput, onSave, onDelete, saving } = props;
+  return (
     <section className="rounded-lg border border-zinc-200 dark:border-zinc-800/60 bg-white dark:bg-zinc-900/40 p-4">
-      <h2 className="text-sm font-bold text-zinc-900 dark:text-zinc-100 mb-1">WebinarGeek API</h2>
+      <h2 className="text-sm font-bold text-zinc-900 dark:text-zinc-100 mb-1">WebinarGeek API (default)</h2>
       <p className="text-xs text-zinc-500 mb-4">
-        Connect your API key to pull broadcasts and subscribers.
+        The default credential — used by every webinar that hasn't picked a specific account.
       </p>
 
       {status?.configured ? (
@@ -230,6 +253,180 @@ function ConfigTab(props: {
           </div>
         </div>
       )}
+    </section>
+  );
+}
+
+/* ─── Additional WG credentials (multi-account) ───────────────────────
+ * Each row is a named WebinarGeek API key. Webinar variants pick one of
+ * these on the new-webinar form so an A/B test can target two different
+ * WebinarGeek workspaces. The 'default' row stays managed by the legacy
+ * card above and is hidden here. */
+function AdditionalWgCredentialsCard() {
+  const [rows, setRows] = useState<ApiWgCredential[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newKey, setNewKey] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const { credentials } = await fetchWgCredentials();
+      setRows(credentials.filter((c) => c.name !== "default"));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load credentials");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function handleCreate() {
+    setError(null);
+    if (!newName.trim() || !newKey.trim()) return;
+    setCreating(true);
+    try {
+      await createWgCredential({ name: newName.trim(), api_key: newKey.trim() });
+      setNewName("");
+      setNewKey("");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to add credential");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function handleRename(c: ApiWgCredential) {
+    const next = prompt(`Rename "${c.name}" to:`, c.name);
+    if (!next || next.trim() === c.name) return;
+    setBusyId(c.id);
+    setError(null);
+    try {
+      await updateWgCredential(c.id, { name: next.trim() });
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to rename");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleReplaceKey(c: ApiWgCredential) {
+    const next = prompt(`Paste new API key for "${c.name}":`);
+    if (!next || !next.trim()) return;
+    setBusyId(c.id);
+    setError(null);
+    try {
+      await updateWgCredential(c.id, { api_key: next.trim() });
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to update key");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleDelete(c: ApiWgCredential) {
+    if (!confirm(`Delete credential "${c.name}"? Variants using it will fall back to the default credential.`)) return;
+    setBusyId(c.id);
+    setError(null);
+    try {
+      await deleteWgCredential(c.id);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to delete");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-zinc-200 dark:border-zinc-800/60 bg-white dark:bg-zinc-900/40 p-4">
+      <h2 className="text-sm font-bold text-zinc-900 dark:text-zinc-100 mb-1">Additional WebinarGeek accounts</h2>
+      <p className="text-xs text-zinc-500 mb-4">
+        Add one more credential per WebinarGeek workspace you want to A/B test against. Each variant on the
+        Planning page picks a credential from this list. The webinar's broadcast must live in the chosen
+        account, otherwise sync will return 404.
+      </p>
+
+      {error && (
+        <div className="mb-3 px-3 py-2 rounded-md bg-red-500/10 border border-red-500/30 text-xs text-red-500">{error}</div>
+      )}
+
+      {loading ? (
+        <div className="text-xs text-zinc-500">Loading…</div>
+      ) : rows.length === 0 ? (
+        <div className="text-xs text-zinc-500 italic mb-3">No additional accounts yet.</div>
+      ) : (
+        <div className="overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-800/60 mb-4">
+          <table className="w-full text-xs">
+            <thead className="bg-zinc-50 dark:bg-zinc-900/60">
+              <tr>
+                <th className="text-left px-3 py-2 font-semibold text-zinc-600 dark:text-zinc-400">Name</th>
+                <th className="text-left px-3 py-2 font-semibold text-zinc-600 dark:text-zinc-400">API key</th>
+                <th className="text-right px-3 py-2 font-semibold text-zinc-600 dark:text-zinc-400">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((c) => (
+                <tr key={c.id} className="border-t border-zinc-200 dark:border-zinc-800/40">
+                  <td className="px-3 py-2 font-medium text-zinc-800 dark:text-zinc-200">{c.name}</td>
+                  <td className="px-3 py-2 font-mono text-zinc-600 dark:text-zinc-400">{c.api_key_masked}</td>
+                  <td className="px-3 py-2 text-right">
+                    <div className="inline-flex gap-1.5">
+                      <button
+                        disabled={busyId === c.id}
+                        onClick={() => handleRename(c)}
+                        className="px-2 py-1 rounded text-[10px] font-semibold border border-zinc-300 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                      >Rename</button>
+                      <button
+                        disabled={busyId === c.id}
+                        onClick={() => handleReplaceKey(c)}
+                        className="px-2 py-1 rounded text-[10px] font-semibold border border-zinc-300 dark:border-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+                      >Replace key</button>
+                      <button
+                        disabled={busyId === c.id}
+                        onClick={() => handleDelete(c)}
+                        className="px-2 py-1 rounded text-[10px] font-semibold border border-red-500/40 text-red-500 hover:bg-red-500/10 disabled:opacity-50"
+                      >Delete</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Add form */}
+      <div className="grid grid-cols-1 sm:grid-cols-[1fr_2fr_auto] gap-2">
+        <input
+          type="text"
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          placeholder='Account name (e.g. "Account B")'
+          className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700/60 rounded-md px-3 py-1.5 text-xs text-zinc-800 dark:text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+        />
+        <input
+          type="password"
+          value={newKey}
+          onChange={(e) => setNewKey(e.target.value)}
+          placeholder="WebinarGeek API key"
+          className="bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700/60 rounded-md px-3 py-1.5 text-xs text-zinc-800 dark:text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+        />
+        <button
+          onClick={handleCreate}
+          disabled={creating || !newName.trim() || !newKey.trim()}
+          className="px-3 py-1.5 text-xs rounded-md bg-violet-600 hover:bg-violet-500 text-white font-semibold disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+        >
+          {creating ? "Adding…" : "Add account"}
+        </button>
+      </div>
     </section>
   );
 }

@@ -26,7 +26,10 @@ function ExternalIcon() {
 
 export function StatisticsContactsPage() {
   const params = useSearchParams();
-  const webinar = Number(params.get("webinar"));
+  // Prefer webinar_id (UUID) — disambiguates A/B variants. Fall back to
+  // the legacy `webinar` (number) param for any old links still around.
+  const webinarId = params.get("webinar_id");
+  const webinarNumber = params.get("webinar") ? Number(params.get("webinar")) : null;
   const metric = params.get("metric") ?? "";
   const assignment = params.get("assignment") ?? null;
   const listLabel = params.get("list") ?? null; // optional display label
@@ -36,15 +39,15 @@ export function StatisticsContactsPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!webinar || !metric) {
+    if ((!webinarId && !webinarNumber) || !metric) {
       setLoading(false);
-      setError("Missing required query params: webinar, metric");
+      setError("Missing required query params: webinar_id (or webinar) and metric");
       return;
     }
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetchStatisticsContacts({ webinar, metric, assignment });
+        const res = await fetchStatisticsContacts({ webinarId, webinarNumber, metric, assignment });
         if (cancelled) return;
         setData(res);
       } catch (e) {
@@ -54,7 +57,7 @@ export function StatisticsContactsPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [webinar, metric, assignment]);
+  }, [webinarId, webinarNumber, metric, assignment]);
 
   if (loading) {
     return (

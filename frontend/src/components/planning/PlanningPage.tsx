@@ -12,8 +12,9 @@ import {
   fetchCustomLists, fetchCustomListCopies, createCustomListCopy as apiCreateCustomListCopy,
   startWebinarListExport, fetchActiveWebinarListExports, fetchLatestWebinarListExport,
   downloadWebinarListExport,
+  fetchWgCredentials,
   type ApiBucket, type ApiSender, type ApiWebinar, type ApiAssignment, type ApiCopy,
-  type ApiCustomList, type ApiWebinarListExportJob,
+  type ApiCustomList, type ApiWebinarListExportJob, type ApiWgCredential,
 } from "@/lib/api";
 import { VariationsModal, apiCopyToVariant, type CopyVariant } from "../shared/VariationsModal";
 import { ReleaseContactsModal } from "./ReleaseContactsModal";
@@ -145,6 +146,12 @@ interface Webinar {
   unsubscribeLink: string;
   lists: PlannedList[];
   expanded: boolean;
+  /** Free-text A/B variant label, e.g. "Account A". null if this webinar
+   * is the unique row for its number. */
+  variantLabel: string | null;
+  /** ConnectorCredential.id for the WebinarGeek account this variant
+   * uses for sync. null → use the credential row named 'default'. */
+  webinargeekCredentialId: string | null;
 }
 
 interface Sender {
@@ -430,6 +437,8 @@ export function PlanningPage() {
             unsubscribeLink: w.unsubscribe_link || "",
             lists,
             expanded: w.status === "planning",
+            variantLabel: w.variant_label,
+            webinargeekCredentialId: w.webinargeek_credential_id,
           });
         }
 
@@ -531,6 +540,17 @@ export function PlanningPage() {
   }, [webinars]);
   const [newWebinarNumber, setNewWebinarNumber] = useState(0);
   const [newWebinarDate, setNewWebinarDate] = useState("");
+  /** Free-text A/B variant label (e.g. "Account A"). Empty = no variant
+   * label, which is allowed only when no other webinar exists for this
+   * number. The form forces a non-empty label when the entered number
+   * matches an existing webinar. */
+  const [newWebinarVariantLabel, setNewWebinarVariantLabel] = useState("");
+  /** Selected WebinarGeek credential id for this variant. Empty string
+   * means "use default" (the legacy single-credential behavior). */
+  const [newWebinarWgCredentialId, setNewWebinarWgCredentialId] = useState("");
+  /** WG credentials list for the dropdown — fetched lazily when the new
+   * webinar / edit modals open. */
+  const [wgCredentials, setWgCredentials] = useState<ApiWgCredential[]>([]);
 
   // Edit Webinar modal state
   const [editWebinar, setEditWebinar] = useState<{ id: string; number: number; date: string; broadcastId: string; status: string; registrationLink: string; unsubscribeLink: string } | null>(null);
@@ -1386,13 +1406,41 @@ export function PlanningPage() {
     const { nextNumber, nextDate } = getNextWebinarDefaults();
     setNewWebinarNumber(nextNumber);
     setNewWebinarDate(nextDate);
+    setNewWebinarVariantLabel("");
+    setNewWebinarWgCredentialId("");
     setShowNewWebinarModal(true);
+    // Lazy-fetch WG credentials so the dropdown is populated by the time
+    // the user reaches the WebinarGeek field.
+    fetchWgCredentials()
+      .then((res) => setWgCredentials(res.credentials))
+      .catch((err) => console.error("Failed to load WG credentials:", err));
   };
+
+  /** Other webinars for the same number — used by the new-webinar modal
+   * to detect collisions and force a variant label. */
+  const siblingsForNewNumber = useMemo(
+    () => webinars.filter((w) => w.number === newWebinarNumber),
+    [webinars, newWebinarNumber],
+  );
 
   const handleCreateWebinar = async () => {
     if (!newWebinarNumber || !newWebinarDate) return;
+    const trimmedLabel = newWebinarVariantLabel.trim();
+    // Hard-prevent the obvious conflicts on the client; backend re-checks.
+    if (siblingsForNewNumber.length > 0 && !trimmedLabel) {
+      alert(
+        `Webinar ${newWebinarNumber} already exists. ` +
+        "Provide a Variant label to add it as an A/B variant.",
+      );
+      return;
+    }
     try {
-      const created = await apiCreateWebinar({ number: newWebinarNumber, date: newWebinarDate });
+      const created = await apiCreateWebinar({
+        number: newWebinarNumber,
+        date: newWebinarDate,
+        variant_label: trimmedLabel || null,
+        webinargeek_credential_id: newWebinarWgCredentialId || null,
+      });
       const d = new Date(newWebinarDate + "T00:00:00");
       const dateStr = d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
       const newWebinar: Webinar = {
@@ -1406,6 +1454,8 @@ export function PlanningPage() {
         unsubscribeLink: created.unsubscribe_link || "",
         lists: [],
         expanded: true,
+        variantLabel: created.variant_label,
+        webinargeekCredentialId: created.webinargeek_credential_id,
       };
       setWebinars((prev) => [newWebinar, ...prev]);
       // Auto-open assignment form for the new webinar
@@ -1669,6 +1719,14 @@ export function PlanningPage() {
                     <td className="px-2 py-1.5" onClick={() => toggleWebinar(w.id)}>
                       <div className="flex items-center gap-2">
                         <span className="text-zinc-900 dark:text-zinc-100 font-bold text-sm">{w.number}</span>
+                        {w.variantLabel && (
+                          <span
+                            title={`A/B variant: ${w.variantLabel}`}
+                            className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-violet-500/15 text-violet-500 border border-violet-500/30"
+                          >
+                            {w.variantLabel}
+                          </span>
+                        )}
                         <span className="text-[11px] text-zinc-500">{w.date}</span>
                         {w.broadcastId && w.broadcastId !== "—" && (
                           <span className="text-[9px] text-zinc-500 font-mono bg-zinc-100 dark:bg-zinc-800/60 px-1 py-0.5 rounded border border-zinc-300 dark:border-zinc-700/30">ID: {w.broadcastId}</span>
@@ -2750,6 +2808,50 @@ export function PlanningPage() {
                   onClick={(e) => (e.target as HTMLInputElement).showPicker?.()}
                   className="w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-colors [color-scheme:dark] cursor-pointer [&::-webkit-calendar-picker-indicator]:opacity-70 [&::-webkit-calendar-picker-indicator]:invert [&::-webkit-calendar-picker-indicator]:cursor-pointer"
                 />
+              </div>
+              {/* Variant label — required when this number already exists */}
+              <div>
+                <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-medium block mb-1.5 flex items-center gap-2">
+                  Variant Label
+                  {siblingsForNewNumber.length > 0 && (
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-500/15 text-amber-500 border border-amber-500/30 normal-case">
+                      Required — W{newWebinarNumber} already exists
+                    </span>
+                  )}
+                  <span className="text-zinc-500 normal-case font-normal">(optional for a single webinar; required for A/B variants)</span>
+                </label>
+                <input
+                  type="text"
+                  value={newWebinarVariantLabel}
+                  onChange={(e) => setNewWebinarVariantLabel(e.target.value)}
+                  placeholder='e.g. "Account A" / "WG-Skarpe"'
+                  className="w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-colors"
+                />
+                {siblingsForNewNumber.length > 0 && (
+                  <div className="mt-1.5 text-[10px] text-zinc-500">
+                    Existing variant{siblingsForNewNumber.length === 1 ? "" : "s"} for W{newWebinarNumber}: {" "}
+                    {siblingsForNewNumber.map((s) => s.variantLabel ?? "(no label)").join(", ")}
+                  </div>
+                )}
+              </div>
+              <div>
+                <label className="text-[11px] text-zinc-500 uppercase tracking-wider font-medium block mb-1.5">WebinarGeek Account</label>
+                <select
+                  value={newWebinarWgCredentialId}
+                  onChange={(e) => setNewWebinarWgCredentialId(e.target.value)}
+                  className="w-full bg-zinc-50 dark:bg-zinc-800 border border-zinc-300 dark:border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-800 dark:text-zinc-200 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-colors"
+                >
+                  <option value="">Default credential</option>
+                  {wgCredentials
+                    .filter((c) => c.name !== "default")
+                    .map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                </select>
+                <div className="mt-1.5 text-[10px] text-zinc-500">
+                  Pick a different account when this variant runs on a separate WebinarGeek workspace.
+                  Manage accounts in the Connectors page.
+                </div>
               </div>
               {/* Preview */}
               {newWebinarNumber > 0 && newWebinarDate && (

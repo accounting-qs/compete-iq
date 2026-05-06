@@ -90,9 +90,22 @@ class Webinar(Base):
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
     user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     number: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Free-text label that distinguishes A/B variants of the same number
+    # (e.g. "Account A", "WG-Skarpe"). NULL means "single, non-variant
+    # webinar"; the partial unique index allows at most one such row per
+    # (user_id, number). When NOT NULL, (user_id, number, variant_label)
+    # is unique.
+    variant_label: Mapped[Optional[str]] = mapped_column(Text)
     date: Mapped[datetime] = mapped_column(Date, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="planning")
     broadcast_id: Mapped[Optional[str]] = mapped_column(Text)
+    # Which WebinarGeek credential to use for this variant's broadcast.
+    # NULL → fall back to the credential named 'default' in
+    # connector_credentials (preserves pre-multi-credential behavior).
+    webinargeek_credential_id: Mapped[Optional[str]] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("connector_credentials.id", ondelete="SET NULL"),
+    )
     main_title: Mapped[Optional[str]] = mapped_column(Text)
     registration_link: Mapped[Optional[str]] = mapped_column(Text)
     unsubscribe_link: Mapped[Optional[str]] = mapped_column(Text)
@@ -101,11 +114,19 @@ class Webinar(Base):
 
     assignments: Mapped[list["WebinarListAssignment"]] = relationship(back_populates="webinar", lazy="selectin")
 
+    # The two unique partial indexes below are managed in migration 034 via
+    # raw SQL because Alembic/SQLAlchemy don't have a clean cross-DB way to
+    # express partial-unique-on-NULL semantics. They are documented here
+    # but not declared in __table_args__:
+    #   uq_webinars_user_number_no_variant: UNIQUE (user_id, number)
+    #     WHERE variant_label IS NULL
+    #   uq_webinars_user_number_variant:    UNIQUE (user_id, number, variant_label)
+    #     WHERE variant_label IS NOT NULL
     __table_args__ = (
-        UniqueConstraint("user_id", "number", name="uq_webinars_user_number"),
         CheckConstraint("status IN ('planning', 'sent', 'archived')", name="ck_webinars_status"),
         Index("ix_webinars_user_id", "user_id"),
         Index("ix_webinars_status", "status"),
+        Index("ix_webinars_wg_credential", "webinargeek_credential_id"),
     )
 
 

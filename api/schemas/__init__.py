@@ -80,6 +80,13 @@ class SenderUpdate(BaseModel):
 class WebinarCreate(BaseModel):
     number: int
     date: datetime.date
+    # A/B variants of the same `number` distinguish themselves with a
+    # free-text label (e.g. "Account A"). NULL means the webinar is the
+    # sole entry for this number; only one such row is allowed per number.
+    variant_label: str | None = None
+    # Per-variant WebinarGeek credential. NULL → fall back to the row in
+    # connector_credentials with name='default'.
+    webinargeek_credential_id: str | None = None
 
 class WebinarUpdate(BaseModel):
     number: int | None = None
@@ -89,6 +96,8 @@ class WebinarUpdate(BaseModel):
     main_title: str | None = None
     registration_link: str | None = None
     unsubscribe_link: str | None = None
+    variant_label: str | None = None
+    webinargeek_credential_id: str | None = None
 
 
 # ── Assignments ────────────────────────────────────────────────────────────

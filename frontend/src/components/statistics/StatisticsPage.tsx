@@ -257,13 +257,16 @@ const DRILLDOWN_KEYS = new Set([
 ]);
 
 function MetricCell({
-  value, col, bold, boundary, webinarNumber, assignmentId, listLabel, rowMetrics,
+  value, col, bold, boundary, webinarNumber, webinarId, assignmentId, listLabel, rowMetrics,
 }: {
   value: number | null | undefined;
   col: MetricColumn;
   bold?: boolean;
   boundary?: boolean;
   webinarNumber?: number;
+  /** Webinar UUID — preferred for drilldown so A/B variants stay separate.
+   * The drilldown URL falls back to ?webinar={number} when this is absent. */
+  webinarId?: string | null;
   assignmentId?: string | null;
   listLabel?: string | null;
   rowMetrics?: Record<string, number | null>;
@@ -271,7 +274,7 @@ function MetricCell({
   const formatted = formatMetricValue(value, col);
   const isNull = value === null || value === undefined;
   const isNonZero = typeof value === "number" && value > 0;
-  const drillable = webinarNumber != null && DRILLDOWN_KEYS.has(col.key) && isNonZero;
+  const drillable = (webinarId != null || webinarNumber != null) && DRILLDOWN_KEYS.has(col.key) && isNonZero;
 
   // Source-missing warning: only fires when the cell is null AND the metric
   // has declared formulaSources AND at least one of those sources is null on
@@ -286,10 +289,9 @@ function MetricCell({
   const content = drillable ? (
     <a
       href={(() => {
-        const qs = new URLSearchParams({
-          webinar: String(webinarNumber),
-          metric: col.key,
-        });
+        const qs = new URLSearchParams({ metric: col.key });
+        if (webinarId) qs.set("webinar_id", webinarId);
+        else if (webinarNumber != null) qs.set("webinar", String(webinarNumber));
         if (assignmentId) qs.set("assignment", assignmentId);
         if (listLabel) qs.set("list", listLabel);
         return `/statistics/contacts?${qs.toString()}`;
@@ -450,13 +452,16 @@ function placeholderWebinar(
 ): ApiStatisticsWebinar {
   return {
     id: s.id,
+    webinarId: s.webinarId,
     number: s.number,
+    variantLabel: s.variantLabel,
     date: s.date,
     title: s.title,
     workbookRow: 0,
     source: source === "workbook" ? "workbook_mock" : "ghl",
     summary: EMPTY_METRICS,
     usedFallback: false,
+    hasSiblingVariants: false,
     rows: [],
   };
 }
@@ -567,6 +572,18 @@ function renderGroupedRows(
       <td className={`px-2 py-1.5 ${W_DESC} ${desc}`}>
         <span className={`block truncate ${isSpecial ? "text-zinc-500" : "text-zinc-800 dark:text-zinc-300"}`} title={row.description ?? undefined}>
           {row.description ?? (row.kind === "nonjoiners" ? "Nonjoiners" : row.kind === "no_list_data" ? "NO LIST DATA" : "")}
+          {row.kind === "no_list_data" && row.sharedAcrossVariants && (
+            <span
+              title={
+                "GHL invite-response and booked-call signals are stored per webinar number, not per A/B variant. " +
+                "These leftover counts therefore appear on both variants' NO LIST DATA rows. " +
+                "WebinarGeek-derived counts (registrations, attendance) are correctly scoped per broadcast."
+              }
+              className="ml-1.5 inline-block px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-500/15 text-amber-500 border border-amber-500/30 align-middle not-italic"
+            >
+              shared signals
+            </span>
+          )}
         </span>
       </td>
       <td className={`px-2 py-1.5 ${W_COPY} ${copy}`}>
@@ -598,6 +615,7 @@ function renderGroupedRows(
           col={col}
           boundary={isGroupBoundary(idx)}
           webinarNumber={w.number}
+          webinarId={w.webinarId}
           assignmentId={row.assignmentId}
           listLabel={row.description}
           rowMetrics={row.metrics}
@@ -718,11 +736,12 @@ function renderGroupedRows(
 export function StatisticsPage() {
   const [webinars, setWebinars] = useState<ApiStatisticsWebinar[]>([]);
   /** Lightweight summary (status + listCount) for rows whose full metrics
-   * haven't loaded yet. Looked up by number. */
-  const [summariesByNumber, setSummariesByNumber] = useState<Map<number, ApiStatisticsWebinarSummary>>(new Map());
-  /** Webinar numbers whose per-webinar fetch is still in flight. */
-  const [loadingNumbers, setLoadingNumbers] = useState<Set<number>>(new Set());
-  const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
+   * haven't loaded yet. Keyed by the synthetic `id` (e.g. "stat-w136" or
+   * "stat-w136-Account A") so A/B variants of the same number don't collide. */
+  const [summariesById, setSummariesById] = useState<Map<string, ApiStatisticsWebinarSummary>>(new Map());
+  /** Synthetic ids whose per-webinar fetch is still in flight. */
+  const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [meta, setMeta] = useState<StatisticsMeta | null>(null);
@@ -775,19 +794,25 @@ export function StatisticsPage() {
 
   async function handleWgSync() {
     if (!wgSelected) return;
-    const num = Number(wgSelected);
-    const summary = summariesByNumber.get(num);
+    // wgSelected is now the synthetic id (per variant). The dropdown label
+    // shows the user-facing number + variant; under the hood we use the id
+    // so two siblings on the same number target the right rows.
+    const summary = summariesById.get(wgSelected);
+    if (!summary) return;
     setWgSyncing(true);
     setWgMessage(null);
     try {
       const parts: string[] = [];
-      if (summary?.broadcastId) {
+      if (summary.broadcastId) {
         const res = await syncWgSubscribers(summary.broadcastId);
         parts.push(`WG: ${res.total} subs`);
       } else {
         parts.push("WG: no broadcast linked");
       }
-      await triggerGhlWebinarSync(num);
+      // GHL sync is keyed on webinar number — both variants of the same
+      // number share the same GHL pull, so this triggers either variant's
+      // backing data correctly.
+      await triggerGhlWebinarSync(summary.number);
       parts.push("GHL sync started");
       setWgMessage(parts.join(" · "));
     } catch (e) {
@@ -823,48 +848,60 @@ export function StatisticsPage() {
       }
       if (cancelled) return;
 
-      summaries.sort((a, b) => b.number - a.number);
+      // Sort: number desc, then variant label asc so siblings group together.
+      summaries.sort((a, b) => {
+        if (b.number !== a.number) return b.number - a.number;
+        return (a.variantLabel ?? "").localeCompare(b.variantLabel ?? "");
+      });
       setMeta(metaResp);
-      setSummariesByNumber(new Map(summaries.map((s) => [s.number, s])));
+      setSummariesById(new Map(summaries.map((s) => [s.id, s])));
       setWebinars(summaries.map((s) => placeholderWebinar(s, metaResp.source)));
-      setLoadingNumbers(new Set(summaries.map((s) => s.number)));
+      setLoadingIds(new Set(summaries.map((s) => s.id)));
       if (summaries.length > 0) {
-        setExpandedIds(new Set([summaries[0].number]));
+        setExpandedIds(new Set([summaries[0].id]));
       }
       setLoading(false);
 
-      const loadOne = async (num: number) => {
+      const loadOne = async (id: string, webinarId: string | null) => {
+        if (!webinarId) {
+          // Workbook source has no UUID — its synthetic id is the route
+          // segment the backend expects. Fall back to passing the id as the
+          // resource identifier; the backend matches on the synthetic id
+          // for workbook rows.
+          webinarId = id;
+        }
         try {
-          const w = await fetchStatisticsWebinar(num);
+          const w = await fetchStatisticsWebinar(webinarId);
           if (cancelled) return;
-          setWebinars((prev) => prev.map((p) => (p.number === num ? w : p)));
+          setWebinars((prev) => prev.map((p) => (p.id === id ? w : p)));
         } catch (err) {
-          console.error(`Failed to load webinar ${num}:`, err);
+          console.error(`Failed to load webinar ${id}:`, err);
         } finally {
           if (!cancelled) {
-            setLoadingNumbers((prev) => {
+            setLoadingIds((prev) => {
               const next = new Set(prev);
-              next.delete(num);
+              next.delete(id);
               return next;
             });
           }
         }
       };
 
-      const numbers = summaries.map((s) => s.number);
       // Priority pair — kicks off in parallel so the user sees the
       // auto-expanded latest webinar fill in fast.
-      await Promise.all(numbers.slice(0, PRIORITY).map(loadOne));
+      await Promise.all(
+        summaries.slice(0, PRIORITY).map((s) => loadOne(s.id, s.webinarId)),
+      );
       if (cancelled) return;
 
       // Worker pool for the rest.
-      const queue = numbers.slice(PRIORITY);
+      const queue = summaries.slice(PRIORITY);
       const workers = Array.from(
         { length: Math.min(CONCURRENCY, queue.length) },
         async () => {
           while (queue.length > 0 && !cancelled) {
-            const n = queue.shift();
-            if (n !== undefined) await loadOne(n);
+            const s = queue.shift();
+            if (s !== undefined) await loadOne(s.id, s.webinarId);
           }
         },
       );
@@ -880,6 +917,7 @@ export function StatisticsPage() {
     const q = searchQuery.toLowerCase();
     return webinars.filter((w) => {
       if (String(w.number).includes(q)) return true;
+      if (w.variantLabel?.toLowerCase().includes(q)) return true;
       if (w.title?.toLowerCase().includes(q)) return true;
       if (w.date?.toLowerCase().includes(q)) return true;
       return w.rows.some(
@@ -901,11 +939,11 @@ export function StatisticsPage() {
   }, [webinars]);
 
   /* ── Toggle expand ──────────────────────────────────────────────── */
-  const toggleExpand = (num: number) => {
+  const toggleExpand = (id: string) => {
     setExpandedIds((prev) => {
       const next = new Set(prev);
-      if (next.has(num)) next.delete(num);
-      else next.add(num);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
@@ -977,13 +1015,14 @@ export function StatisticsPage() {
                 >
                   <option value="">Select webinar to sync…</option>
                   {webinars.map((w) => {
-                    const summary = summariesByNumber.get(w.number);
+                    const summary = summariesById.get(w.id);
                     const dateLabel = w.date ? new Date(w.date).toLocaleDateString() : "—";
                     const titleLabel = w.title ? ` · ${w.title}` : "";
+                    const variantLabel = w.variantLabel ? ` · ${w.variantLabel}` : "";
                     const noBroadcast = !summary?.broadcastId ? " · no WG broadcast" : "";
                     return (
-                      <option key={w.number} value={String(w.number)}>
-                        #{w.number} · {dateLabel}{titleLabel}{noBroadcast}
+                      <option key={w.id} value={w.id}>
+                        #{w.number}{variantLabel} · {dateLabel}{titleLabel}{noBroadcast}
                       </option>
                     );
                   })}
@@ -1084,9 +1123,9 @@ export function StatisticsPage() {
           </thead>
 
           {filteredWebinars.map((w) => {
-            const isExpanded = expandedIds.has(w.number);
-            const isLoading = loadingNumbers.has(w.number);
-            const summary = summariesByNumber.get(w.number);
+            const isExpanded = expandedIds.has(w.id);
+            const isLoading = loadingIds.has(w.id);
+            const summary = summariesById.get(w.id);
             // Use rows[] when loaded; fall back to the lightweight summary
             // count / status while metrics are still in flight.
             const listCount = w.rows.length > 0
@@ -1099,7 +1138,7 @@ export function StatisticsPage() {
                 {/* ── Parent row ─────────────────────────────────── */}
                 <tr
                   className="bg-zinc-100 dark:bg-zinc-800/40 hover:bg-zinc-200 dark:hover:bg-zinc-800/60 cursor-pointer border-t-2 border-zinc-300 dark:border-zinc-700/40 transition-colors"
-                  onClick={() => toggleExpand(w.number)}
+                  onClick={() => toggleExpand(w.id)}
                 >
                   <td className="px-2 py-2.5 text-center">
                     <svg
@@ -1113,6 +1152,14 @@ export function StatisticsPage() {
                   <td className="px-2 py-2.5">
                     <div className="flex items-center gap-2">
                       <span className="text-zinc-900 dark:text-zinc-100 font-bold text-sm">{w.number}</span>
+                      {w.variantLabel && (
+                        <span
+                          title={`A/B variant: ${w.variantLabel}`}
+                          className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-violet-500/15 text-violet-500 border border-violet-500/30"
+                        >
+                          {w.variantLabel}
+                        </span>
+                      )}
                       <span className="text-zinc-500">{w.date ?? "\u2014"}</span>
                       {isLoading && (
                         <span
@@ -1164,7 +1211,8 @@ export function StatisticsPage() {
                       bold
                       boundary={isGroupBoundary(idx)}
                       webinarNumber={w.number}
-                      listLabel={`Webinar ${w.number}`}
+                      webinarId={w.webinarId}
+                      listLabel={`Webinar ${w.number}${w.variantLabel ? " · " + w.variantLabel : ""}`}
                       rowMetrics={w.summary}
                     />
                   ))}

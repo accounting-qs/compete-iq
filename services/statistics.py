@@ -349,17 +349,26 @@ async def get_statistics_webinar_list(source: str = "auto") -> list[dict[str, An
     ]
 
 
-async def get_statistics_webinar_one(source: str, number: int) -> dict[str, Any] | None:
-    """Fully-processed single webinar by number, or None if missing."""
+async def get_statistics_webinar_one(
+    source: str,
+    webinar_id: str,
+) -> dict[str, Any] | None:
+    """Fully-processed single webinar by webinar_id, or None if missing.
+
+    Variant-aware: each A/B variant has its own UUID, so callers can
+    address them unambiguously.
+    """
     use_ghl = source != "workbook"
     source_label = "ghl" if use_ghl else "workbook_mock"
     if use_ghl:
         from services.ghl_statistics_source import GoHighLevelStatisticsSource
         src = GoHighLevelStatisticsSource()
-        raw = await src.get_raw_webinar(number)
+        raw = await src.get_raw_webinar(webinar_id)
         return _process_raw_webinar(raw, source_label) if raw else None
+    # Workbook source predates variants — single row per number, so the
+    # synthetic webinar id encodes only the number.
     raw_all = await _workbook_source.get_raw_webinars()
     for w in raw_all:
-        if w["number"] == number:
+        if f"stat-w{w['number']}" == webinar_id:
             return _process_raw_webinar(w, source_label)
     return None

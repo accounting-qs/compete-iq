@@ -56,11 +56,41 @@ async def create_webinar(
     db: AsyncSession = Depends(get_db),
     _: str = Depends(require_auth),
 ):
+    # Conflict rules mirror the partial unique indexes:
+    #   1. At most one row per (user_id, number) with NULL variant_label
+    #   2. (user_id, number, variant_label) must be unique when label is set
+    variant_label = (body.variant_label or "").strip() or None
     existing = await db.execute(
-        select(Webinar).where(Webinar.user_id == LLOYD_USER_ID, Webinar.number == body.number)
+        select(Webinar).where(
+            Webinar.user_id == LLOYD_USER_ID,
+            Webinar.number == body.number,
+        )
     )
-    if existing.scalar_one_or_none():
-        raise HTTPException(409, f"Webinar number {body.number} already exists")
+    siblings = list(existing.scalars().all())
+    if variant_label is None:
+        if siblings:
+            # Either there's already a non-variant row, or there are
+            # variant rows. In both cases we'd violate uniqueness — operator
+            # must give this one a label too.
+            raise HTTPException(
+                409,
+                f"Webinar number {body.number} already exists. "
+                "Provide a variant_label to add a parallel variant.",
+            )
+    else:
+        # Cannot mix labeled and unlabeled rows for the same number — if
+        # an unlabeled row exists, the operator should label it first.
+        if any(s.variant_label is None for s in siblings):
+            raise HTTPException(
+                409,
+                f"Webinar number {body.number} already exists without a variant label. "
+                "Label the existing webinar before adding a variant.",
+            )
+        if any(s.variant_label == variant_label for s in siblings):
+            raise HTTPException(
+                409,
+                f"Webinar number {body.number} variant '{variant_label}' already exists.",
+            )
 
     # Default registration_link and unsubscribe_link from the latest webinar
     latest_result = await db.execute(
@@ -73,6 +103,8 @@ async def create_webinar(
     webinar = Webinar(
         user_id=LLOYD_USER_ID,
         number=body.number,
+        variant_label=variant_label,
+        webinargeek_credential_id=body.webinargeek_credential_id,
         date=body.date,
         status="planning",
         registration_link=latest.registration_link if latest else None,

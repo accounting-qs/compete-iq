@@ -34,7 +34,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import require_auth
 from api.routers.outreach._helpers import LLOYD_USER_ID
-from db.models import BlocklistEntry, ConnectorCredential, WebinarGeekWebinar, WebinarGeekSubscriber
+from db.models import (
+    BlocklistEntry, ConnectorCredential, Webinar, WebinarGeekWebinar, WebinarGeekSubscriber,
+)
 from db.session import get_db
 from integrations import webinargeek_client as wg
 from integrations import openai_client as oai
@@ -139,13 +141,46 @@ def _mask(key: str) -> str:
     return f"{key[:4]}…{key[-4:]}"
 
 
-async def _get_api_key(db: AsyncSession) -> str:
+async def _get_api_key(db: AsyncSession, name: str = "default") -> str:
+    """Look up a WebinarGeek API key by credential name.
+
+    Defaults to the 'default' row, which preserves single-credential
+    behavior. Variants pass their own name (resolved from
+    Webinar.webinargeek_credential_id → ConnectorCredential.name).
+    """
     row = (await db.execute(
-        select(ConnectorCredential).where(ConnectorCredential.provider == PROVIDER)
+        select(ConnectorCredential).where(
+            ConnectorCredential.provider == PROVIDER,
+            ConnectorCredential.name == name,
+        )
     )).scalar_one_or_none()
     if not row:
-        raise HTTPException(status_code=400, detail="WebinarGeek API key not configured")
+        if name == "default":
+            raise HTTPException(status_code=400, detail="WebinarGeek API key not configured")
+        # Fall back to default if a named credential is missing — the
+        # operator might have renamed/removed the row referenced by a
+        # Webinar. Better to sync against default than fail.
+        return await _get_api_key(db, "default")
     return row.api_key
+
+
+async def _resolve_api_key_for_broadcast(db: AsyncSession, broadcast_id: str) -> str:
+    """Pick the right WG API key for a broadcast: if any Webinar references
+    this broadcast_id with a webinargeek_credential_id set, use that
+    credential's api_key. Otherwise fall back to the 'default' row.
+    """
+    cred_row = (await db.execute(
+        select(ConnectorCredential)
+        .join(Webinar, Webinar.webinargeek_credential_id == ConnectorCredential.id)
+        .where(
+            Webinar.broadcast_id == broadcast_id,
+            ConnectorCredential.provider == PROVIDER,
+        )
+        .limit(1)
+    )).scalar_one_or_none()
+    if cred_row:
+        return cred_row.api_key
+    return await _get_api_key(db, "default")
 
 
 def _subscriber_values(broadcast_id: str, s: dict) -> dict:
@@ -225,8 +260,16 @@ async def _sync_one_broadcast(db: AsyncSession, api_key: str, broadcast_id: str)
 # ---------------------------------------------------------------------------
 @router.get("/webinargeek", response_model=CredentialStatus)
 async def get_credential_status(db: AsyncSession = Depends(get_db)):
+    """Status of the legacy single-credential ('default' name).
+
+    Kept for back-compat with the old single-credential UI/API. New code
+    should use /webinargeek/credentials.
+    """
     row = (await db.execute(
-        select(ConnectorCredential).where(ConnectorCredential.provider == PROVIDER)
+        select(ConnectorCredential).where(
+            ConnectorCredential.provider == PROVIDER,
+            ConnectorCredential.name == "default",
+        )
     )).scalar_one_or_none()
     if not row:
         return CredentialStatus(configured=False)
@@ -245,9 +288,13 @@ async def set_credential(body: SetCredentialRequest, db: AsyncSession = Depends(
     if not ok:
         raise HTTPException(status_code=400, detail="Invalid WebinarGeek API key")
 
-    stmt = pg_insert(ConnectorCredential).values(provider=PROVIDER, api_key=api_key)
+    stmt = pg_insert(ConnectorCredential).values(
+        provider=PROVIDER,
+        name="default",
+        api_key=api_key,
+    )
     stmt = stmt.on_conflict_do_update(
-        index_elements=["provider"],
+        index_elements=["provider", "name"],
         set_={"api_key": api_key, "updated_at": datetime.now(timezone.utc)},
     )
     await db.execute(stmt)
@@ -256,7 +303,161 @@ async def set_credential(body: SetCredentialRequest, db: AsyncSession = Depends(
 
 @router.delete("/webinargeek")
 async def delete_credential(db: AsyncSession = Depends(get_db)):
-    await db.execute(delete(ConnectorCredential).where(ConnectorCredential.provider == PROVIDER))
+    """Delete the legacy 'default' WG credential."""
+    await db.execute(
+        delete(ConnectorCredential).where(
+            ConnectorCredential.provider == PROVIDER,
+            ConnectorCredential.name == "default",
+        )
+    )
+    return {"deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# WebinarGeek credentials — multi-account
+# ---------------------------------------------------------------------------
+class WgCredentialOut(BaseModel):
+    id: str
+    name: str
+    api_key_masked: str
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class WgCredentialListResponse(BaseModel):
+    credentials: list[WgCredentialOut]
+
+
+class WgCredentialCreate(BaseModel):
+    name: str
+    api_key: str
+
+
+class WgCredentialUpdate(BaseModel):
+    name: Optional[str] = None
+    api_key: Optional[str] = None
+
+
+def _wg_cred_out(row: ConnectorCredential) -> WgCredentialOut:
+    return WgCredentialOut(
+        id=row.id,
+        name=row.name,
+        api_key_masked=_mask(row.api_key),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+@router.get("/webinargeek/credentials", response_model=WgCredentialListResponse)
+async def list_wg_credentials(db: AsyncSession = Depends(get_db)):
+    """List all WebinarGeek credentials (the 'default' row plus any named
+    extras for variants). API keys are returned masked."""
+    rows = (await db.execute(
+        select(ConnectorCredential)
+        .where(ConnectorCredential.provider == PROVIDER)
+        .order_by(ConnectorCredential.name)
+    )).scalars().all()
+    return WgCredentialListResponse(credentials=[_wg_cred_out(r) for r in rows])
+
+
+@router.post("/webinargeek/credentials", response_model=WgCredentialOut, status_code=201)
+async def create_wg_credential(body: WgCredentialCreate, db: AsyncSession = Depends(get_db)):
+    name = body.name.strip()
+    api_key = body.api_key.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="api_key is required")
+
+    try:
+        ok = await wg.verify_api_key(api_key)
+    except wg.WebinarGeekError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    if not ok:
+        raise HTTPException(status_code=400, detail="Invalid WebinarGeek API key")
+
+    existing = (await db.execute(
+        select(ConnectorCredential).where(
+            ConnectorCredential.provider == PROVIDER,
+            ConnectorCredential.name == name,
+        )
+    )).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Credential named '{name}' already exists")
+
+    row = ConnectorCredential(provider=PROVIDER, name=name, api_key=api_key)
+    db.add(row)
+    await db.flush()
+    await db.refresh(row)
+    return _wg_cred_out(row)
+
+
+@router.put("/webinargeek/credentials/{credential_id}", response_model=WgCredentialOut)
+async def update_wg_credential(
+    credential_id: str,
+    body: WgCredentialUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    row = (await db.execute(
+        select(ConnectorCredential).where(
+            ConnectorCredential.id == credential_id,
+            ConnectorCredential.provider == PROVIDER,
+        )
+    )).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Credential not found")
+
+    if body.name is not None:
+        new_name = body.name.strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail="name cannot be empty")
+        if new_name != row.name:
+            clash = (await db.execute(
+                select(ConnectorCredential).where(
+                    ConnectorCredential.provider == PROVIDER,
+                    ConnectorCredential.name == new_name,
+                )
+            )).scalar_one_or_none()
+            if clash:
+                raise HTTPException(status_code=409, detail=f"Credential named '{new_name}' already exists")
+            row.name = new_name
+
+    if body.api_key is not None:
+        new_key = body.api_key.strip()
+        if not new_key:
+            raise HTTPException(status_code=400, detail="api_key cannot be empty")
+        try:
+            ok = await wg.verify_api_key(new_key)
+        except wg.WebinarGeekError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+        if not ok:
+            raise HTTPException(status_code=400, detail="Invalid WebinarGeek API key")
+        row.api_key = new_key
+
+    row.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+    await db.refresh(row)
+    return _wg_cred_out(row)
+
+
+@router.delete("/webinargeek/credentials/{credential_id}")
+async def delete_wg_credential(credential_id: str, db: AsyncSession = Depends(get_db)):
+    row = (await db.execute(
+        select(ConnectorCredential).where(
+            ConnectorCredential.id == credential_id,
+            ConnectorCredential.provider == PROVIDER,
+        )
+    )).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    if row.name == "default":
+        raise HTTPException(
+            status_code=400,
+            detail="The 'default' credential cannot be deleted — use PUT to clear or replace it.",
+        )
+    # Webinar.webinargeek_credential_id has ON DELETE SET NULL, so dependent
+    # variants will fall back to the default credential automatically.
+    await db.delete(row)
     return {"deleted": True}
 
 
@@ -439,24 +640,46 @@ async def list_broadcasts(
 @router.post("/webinargeek/webinars/refresh", response_model=RefreshResponse)
 async def refresh_broadcasts(db: AsyncSession = Depends(get_db)):
     """
-    Refresh strategy:
-      1) GET /webinars      → build {broadcast_id → webinar meta} map
-                              (gives us internal_title / "136", "137" etc.)
-      2) GET /broadcasts    → flat paginated list with all stats
-         Enrich each broadcast with its webinar meta, upsert.
+    Refresh strategy (multi-credential):
+      For each WebinarGeek credential row,
+        1) GET /webinars      → build {broadcast_id → webinar meta} map
+        2) GET /broadcasts    → flat paginated list with all stats
+        3) Enrich each broadcast with webinar meta, upsert.
+    Broadcasts are keyed by id; if two accounts somehow surface the same
+    id (rare), the last-written value wins. Errors from one credential
+    don't block the others.
     """
-    api_key = await _get_api_key(db)
-    try:
-        webinars = await wg.list_webinars(api_key)
-        broadcasts = await wg.list_broadcasts(api_key)
-    except wg.WebinarGeekError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+    creds = (await db.execute(
+        select(ConnectorCredential)
+        .where(ConnectorCredential.provider == PROVIDER)
+        .order_by(ConnectorCredential.name)
+    )).scalars().all()
+    if not creds:
+        raise HTTPException(status_code=400, detail="No WebinarGeek credentials configured")
 
-    meta = wg.build_broadcast_meta(webinars)
+    all_webinars: list = []
+    all_broadcasts: list = []
+    cred_errors: list[str] = []
+    for cred in creds:
+        try:
+            webinars = await wg.list_webinars(cred.api_key)
+            broadcasts = await wg.list_broadcasts(cred.api_key)
+            all_webinars.extend(webinars)
+            all_broadcasts.extend(broadcasts)
+        except wg.WebinarGeekError as e:
+            cred_errors.append(f"{cred.name}: {e}")
+            logger.warning("refresh: WG credential %s failed: %s", cred.name, e)
+
+    if not all_broadcasts and cred_errors:
+        # All credentials failed — surface the error so the UI doesn't show
+        # an empty success.
+        raise HTTPException(status_code=502, detail="; ".join(cred_errors))
+
+    meta = wg.build_broadcast_meta(all_webinars)
     unknown_meta = {"webinar_id": None, "webinar_title": "", "internal_title": ""}
 
     total = 0
-    for b in broadcasts:
+    for b in all_broadcasts:
         broadcast_id = str(b.get("id") or "")
         if not broadcast_id:
             continue
@@ -489,7 +712,9 @@ async def refresh_broadcasts(db: AsyncSession = Depends(get_db)):
 
 @router.post("/webinargeek/webinars/{broadcast_id}/sync", response_model=SyncResponse)
 async def sync_broadcast_subscribers(broadcast_id: str, db: AsyncSession = Depends(get_db)):
-    api_key = await _get_api_key(db)
+    # Pick the credential by following Webinar → credential. Falls back to
+    # 'default' if no webinar links this broadcast yet.
+    api_key = await _resolve_api_key_for_broadcast(db, broadcast_id)
     wb = (await db.execute(
         select(WebinarGeekWebinar).where(WebinarGeekWebinar.broadcast_id == broadcast_id)
     )).scalar_one_or_none()
@@ -510,7 +735,6 @@ async def sync_broadcast_subscribers(broadcast_id: str, db: AsyncSession = Depen
 
 @router.post("/webinargeek/webinars/sync-all", response_model=SyncAllResponse)
 async def sync_all_broadcasts(db: AsyncSession = Depends(get_db)):
-    api_key = await _get_api_key(db)
     rows = (await db.execute(select(WebinarGeekWebinar))).scalars().all()
 
     errors: list[str] = []
@@ -519,6 +743,7 @@ async def sync_all_broadcasts(db: AsyncSession = Depends(get_db)):
     now = datetime.now(timezone.utc)
     for r in rows:
         try:
+            api_key = await _resolve_api_key_for_broadcast(db, r.broadcast_id)
             count = await _sync_one_broadcast(db, api_key, r.broadcast_id)
             r.last_synced_at = now
             synced += 1
