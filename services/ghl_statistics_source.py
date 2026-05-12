@@ -12,8 +12,10 @@ Attendance / watch time comes from webinargeek_subscribers joined by email.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -42,6 +44,64 @@ LEAD_QUALITY_BAD_DQ = "Bad / DQ"
 
 # Qualified = any lead_quality except DQ (per user: qualified = shows with a non-DQ quality)
 QUALIFIED_SET = {LEAD_QUALITY_GREAT, LEAD_QUALITY_OK, LEAD_QUALITY_BARELY}
+
+
+# ---------------------------------------------------------------------------
+# Webinars-list TTL cache
+# ---------------------------------------------------------------------------
+# A single Statistics page load fans out ~50 concurrent per-webinar fetches
+# (one HTTP request each — each instantiates a fresh GoHighLevelStatisticsSource,
+# so instance-level caching wouldn't help). _load_webinars() is the same eager
+# load every time and only needs to be fresh-ish to discover newly-created
+# webinars. We cache the result process-wide for a short TTL and guard the
+# refresh with an asyncio lock so the first burst on a cold cache fires one
+# load, not N.
+
+_WEBINARS_CACHE_TTL_SECONDS = 30.0
+_webinars_cache: tuple[float, list[Webinar]] | None = None
+_webinars_cache_lock = asyncio.Lock()
+
+
+async def _get_cached_webinars() -> list[Webinar]:
+    global _webinars_cache
+    now = time.monotonic()
+    cached = _webinars_cache
+    if cached is not None and (now - cached[0]) < _WEBINARS_CACHE_TTL_SECONDS:
+        return cached[1]
+    async with _webinars_cache_lock:
+        # Re-check after acquiring the lock: another coroutine may have just
+        # populated the cache while we waited.
+        cached = _webinars_cache
+        now = time.monotonic()
+        if cached is not None and (now - cached[0]) < _WEBINARS_CACHE_TTL_SECONDS:
+            return cached[1]
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Webinar)
+                .options(
+                    selectinload(Webinar.assignments)
+                    .selectinload(WebinarListAssignment.bucket),
+                    selectinload(Webinar.assignments)
+                    .selectinload(WebinarListAssignment.sender),
+                    selectinload(Webinar.assignments)
+                    .selectinload(WebinarListAssignment.title_copy),
+                    selectinload(Webinar.assignments)
+                    .selectinload(WebinarListAssignment.desc_copy),
+                )
+                .order_by(Webinar.number.asc())
+            )
+            webinars = list(result.unique().scalars().all())
+        _webinars_cache = (time.monotonic(), webinars)
+        return webinars
+
+
+def invalidate_webinars_cache() -> None:
+    """Drop the cached webinars list. Call after any mutation that affects
+    Planning rows (assignments, copy, buckets, senders) when the caller
+    needs the Statistics page to see the change without waiting for the TTL.
+    Currently nothing wires this up — TTL is the only refresh path."""
+    global _webinars_cache
+    _webinars_cache = None
 
 
 # ---------------------------------------------------------------------------
@@ -363,22 +423,7 @@ class GoHighLevelStatisticsSource:
         return out
 
     async def _load_webinars(self) -> list[Webinar]:
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(Webinar)
-                .options(
-                    selectinload(Webinar.assignments)
-                    .selectinload(WebinarListAssignment.bucket),
-                    selectinload(Webinar.assignments)
-                    .selectinload(WebinarListAssignment.sender),
-                    selectinload(Webinar.assignments)
-                    .selectinload(WebinarListAssignment.title_copy),
-                    selectinload(Webinar.assignments)
-                    .selectinload(WebinarListAssignment.desc_copy),
-                )
-                .order_by(Webinar.number.asc())
-            )
-            return list(result.unique().scalars().all())
+        return await _get_cached_webinars()
 
     @staticmethod
     def _date_windows(webinars: list[Webinar]) -> dict[str, tuple[Any, Any]]:
@@ -545,13 +590,23 @@ class GoHighLevelStatisticsSource:
         planned_webinar_ids: list[str] = [wid] + list(sibling_ids)
 
         # ── Nonjoiners ────────────────────────────────────────────────
-        r = await db.execute(sa_text("""
-            SELECT COUNT(DISTINCT g.ghl_contact_id)
-            FROM ghl_contact g
-            WHERE g.calendar_webinar_series_non_joiners ~* :re
-               OR g.calendar_invite_response_prefix_non_joiners ~* :re
-        """).bindparams(re=series_nj_re))
-        nj_count = int(r.scalar() or 0)
+        # Prefer the cached value populated during run_webinar_sync (cheap
+        # PK lookup). Fall back to the live regex scan when the cache is
+        # missing — first page load before any sync runs, or a newly-added
+        # webinar whose sync hasn't been triggered yet.
+        cached_nj = (await db.execute(
+            select(GHLWebinarStats.nj_count).where(GHLWebinarStats.webinar_number == N)
+        )).scalar()
+        if cached_nj is not None:
+            nj_count = int(cached_nj)
+        else:
+            r = await db.execute(sa_text("""
+                SELECT COUNT(DISTINCT g.ghl_contact_id)
+                FROM ghl_contact g
+                WHERE g.calendar_webinar_series_non_joiners ~* :re
+                   OR g.calendar_invite_response_prefix_non_joiners ~* :re
+            """).bindparams(re=series_nj_re))
+            nj_count = int(r.scalar() or 0)
 
         # Nonjoiners row metrics
         nj_metrics: dict[str, float | None] = {

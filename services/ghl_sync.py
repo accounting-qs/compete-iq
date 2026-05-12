@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text as sa_text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -529,6 +529,44 @@ async def _upsert_webinar_stats(webinar_number: int, gcal_invited_count: int) ->
         await db.commit()
 
 
+async def _refresh_webinar_nj_count(webinar_number: int) -> int:
+    """Recompute the per-webinar non-joiner count from local ghl_contact and
+    upsert it onto ghl_webinar_stats.nj_count.
+
+    Matches the regex used by services.ghl_statistics_source's
+    _synthetic_special_rows so the cached value lines up exactly with the
+    live query it replaces. Cheap with the trgm GIN indexes from migration
+    038; without them this would full-scan ghl_contact.
+    """
+    series_re = rf"\ye{webinar_number}\y"
+    async with AsyncSessionLocal() as db:
+        r = await db.execute(
+            sa_text(
+                "SELECT COUNT(DISTINCT g.ghl_contact_id) "
+                "FROM ghl_contact g "
+                "WHERE g.calendar_webinar_series_non_joiners ~* :re "
+                "   OR g.calendar_invite_response_prefix_non_joiners ~* :re"
+            ).bindparams(re=series_re)
+        )
+        nj_count = int(r.scalar() or 0)
+
+        stmt = pg_insert(GHLWebinarStats).values(
+            webinar_number=webinar_number,
+            nj_count=nj_count,
+            fetched_at=datetime.now(timezone.utc),
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["webinar_number"],
+            set_={
+                "nj_count": stmt.excluded.nj_count,
+                "fetched_at": stmt.excluded.fetched_at,
+            },
+        )
+        await db.execute(stmt)
+        await db.commit()
+    return nj_count
+
+
 async def run_webinar_sync(
     webinar_number: int,
     trigger: SyncTrigger = "manual",
@@ -588,6 +626,18 @@ async def run_webinar_sync(
                 batch_kind="contact_batch",
             )
             await _heartbeat(state)
+
+            # Cache non-joiner count from the freshly-upserted ghl_contact
+            # rows so the Statistics page can skip its per-webinar regex
+            # scan. Failure is non-fatal — the read path falls back to a
+            # live query when nj_count is NULL.
+            try:
+                nj = await _refresh_webinar_nj_count(webinar_number)
+                logger.info("W%d nj_count = %d", webinar_number, nj)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                state.errors.append({"type": "nj_count", "error": str(exc)[:500]})
 
             # Opportunities are only pulled during the narrow phase — deep
             # is contact-only and would just waste GHL quota.

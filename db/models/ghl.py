@@ -116,6 +116,7 @@ class GHLWebinarStats(Base):
 
     webinar_number: Mapped[int] = mapped_column(Integer, primary_key=True)
     gcal_invited_count: Mapped[Optional[int]] = mapped_column(Integer)
+    nj_count: Mapped[Optional[int]] = mapped_column(Integer)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

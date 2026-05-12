@@ -849,12 +849,20 @@ export function StatisticsPage() {
       }
       if (cancelled) return;
 
-      // "Passed" = webinar date <= today (local). Webinar.date is a SQL Date
-      // column, so the API returns "YYYY-MM-DD"; lexicographic compare matches
-      // chronological order. Webinars without a date can't be "passed".
+      // "Passed" = webinar date < today, OR date == today AND status == "sent".
+      // Webinar.date is a SQL Date column, so the API returns "YYYY-MM-DD";
+      // lexicographic compare matches chronological order. A webinar dated
+      // today that hasn't been marked sent yet hasn't actually run — its
+      // stats would all be zeros, so we drop it to save the per-webinar
+      // fetch.
       const today = new Date();
       const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-      summaries = summaries.filter((s) => s.date != null && s.date <= todayStr);
+      summaries = summaries.filter((s) => {
+        if (s.date == null) return false;
+        if (s.date < todayStr) return true;
+        if (s.date > todayStr) return false;
+        return (s.status ?? "").toLowerCase() === "sent";
+      });
 
       // Sort: date desc (most-recently-passed first), variant label asc so
       // sibling A/B variants stay grouped together.
