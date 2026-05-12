@@ -825,14 +825,15 @@ export function StatisticsPage() {
   /* ── Progressive load ───────────────────────────────────────────────
    * 1. Fetch the lightweight list — renders parent rows immediately with
    *    "—" cells for unloaded metrics.
-   * 2. Drop future webinars (date > today): they have no real data yet.
-   * 3. Fetch the single most-recently-passed webinar first (priority 1) so
-   *    the auto-expanded row fills in with nothing competing for I/O.
-   * 4. Stream the rest in date-desc order with concurrency 4 — each
-   *    replaces its placeholder as it arrives. */
+   * 2. Drop future webinars (date > today, or today-but-not-yet-sent):
+   *    they have no real data yet.
+   * 3. Stream the rest in date-desc order through a pool of CONCURRENCY
+   *    workers — each replaces its placeholder as it arrives. No priority
+   *    head: per-webinar fetches are I/O-bound and 30+s each, so running
+   *    one alone first just delays the rest of the page by that much. The
+   *    auto-expanded row is the first one the pool picks up anyway. */
   useEffect(() => {
     let cancelled = false;
-    const PRIORITY = 1;
     const CONCURRENCY = 4;
 
     async function load() {
@@ -906,15 +907,10 @@ export function StatisticsPage() {
         }
       };
 
-      // Priority head — the single most-recently-passed webinar loads alone
-      // first so nothing competes for I/O with the auto-expanded row.
-      await Promise.all(
-        summaries.slice(0, PRIORITY).map((s) => loadOne(s.id, s.webinarId)),
-      );
-      if (cancelled) return;
-
-      // Worker pool for the rest.
-      const queue = summaries.slice(PRIORITY);
+      // Worker pool — all visible webinars fire in parallel from the start
+      // (subject to CONCURRENCY). The auto-expanded most-recently-passed
+      // webinar is at queue[0] so it's the first one a worker picks up.
+      const queue = [...summaries];
       const workers = Array.from(
         { length: Math.min(CONCURRENCY, queue.length) },
         async () => {
