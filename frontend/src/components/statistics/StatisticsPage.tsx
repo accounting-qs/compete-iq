@@ -825,13 +825,14 @@ export function StatisticsPage() {
   /* ── Progressive load ───────────────────────────────────────────────
    * 1. Fetch the lightweight list — renders parent rows immediately with
    *    "—" cells for unloaded metrics.
-   * 2. Fetch the latest 2 webinars in parallel (priority: the auto-expanded
-   *    latest webinar populates fast).
-   * 3. Stream the remaining webinars with concurrency 4 — each replaces its
-   *    placeholder as it arrives. */
+   * 2. Drop future webinars (date > today): they have no real data yet.
+   * 3. Fetch the single most-recently-passed webinar first (priority 1) so
+   *    the auto-expanded row fills in with nothing competing for I/O.
+   * 4. Stream the rest in date-desc order with concurrency 4 — each
+   *    replaces its placeholder as it arrives. */
   useEffect(() => {
     let cancelled = false;
-    const PRIORITY = 2;
+    const PRIORITY = 1;
     const CONCURRENCY = 4;
 
     async function load() {
@@ -848,9 +849,19 @@ export function StatisticsPage() {
       }
       if (cancelled) return;
 
-      // Sort: number desc, then variant label asc so siblings group together.
+      // "Passed" = webinar date <= today (local). Webinar.date is a SQL Date
+      // column, so the API returns "YYYY-MM-DD"; lexicographic compare matches
+      // chronological order. Webinars without a date can't be "passed".
+      const today = new Date();
+      const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+      summaries = summaries.filter((s) => s.date != null && s.date <= todayStr);
+
+      // Sort: date desc (most-recently-passed first), variant label asc so
+      // sibling A/B variants stay grouped together.
       summaries.sort((a, b) => {
-        if (b.number !== a.number) return b.number - a.number;
+        const da = a.date ?? "";
+        const db = b.date ?? "";
+        if (db !== da) return db.localeCompare(da);
         return (a.variantLabel ?? "").localeCompare(b.variantLabel ?? "");
       });
       setMeta(metaResp);
@@ -887,8 +898,8 @@ export function StatisticsPage() {
         }
       };
 
-      // Priority pair — kicks off in parallel so the user sees the
-      // auto-expanded latest webinar fill in fast.
+      // Priority head — the single most-recently-passed webinar loads alone
+      // first so nothing competes for I/O with the auto-expanded row.
       await Promise.all(
         summaries.slice(0, PRIORITY).map((s) => loadOne(s.id, s.webinarId)),
       );
