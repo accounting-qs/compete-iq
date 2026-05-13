@@ -508,6 +508,10 @@ async def run_sync(sync_type: SyncType, trigger: SyncTrigger = "scheduled") -> s
             )
             await _heartbeat(state)
 
+            # New data → existing cached statistics responses are stale.
+            from services.statistics import invalidate_stats_cache
+            invalidate_stats_cache()
+
             return state.run_id
 
 
@@ -652,6 +656,10 @@ async def run_webinar_sync(
                     batch_kind="opp_batch",
                 )
                 await _heartbeat(state)
+
+            # New data → existing cached statistics responses are stale.
+            from services.statistics import invalidate_stats_cache
+            invalidate_stats_cache()
 
             return state.run_id
 

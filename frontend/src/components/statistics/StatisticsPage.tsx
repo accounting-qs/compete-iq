@@ -832,15 +832,18 @@ export function StatisticsPage() {
    *    "—" cells for unloaded metrics.
    * 2. Drop future webinars (date > today, or today-but-not-yet-sent):
    *    they have no real data yet.
-   * 3. Fetch the most-recently-passed webinar alone first, then resume the
-   *    pool for the rest. Per-webinar queries are ~30s each, so this adds
-   *    ~30s to total wall time — but it guarantees the latest webinar
-   *    (the auto-expanded row, the one you care about) populates before
-   *    older ones, instead of whichever happens to finish first on the
-   *    backend. */
+   * 3. Load webinars one at a time, date-desc (latest first). Per-webinar
+   *    queries are ~30s each; loading them in parallel overloads the DB
+   *    and pushes individual requests past Render's ~100s edge timeout,
+   *    which manifests as CORS errors in the browser. Serial loading is
+   *    slower in total wall time but every request completes, and the
+   *    backend response cache makes subsequent loads fast anyway. */
   useEffect(() => {
     let cancelled = false;
-    const CONCURRENCY = 4;
+    // 1 = strictly serial after the priority head. Do not raise without
+    // verifying the deployed backend's per-webinar latency × concurrency
+    // stays under Render's edge timeout (~100s).
+    const CONCURRENCY = 1;
 
     async function load() {
       let summaries: ApiStatisticsWebinarSummary[];

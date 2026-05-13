@@ -7,6 +7,7 @@ Later GoHighLevel integration swaps only the source behind the same interface.
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -349,6 +350,32 @@ async def get_statistics_webinar_list(source: str = "auto") -> list[dict[str, An
     ]
 
 
+# ---------------------------------------------------------------------------
+# Per-webinar response cache
+# ---------------------------------------------------------------------------
+# The per-webinar fetch is dominated by a hash join between contacts (1M rows)
+# and ghl_contact (720k rows) on LOWER(email), which costs ~25-30s end-to-end.
+# The result only changes when a sync runs, so caching the assembled response
+# for a few minutes turns repeat visits / page refreshes / per-row retries from
+# 30s into a memory lookup. invalidate_stats_cache() is called from
+# run_webinar_sync after it finishes upserting fresh contact/opportunity data.
+#
+# Caveat: process-local. Render typically runs one uvicorn worker per service,
+# so this is fine; if you ever scale to multiple workers, hits on a different
+# worker won't benefit until that worker's first compute populates its own
+# cache. Multi-worker invalidation is a TODO if it ever comes up.
+
+_STATS_CACHE_TTL_SECONDS = 600.0  # 10 minutes
+_stats_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+
+
+def invalidate_stats_cache() -> None:
+    """Drop every cached per-webinar response. Call after a sync run finishes
+    so the next read sees the new numbers instead of waiting for the TTL.
+    No-op if the cache is already empty."""
+    _stats_cache.clear()
+
+
 async def get_statistics_webinar_one(
     source: str,
     webinar_id: str,
@@ -357,18 +384,34 @@ async def get_statistics_webinar_one(
 
     Variant-aware: each A/B variant has its own UUID, so callers can
     address them unambiguously.
+
+    Cached: hits return immediately; misses compute and populate the cache.
+    `None` results (unknown webinar_id) are not cached — they're cheap to
+    recompute and we don't want a typo to be remembered for 10 minutes.
     """
+    cache_key = (source, webinar_id)
+    cached = _stats_cache.get(cache_key)
+    if cached is not None and (time.monotonic() - cached[0]) < _STATS_CACHE_TTL_SECONDS:
+        return cached[1]
+
     use_ghl = source != "workbook"
     source_label = "ghl" if use_ghl else "workbook_mock"
+    result: dict[str, Any] | None = None
     if use_ghl:
         from services.ghl_statistics_source import GoHighLevelStatisticsSource
         src = GoHighLevelStatisticsSource()
         raw = await src.get_raw_webinar(webinar_id)
-        return _process_raw_webinar(raw, source_label) if raw else None
-    # Workbook source predates variants — single row per number, so the
-    # synthetic webinar id encodes only the number.
-    raw_all = await _workbook_source.get_raw_webinars()
-    for w in raw_all:
-        if f"stat-w{w['number']}" == webinar_id:
-            return _process_raw_webinar(w, source_label)
-    return None
+        if raw:
+            result = _process_raw_webinar(raw, source_label)
+    else:
+        # Workbook source predates variants — single row per number, so the
+        # synthetic webinar id encodes only the number.
+        raw_all = await _workbook_source.get_raw_webinars()
+        for w in raw_all:
+            if f"stat-w{w['number']}" == webinar_id:
+                result = _process_raw_webinar(w, source_label)
+                break
+
+    if result is not None:
+        _stats_cache[cache_key] = (time.monotonic(), result)
+    return result
