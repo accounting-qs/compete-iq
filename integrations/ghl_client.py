@@ -227,8 +227,14 @@ class GHLClient:
                                method, path, response.status_code, attempt + 1, _RETRY_MAX_ATTEMPTS, delay)
                 await asyncio.sleep(delay)
                 continue
-            # 4xx (not 429) — don't retry
-            response.raise_for_status()
+            # 4xx (not 429) — don't retry. Include the response body in the
+            # raised error so the sync's error_details JSONB captures what
+            # GHL actually said (e.g. "filters[1].field is required"), not
+            # just the bare status code.
+            body_preview = response.text[:500] if response.text else ""
+            raise RuntimeError(
+                f"GHL {method} {path} HTTP {response.status_code}: {body_preview}"
+            )
         # Unreachable: loop either returns or raises
         raise RuntimeError(f"GHL request exhausted retries: {last_exc}")
 
@@ -396,15 +402,26 @@ class GHLClient:
             "pageLimit": self._page_size,
         }
 
-        combined: list[dict] = list(filters) if filters else []
+        # GHL /contacts/search rejects the request with 422 if the top-level
+        # `filters` array mixes shapes (e.g. a group object alongside a flat
+        # filter object). Incremental sync hits this because the narrow
+        # webinar filter is a single OR-group and we used to append a flat
+        # `dateUpdated gt` filter next to it. Wrap them together in an AND
+        # group so the top level is uniformly group-shaped.
+        date_filter: dict | None = None
         if updated_after:
-            combined.append({
+            date_filter = {
                 "field": "dateUpdated",
                 "operator": "gt",
                 "value": int(updated_after.timestamp() * 1000),
-            })
-        if combined:
-            body["filters"] = combined
+            }
+
+        if filters and date_filter:
+            body["filters"] = [{"group": "AND", "filters": [*filters, date_filter]}]
+        elif filters:
+            body["filters"] = list(filters)
+        elif date_filter:
+            body["filters"] = [date_filter]
 
         search_after: list | None = None
         page = 0
