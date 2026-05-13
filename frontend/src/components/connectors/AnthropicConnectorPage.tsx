@@ -93,7 +93,7 @@ export function AnthropicConnectorPage() {
         <h2 className="text-sm font-bold text-zinc-900 dark:text-zinc-100 mb-1">Anthropic API</h2>
         <p className="text-xs text-zinc-500 mb-4">
           Powers the chat assistant on the Statistics page. The assistant uses{" "}
-          <span className="font-mono">claude-opus-4-7</span> with adaptive thinking and prompt caching
+          <span className="font-mono">claude-sonnet-4-6</span> by default (switchable to <span className="font-mono">claude-opus-4-7</span> from the chat panel), with adaptive thinking and prompt caching
           so follow-up questions about the same loaded data are cheap. Your key is stored on the
           server and used only for chat requests.
         </p>

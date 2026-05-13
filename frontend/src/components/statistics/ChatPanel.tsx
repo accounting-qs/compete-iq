@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { streamChat, type ChatTurn, type ChatUsage } from "@/lib/chat";
+import { streamChat, type ChatTurn, type ChatUsage, type ChatModelKey } from "@/lib/chat";
 import type { ApiStatisticsWebinar } from "@/lib/api";
 
 interface Props {
@@ -52,6 +52,34 @@ function readSavedWidth(): number {
 // since any half-streamed turn is stale by the next mount.
 const TURNS_STORAGE_KEY = "stats-chat-panel-turns";
 
+// Model picker — persists across reloads. Keys mirror the backend's
+// CHAT_MODELS allowlist; unknown values fall through to the server default.
+const MODEL_STORAGE_KEY = "stats-chat-panel-model";
+const DEFAULT_MODEL: ChatModelKey = "sonnet";
+const MODEL_OPTIONS: { key: ChatModelKey; label: string; tooltip: string }[] = [
+  {
+    key: "sonnet",
+    label: "Sonnet 4.6",
+    tooltip: "Fast and ~40% cheaper. The default — handles comparisons, trend questions, and explanations well.",
+  },
+  {
+    key: "opus",
+    label: "Opus 4.7",
+    tooltip: "Slower and pricier, but stronger at deep multi-step synthesis and subtle pattern-finding across many webinars.",
+  },
+];
+
+function readSavedModel(): ChatModelKey {
+  if (typeof window === "undefined") return DEFAULT_MODEL;
+  try {
+    const raw = window.localStorage.getItem(MODEL_STORAGE_KEY);
+    if (raw === "sonnet" || raw === "opus") return raw;
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_MODEL;
+}
+
 function readSavedTurns(): Turn[] {
   if (typeof window === "undefined") return [];
   try {
@@ -74,8 +102,20 @@ export function ChatPanel({ open, onClose, webinars }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [width, setWidth] = useState<number>(readSavedWidth);
   const [resizing, setResizing] = useState(false);
+  const [model, setModel] = useState<ChatModelKey>(readSavedModel);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // Persist the model choice so it sticks across reloads. The backend
+  // validates against an allowlist, so a stale value here just falls back
+  // to the server default rather than crashing.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(MODEL_STORAGE_KEY, model);
+    } catch {
+      /* ignore */
+    }
+  }, [model]);
 
   // Persist the conversation on every change so closing/reopening the panel
   // — or refreshing the whole page — keeps it. We strip the transient
@@ -174,6 +214,7 @@ export function ChatPanel({ open, onClose, webinars }: Props) {
       await streamChat({
         messages: history,
         statsContext: webinars,
+        model,
         signal: controller.signal,
         onEvent: (event) => {
           if (event.type === "delta") {
@@ -277,7 +318,40 @@ export function ChatPanel({ open, onClose, webinars }: Props) {
           </div>
           <div>
             <div className="text-sm font-bold text-zinc-900 dark:text-zinc-100">Stats Assistant</div>
-            <div className="text-[10px] text-zinc-500">claude-opus-4-7 · sees {webinars.length} webinar{webinars.length === 1 ? "" : "s"}</div>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              {/* Segmented model picker — two pill-shaped buttons. Disabled
+                   while a request is in flight so swapping mid-stream can't
+                   silently switch models for an already-running response. */}
+              <div
+                role="radiogroup"
+                aria-label="Choose model"
+                className="inline-flex rounded-md bg-zinc-100 dark:bg-zinc-800/60 p-0.5 text-[10px] font-semibold"
+              >
+                {MODEL_OPTIONS.map((opt) => {
+                  const active = model === opt.key;
+                  return (
+                    <button
+                      key={opt.key}
+                      role="radio"
+                      aria-checked={active}
+                      disabled={sending}
+                      onClick={() => setModel(opt.key)}
+                      title={opt.tooltip}
+                      className={`px-2 py-0.5 rounded transition-colors ${
+                        active
+                          ? "bg-white dark:bg-zinc-700 text-violet-600 dark:text-violet-400 shadow-sm"
+                          : "text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+                      } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <span className="text-[10px] text-zinc-500">
+                · sees {webinars.length} webinar{webinars.length === 1 ? "" : "s"}
+              </span>
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-1">

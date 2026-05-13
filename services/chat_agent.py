@@ -28,10 +28,33 @@ from db.models import ConnectorCredential
 
 logger = logging.getLogger(__name__)
 
-CHAT_MODEL = "claude-opus-4-7"
 ANTHROPIC_PROVIDER = "anthropic"
 DEFAULT_CREDENTIAL_NAME = "default"
-MAX_TOKENS = 4096
+
+# Allowlist for the model picker in the chat UI. Keys are stable values the
+# frontend sends; values are the actual Anthropic model IDs. New models go
+# here so the validator and the UI label table stay in sync.
+CHAT_MODELS: dict[str, str] = {
+    "sonnet": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-7",
+}
+DEFAULT_MODEL_KEY = "sonnet"
+CHAT_MODEL = CHAT_MODELS[DEFAULT_MODEL_KEY]  # kept for back-compat / smoke tests
+
+def resolve_model_id(model_key: str | None) -> str:
+    """Map a UI selection to an Anthropic model ID, falling back to the
+    default rather than 400-ing on an unknown value — operator's chat UX
+    shouldn't be blocked by a stale localStorage value."""
+    if model_key and model_key in CHAT_MODELS:
+        return CHAT_MODELS[model_key]
+    return CHAT_MODELS[DEFAULT_MODEL_KEY]
+
+
+# Adaptive thinking needs headroom for both the thinking phase and the
+# visible answer. 32K is comfortable on both Sonnet (64K cap) and Opus 4.7
+# (128K cap) without being wasteful. Bump if very long-form analytical
+# replies start truncating.
+MAX_TOKENS = 32000
 
 
 # Stable preamble — frozen bytes so the system-prompt prefix caches cleanly.
@@ -139,6 +162,7 @@ async def stream_chat_response(
     *,
     messages: list[dict[str, Any]],
     stats_context: Any,
+    model_key: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream Claude's reply as a sequence of structured events:
 
@@ -147,19 +171,29 @@ async def stream_chat_response(
       {"type": "done"}                      # turn complete
       {"type": "error", "message": "..."}   # something went wrong
 
-    The endpoint serializes these as SSE.
+    The endpoint serializes these as SSE. `model_key` is one of CHAT_MODELS
+    keys; unknown values fall back to DEFAULT_MODEL_KEY rather than erroring.
     """
     system_blocks = build_system_blocks(stats_context)
+    model_id = resolve_model_id(model_key)
 
     try:
+        # Track whether any visible text actually streamed. Adaptive thinking
+        # can spend the entire output budget on (silent) thinking blocks and
+        # never emit a text delta — without this guard the user just sees an
+        # empty bubble and assumes the chat is broken.
+        text_streamed = False
+
         async with client.messages.stream(
-            model=CHAT_MODEL,
+            model=model_id,
             max_tokens=MAX_TOKENS,
             thinking={"type": "adaptive"},
             system=system_blocks,
             messages=messages,
         ) as stream:
             async for text in stream.text_stream:
+                if text:
+                    text_streamed = True
                 yield {"type": "delta", "text": text}
 
             final = await stream.get_final_message()
@@ -174,6 +208,33 @@ async def stream_chat_response(
                         "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", 0) or 0,
                     },
                 }
+
+            stop_reason = getattr(final, "stop_reason", None)
+            if stop_reason == "max_tokens" and not text_streamed:
+                # Thinking phase consumed the entire output budget — surface
+                # a clear error so the user knows to ask something narrower
+                # rather than staring at a blank reply.
+                yield {
+                    "type": "error",
+                    "message": (
+                        "Claude spent the entire response budget on thinking and ran out before "
+                        "writing its answer. Try a narrower question (one webinar / one metric at "
+                        "a time), or contact the dev to raise the max_tokens limit."
+                    ),
+                }
+                return
+            if not text_streamed:
+                # Caught the rarer case: stream finished with no text and a
+                # non-max_tokens stop reason (e.g. refusal, end_turn with no
+                # output). Still better than silent emptiness.
+                yield {
+                    "type": "error",
+                    "message": (
+                        f"Claude returned no text content (stop_reason={stop_reason or 'unknown'}). "
+                        "Try rephrasing the question."
+                    ),
+                }
+                return
         yield {"type": "done"}
     except anthropic.RateLimitError:
         yield {"type": "error", "message": "Rate limit hit — wait a moment and try again."}

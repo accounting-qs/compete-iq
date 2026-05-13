@@ -36,6 +36,9 @@ class ChatRequest(BaseModel):
     # through to Claude as a cached system block, so determinism matters
     # (frontend serializes with sorted keys / no timestamps).
     stats_context: list[dict] | dict
+    # Optional model picker — "sonnet" | "opus". Unknown / missing values
+    # fall back to the default; see services.chat_agent.resolve_model_id.
+    model: str | None = None
 
 
 def _sse(payload: dict) -> bytes:
@@ -80,6 +83,7 @@ async def post_chat_message(
                 client,
                 messages=api_messages,
                 stats_context=body.stats_context,
+                model_key=body.model,
             ):
                 yield _sse(event)
         except Exception as exc:

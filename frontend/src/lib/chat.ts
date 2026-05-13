@@ -33,9 +33,18 @@ export type ChatEvent =
   | { type: "done" }
   | { type: "error"; message: string };
 
+/** Supported model picker values — kept in sync with the backend's
+ * CHAT_MODELS allowlist in services/chat_agent.py. The backend falls back
+ * to its default on unknown values, so this type is for UI state only. */
+export type ChatModelKey = "sonnet" | "opus";
+
 export interface SendChatParams {
   messages: ChatTurn[];
   statsContext: unknown;
+  /** Which model to use this turn. The backend resolves the key to the
+   * actual Anthropic model ID; missing/unknown values fall back to the
+   * server-side default (currently "sonnet"). */
+  model?: ChatModelKey;
   onEvent: (event: ChatEvent) => void;
   signal?: AbortSignal;
 }
@@ -43,7 +52,7 @@ export interface SendChatParams {
 /** Stream a chat response. Resolves when the backend sends `done` or `error`,
  * or when the signal aborts. The caller drives UI state via `onEvent`. */
 export async function streamChat(params: SendChatParams): Promise<void> {
-  const { messages, statsContext, onEvent, signal } = params;
+  const { messages, statsContext, model, onEvent, signal } = params;
 
   const res = await fetch(`${API_URL}/chat/messages`, {
     method: "POST",
@@ -52,7 +61,7 @@ export async function streamChat(params: SendChatParams): Promise<void> {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
     },
-    body: JSON.stringify({ messages, stats_context: statsContext }),
+    body: JSON.stringify({ messages, stats_context: statsContext, model }),
     signal,
   });
 
