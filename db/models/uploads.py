@@ -94,6 +94,10 @@ class Contact(Base):
     country: Mapped[Optional[str]] = mapped_column(Text)
     database_provider: Mapped[Optional[str]] = mapped_column(Text)
     scraper: Mapped[Optional[str]] = mapped_column(Text)
+    enrichment_classification: Mapped[Optional[str]] = mapped_column(Text)
+    primary_identity: Mapped[Optional[str]] = mapped_column(Text)
+    characteristic: Mapped[Optional[str]] = mapped_column(Text)
+    sector: Mapped[Optional[str]] = mapped_column(Text)
 
     # Custom fields stored as JSONB
     custom_data: Mapped[Optional[dict]] = mapped_column(JSONB, server_default="{}")

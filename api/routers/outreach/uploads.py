@@ -913,6 +913,7 @@ async def _process_csv_import(
             "bucket_name", "classification", "confidence", "reasoning", "cost",
             "status", "lead_list_name", "segment_name", "created_date",
             "industry", "employee_range", "country", "database_provider", "scraper",
+            "enrichment_classification", "primary_identity", "characteristic", "sector",
         }
         FLOAT_FIELDS = {"confidence", "cost"}
         is_custom_list = upload_mode == "custom_list"
