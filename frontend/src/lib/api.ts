@@ -1876,3 +1876,116 @@ export async function backfillBlocklist(): Promise<BlocklistBackfillResult> {
   }
   return res.json();
 }
+
+/* ── Calendar Uploads (per-webinar Added-to-Calendar CSVs) ─────────────── */
+
+export interface ApiCalendarUpload {
+  id: string;
+  webinar_id: string;
+  webinar_label: string | null;
+  file_name: string;
+  status: string;
+  progress: number;
+  has_responses: boolean;
+  total_rows: number;
+  processed_rows: number;
+  matched_count: number;
+  unmatched_count: number;
+  error_message: string | null;
+  created_at: string | null;
+  completed_at: string | null;
+}
+
+export interface CalendarConfirmResponse {
+  id: string;
+  file_name: string;
+  webinar_id: string;
+  total_rows: number;
+  has_responses: boolean;
+  headers: string[];
+  preview_rows: string[][];
+}
+
+export async function fetchCalendarUploads(): Promise<{ uploads: ApiCalendarUpload[] }> {
+  const res = await fetch(`${API_URL}/calendar-uploads`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to fetch calendar uploads");
+  return res.json();
+}
+
+export async function presignCalendarUpload(
+  filename: string,
+  fileSize: number,
+  webinarId: string,
+): Promise<{ upload_id: string; signed_url: string; storage_path: string }> {
+  const res = await fetch(`${API_URL}/calendar-uploads/presign`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ filename, file_size: fileSize, webinar_id: webinarId }),
+  });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to get signed URL"));
+  return res.json();
+}
+
+export async function confirmCalendarUpload(
+  uploadId: string,
+  fileSize: number,
+): Promise<CalendarConfirmResponse> {
+  const res = await fetch(`${API_URL}/calendar-uploads/${uploadId}/confirm`, {
+    method: "POST",
+    headers: jsonHeaders(),
+    body: JSON.stringify({ file_size: fileSize }),
+  });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to confirm calendar upload"));
+  return res.json();
+}
+
+export async function startCalendarImport(uploadId: string): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/calendar-uploads/${uploadId}/import`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to start calendar import"));
+  return res.json();
+}
+
+export async function fetchCalendarUploadStatus(uploadId: string): Promise<ApiCalendarUpload> {
+  const res = await fetch(`${API_URL}/calendar-uploads/${uploadId}/status`, { headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to fetch calendar upload status");
+  return res.json();
+}
+
+export async function pauseCalendarImport(uploadId: string): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/calendar-uploads/${uploadId}/pause`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to pause calendar import");
+  return res.json();
+}
+
+export async function resumeCalendarImport(uploadId: string): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/calendar-uploads/${uploadId}/resume`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to resume calendar import");
+  return res.json();
+}
+
+export async function cancelCalendarImport(uploadId: string): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${API_URL}/calendar-uploads/${uploadId}/cancel`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to cancel calendar import");
+  return res.json();
+}
+
+export async function deleteCalendarUpload(uploadId: string): Promise<{ id: string; deleted: boolean }> {
+  const res = await fetch(`${API_URL}/calendar-uploads/${uploadId}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "Failed to delete calendar upload"));
+  return res.json();
+}

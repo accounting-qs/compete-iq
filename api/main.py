@@ -20,7 +20,7 @@ async def lifespan(app: FastAPI):
     try:
         from sqlalchemy import select, update
         from sqlalchemy.ext.asyncio import AsyncSession
-        from db.models import UploadHistory
+        from db.models import UploadHistory, WebinarCalendarUpload
         async with AsyncSession(engine) as db:
             result = await db.execute(
                 select(UploadHistory).where(UploadHistory.status.in_(["processing", "paused"]))
@@ -31,6 +31,17 @@ async def lifespan(app: FastAPI):
                     u.status = "failed"
                     u.error_message = "Server restarted during import. Please retry."
                     logger.warning(f"Marked stale import {u.id} ({u.file_name}) as failed")
+                await db.commit()
+
+            cal_result = await db.execute(
+                select(WebinarCalendarUpload).where(WebinarCalendarUpload.status.in_(["processing", "paused"]))
+            )
+            cal_stale = cal_result.scalars().all()
+            if cal_stale:
+                for u in cal_stale:
+                    u.status = "failed"
+                    u.error_message = "Server restarted during import. Please retry."
+                    logger.warning(f"Marked stale calendar import {u.id} ({u.file_name}) as failed")
                 await db.commit()
     except Exception as e:
         logger.error(f"Startup recovery failed: {e}")
@@ -71,7 +82,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from api.routers import webhook, competitors, ads, generation, outreach, statistics, connectors, ghl_sync, blocklist, chat
+from api.routers import webhook, competitors, ads, generation, outreach, statistics, connectors, ghl_sync, blocklist, chat, calendar_uploads
 from api.routers.costs import router as costs_router
 
 app.include_router(webhook.router, prefix="/webhook", tags=["webhook"])
@@ -85,6 +96,7 @@ app.include_router(connectors.router, prefix="/connectors", tags=["connectors"])
 app.include_router(ghl_sync.router, prefix="/ghl-sync", tags=["ghl-sync"])
 app.include_router(blocklist.router, prefix="/blocklist", tags=["blocklist"])
 app.include_router(chat.router, prefix="/chat", tags=["chat"])
+app.include_router(calendar_uploads.router, prefix="/calendar-uploads", tags=["calendar-uploads"])
 
 # Phase 1b — uncomment as built:
 # from api.routers import outputs, brain, monitoring
