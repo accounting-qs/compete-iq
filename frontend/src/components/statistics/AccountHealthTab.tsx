@@ -117,7 +117,37 @@ export function AccountHealthTab() {
   );
 }
 
+type MetricKey = "sent" | "yes" | "maybe" | "ym" | "pct";
+type SortKey = "account" | `metric:${string}:${MetricKey}`;
+type SortDir = "asc" | "desc";
+
+function metricValue(cell: ApiAccountHealthCell | undefined, metric: MetricKey): number {
+  const sent = cell?.total_sent ?? 0;
+  const yes = cell?.yes ?? 0;
+  const maybe = cell?.maybe ?? 0;
+  const ym = yes + maybe;
+  switch (metric) {
+    case "sent": return sent;
+    case "yes": return yes;
+    case "maybe": return maybe;
+    case "ym": return ym;
+    case "pct": return sent > 0 ? ym / sent : -1;
+  }
+}
+
 function HealthTable({ data }: { data: CalendarAccountHealthResponse }) {
+  const [sortKey, setSortKey] = useState<SortKey>("account");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  const handleSort = (key: SortKey) => {
+    if (key === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir(key === "account" ? "asc" : "desc");
+    }
+  };
+
   // Per-webinar maxes used for cell shading (computed from the per-account
   // values, never the TOTAL row itself).
   const maxByWebinar = useMemo(() => {
@@ -139,6 +169,26 @@ function HealthTable({ data }: { data: CalendarAccountHealthResponse }) {
     }
     return m;
   }, [data]);
+
+  const sortedAccounts = useMemo(() => {
+    const arr = [...data.accounts];
+    arr.sort((a, b) => {
+      let cmp = 0;
+      if (sortKey === "account") {
+        cmp = a.calendar_account.localeCompare(b.calendar_account);
+      } else {
+        const parts = sortKey.split(":");
+        const webinarId = parts[1];
+        const metric = parts[2] as MetricKey;
+        cmp = metricValue(a.per_webinar[webinarId], metric) -
+              metricValue(b.per_webinar[webinarId], metric);
+        // Stable tiebreak by calendar_account so flips are deterministic
+        if (cmp === 0) cmp = a.calendar_account.localeCompare(b.calendar_account);
+      }
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return arr;
+  }, [data.accounts, sortKey, sortDir]);
 
   return (
     <div className="flex-1 min-h-0 overflow-auto px-6 pb-6">
@@ -204,8 +254,14 @@ function HealthTable({ data }: { data: CalendarAccountHealthResponse }) {
 
             {/* Row 3: column headers */}
             <tr>
-              <th className={`${L_ACC} ${Z_HEADER} ${BG_HEADER} ${W_ACC} px-3 py-2 text-left font-semibold text-zinc-700 dark:text-zinc-300 border-b border-zinc-200 dark:border-zinc-800`}>
-                Calendar_account
+              <th
+                onClick={() => handleSort("account")}
+                className={`${L_ACC} ${Z_HEADER} ${BG_HEADER} ${W_ACC} px-3 py-2 text-left font-semibold text-zinc-700 dark:text-zinc-300 border-b border-zinc-200 dark:border-zinc-800 cursor-pointer select-none hover:bg-zinc-100 dark:hover:bg-zinc-800`}
+              >
+                <span className="inline-flex items-center gap-1">
+                  Calendar_account
+                  <SortArrow active={sortKey === "account"} dir={sortDir} />
+                </span>
               </th>
               <th className={`${L_WS} ${Z_HEADER} ${BG_HEADER} ${W_WS} px-3 py-2 text-left font-semibold text-zinc-500 dark:text-zinc-500 border-b border-zinc-200 dark:border-zinc-800`}>
                 Workspace acc
@@ -214,13 +270,19 @@ function HealthTable({ data }: { data: CalendarAccountHealthResponse }) {
                 Notes
               </th>
               {data.webinars.map((w) => (
-                <MetricHeaders key={w.id} />
+                <MetricHeaders
+                  key={w.id}
+                  webinarId={w.id}
+                  sortKey={sortKey}
+                  sortDir={sortDir}
+                  onSort={handleSort}
+                />
               ))}
             </tr>
           </thead>
 
           <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
-            {data.accounts.map((acc) => (
+            {sortedAccounts.map((acc) => (
               <AccountRow
                 key={acc.calendar_account}
                 row={acc}
@@ -235,18 +297,53 @@ function HealthTable({ data }: { data: CalendarAccountHealthResponse }) {
   );
 }
 
-function MetricHeaders() {
-  const cell =
-    "px-2 py-1.5 text-right font-semibold text-zinc-500 dark:text-zinc-500 border-b border-zinc-200 dark:border-zinc-800";
+function SortArrow({ active, dir }: { active: boolean; dir: SortDir }) {
+  if (!active) {
+    return <span className="text-zinc-400 dark:text-zinc-600 text-[10px]">↕</span>;
+  }
+  return (
+    <span className="text-violet-500 text-[10px]">{dir === "asc" ? "↑" : "↓"}</span>
+  );
+}
+
+function MetricHeaders({
+  webinarId,
+  sortKey,
+  sortDir,
+  onSort,
+}: {
+  webinarId: string;
+  sortKey: SortKey;
+  sortDir: SortDir;
+  onSort: (key: SortKey) => void;
+}) {
+  const base =
+    "px-2 py-1.5 text-right font-semibold text-zinc-500 dark:text-zinc-500 border-b border-zinc-200 dark:border-zinc-800 cursor-pointer select-none hover:bg-zinc-100 dark:hover:bg-zinc-800";
   const last =
-    "px-2 py-1.5 text-right font-semibold text-zinc-500 dark:text-zinc-500 border-b border-r border-zinc-200 dark:border-zinc-800";
+    "px-2 py-1.5 text-right font-semibold text-zinc-500 dark:text-zinc-500 border-b border-r border-zinc-200 dark:border-zinc-800 cursor-pointer select-none hover:bg-zinc-100 dark:hover:bg-zinc-800";
+
+  const cells: { metric: MetricKey; label: string; className: string }[] = [
+    { metric: "sent", label: "Total Sent", className: base },
+    { metric: "yes", label: "Yes", className: base },
+    { metric: "maybe", label: "Maybe", className: base },
+    { metric: "ym", label: "Yes+Maybe", className: base },
+    { metric: "pct", label: "Yes+Maybe %", className: last },
+  ];
+
   return (
     <>
-      <th className={cell}>Total Sent</th>
-      <th className={cell}>Yes</th>
-      <th className={cell}>Maybe</th>
-      <th className={cell}>Yes+Maybe</th>
-      <th className={last}>Yes+Maybe %</th>
+      {cells.map(({ metric, label, className }) => {
+        const key = `metric:${webinarId}:${metric}` as SortKey;
+        const active = sortKey === key;
+        return (
+          <th key={metric} onClick={() => onSort(key)} className={className}>
+            <span className="inline-flex items-center justify-end gap-1">
+              {label}
+              <SortArrow active={active} dir={sortDir} />
+            </span>
+          </th>
+        );
+      })}
     </>
   );
 }

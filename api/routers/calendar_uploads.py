@@ -229,12 +229,15 @@ async def calendar_account_health(
     equals COUNT(DISTINCT email) — same result as the source spreadsheet's
     COUNTUNIQUEIFS without needing DISTINCT.
 
-    Every webinar belonging to the user is returned (newest first by number);
-    `has_upload` flags whether any calendar upload exists for that webinar.
+    Only webinars whose date is on or before today are included (future
+    webinars haven't happened yet, so there's nothing to report). Newest
+    first by number; `has_upload` flags whether any calendar upload exists
+    for that webinar.
     """
+    today = datetime.now(tz=timezone.utc).date()
     wresult = await db.execute(
         select(Webinar)
-        .where(Webinar.user_id == LLOYD_USER_ID)
+        .where(Webinar.user_id == LLOYD_USER_ID, Webinar.date <= today)
         .order_by(Webinar.number.desc(), Webinar.id.asc())
     )
     webinars = wresult.scalars().all()
