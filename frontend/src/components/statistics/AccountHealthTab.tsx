@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import {
   fetchCalendarAccountHealth,
   type ApiAccountHealthCell,
@@ -9,14 +9,18 @@ import {
   type CalendarAccountHealthResponse,
 } from "@/lib/api";
 
-/* ─── Sticky identity columns (Calendar_account / Workspace acc / Notes) ─ */
+/* ─── Sticky identity columns (Calendar_account / Workspace acc / Notes)
+ *   plus the first webinar's Total Sent column (frozen during horizontal
+ *   scroll so the latest webinar's headline number stays visible).        */
 const W_ACC = "w-[260px] min-w-[260px] max-w-[260px]";
 const W_WS = "w-[140px] min-w-[140px] max-w-[140px]";
 const W_NOTE = "w-[140px] min-w-[140px] max-w-[140px]";
+const W_FIRST_TOT = "w-[80px] min-w-[80px] max-w-[80px]";
 
 const L_ACC = "sticky left-0";
 const L_WS = "sticky left-[260px]";
 const L_NOTE = "sticky left-[400px]";
+const L_FIRST_TOT = "sticky left-[540px]";
 
 const Z_HEADER = "z-30";
 const Z_ROW = "z-20";
@@ -26,6 +30,8 @@ const BG_TOTAL = "bg-emerald-500/5 dark:bg-emerald-500/10";
 const BG_LIST = "bg-white dark:bg-zinc-950";
 
 const W_METRIC = "min-w-[80px] px-2 py-1.5 text-right tabular-nums";
+// Thicker right border on the frozen Total Sent column to mark the freeze edge
+const FREEZE_EDGE = "border-r-2 border-zinc-300 dark:border-zinc-700";
 
 function fmtInt(n: number): string {
   return n.toLocaleString();
@@ -206,23 +212,35 @@ function HealthTable({ data }: { data: CalendarAccountHealthResponse }) {
               <th className={`${L_NOTE} ${Z_HEADER} ${BG_HEADER} ${W_NOTE} px-3 py-2 text-left font-semibold text-zinc-700 dark:text-zinc-300 border-b border-r border-zinc-200 dark:border-zinc-800`}>
                 &nbsp;
               </th>
-              {data.webinars.map((w) => (
-                <th
-                  key={w.id}
-                  colSpan={5}
-                  className={`${BG_HEADER} px-2 py-2 text-center font-semibold border-b border-r border-zinc-200 dark:border-zinc-800`}
-                  title={w.has_upload ? w.label : `${w.label} — no calendar upload yet`}
-                >
-                  <div className="flex items-center justify-center gap-1.5">
-                    <span className="text-zinc-800 dark:text-zinc-200">{w.label}</span>
-                    {!w.has_upload && (
-                      <span className="px-1 py-px text-[9px] font-semibold rounded bg-amber-500/15 text-amber-500 border border-amber-500/30 uppercase tracking-wider">
-                        no upload
-                      </span>
-                    )}
-                  </div>
-                </th>
-              ))}
+              {data.webinars.map((w, idx) => {
+                const isFirst = idx === 0;
+                const labelCellCls = isFirst
+                  ? `${L_FIRST_TOT} ${Z_HEADER} ${BG_HEADER} ${W_FIRST_TOT} px-2 py-2 text-left font-semibold border-b border-zinc-200 dark:border-zinc-800 ${FREEZE_EDGE}`
+                  : `${BG_HEADER} ${W_FIRST_TOT} px-2 py-2 text-left font-semibold border-b border-zinc-200 dark:border-zinc-800`;
+                const fillerCls = `${BG_HEADER} px-2 py-2 border-b border-zinc-200 dark:border-zinc-800`;
+                const lastFillerCls = `${BG_HEADER} px-2 py-2 border-b border-r border-zinc-200 dark:border-zinc-800`;
+                return (
+                  <Fragment key={w.id}>
+                    <th
+                      className={labelCellCls}
+                      title={w.has_upload ? w.label : `${w.label} — no calendar upload yet`}
+                    >
+                      <div className="flex items-center gap-1.5 whitespace-nowrap">
+                        <span className="text-zinc-800 dark:text-zinc-200">{w.label}</span>
+                        {!w.has_upload && (
+                          <span className="px-1 py-px text-[9px] font-semibold rounded bg-amber-500/15 text-amber-500 border border-amber-500/30 uppercase tracking-wider">
+                            no upload
+                          </span>
+                        )}
+                      </div>
+                    </th>
+                    <th className={fillerCls}>&nbsp;</th>
+                    <th className={fillerCls}>&nbsp;</th>
+                    <th className={fillerCls}>&nbsp;</th>
+                    <th className={lastFillerCls}>&nbsp;</th>
+                  </Fragment>
+                );
+              })}
             </tr>
 
             {/* Row 2: TOTAL aggregates across all accounts */}
@@ -234,7 +252,7 @@ function HealthTable({ data }: { data: CalendarAccountHealthResponse }) {
               >
                 TOTAL
               </th>
-              {data.webinars.map((w) => {
+              {data.webinars.map((w, idx) => {
                 const t = data.totals[w.id];
                 const sent = t?.total_sent ?? 0;
                 const yes = t?.yes ?? 0;
@@ -247,6 +265,7 @@ function HealthTable({ data }: { data: CalendarAccountHealthResponse }) {
                     yes={yes}
                     maybe={maybe}
                     ym={ym}
+                    isFirst={idx === 0}
                   />
                 );
               })}
@@ -269,13 +288,14 @@ function HealthTable({ data }: { data: CalendarAccountHealthResponse }) {
               <th className={`${L_NOTE} ${Z_HEADER} ${BG_HEADER} ${W_NOTE} px-3 py-2 text-left font-semibold text-zinc-500 dark:text-zinc-500 border-b border-r border-zinc-200 dark:border-zinc-800`}>
                 Notes
               </th>
-              {data.webinars.map((w) => (
+              {data.webinars.map((w, idx) => (
                 <MetricHeaders
                   key={w.id}
                   webinarId={w.id}
                   sortKey={sortKey}
                   sortDir={sortDir}
                   onSort={handleSort}
+                  isFirst={idx === 0}
                 />
               ))}
             </tr>
@@ -311,19 +331,24 @@ function MetricHeaders({
   sortKey,
   sortDir,
   onSort,
+  isFirst,
 }: {
   webinarId: string;
   sortKey: SortKey;
   sortDir: SortDir;
   onSort: (key: SortKey) => void;
+  isFirst: boolean;
 }) {
   const base =
     "px-2 py-1.5 text-right font-semibold text-zinc-500 dark:text-zinc-500 border-b border-zinc-200 dark:border-zinc-800 cursor-pointer select-none hover:bg-zinc-100 dark:hover:bg-zinc-800";
   const last =
     "px-2 py-1.5 text-right font-semibold text-zinc-500 dark:text-zinc-500 border-b border-r border-zinc-200 dark:border-zinc-800 cursor-pointer select-none hover:bg-zinc-100 dark:hover:bg-zinc-800";
+  const sentSticky = isFirst
+    ? `${L_FIRST_TOT} ${Z_HEADER} ${BG_HEADER} ${W_FIRST_TOT} ${FREEZE_EDGE} ${base}`
+    : base;
 
   const cells: { metric: MetricKey; label: string; className: string }[] = [
-    { metric: "sent", label: "Total Sent", className: base },
+    { metric: "sent", label: "Total Sent", className: sentSticky },
     { metric: "yes", label: "Yes", className: base },
     { metric: "maybe", label: "Maybe", className: base },
     { metric: "ym", label: "Yes+Maybe", className: base },
@@ -353,17 +378,22 @@ function TotalGroup({
   yes,
   maybe,
   ym,
+  isFirst,
 }: {
   sent: number;
   yes: number;
   maybe: number;
   ym: number;
+  isFirst: boolean;
 }) {
   const c = `${W_METRIC} ${BG_TOTAL} border-b border-zinc-200 dark:border-zinc-800 font-semibold tabular-nums`;
   const last = `${W_METRIC} ${BG_TOTAL} border-b border-r border-zinc-200 dark:border-zinc-800 font-semibold tabular-nums`;
+  const sentSticky = isFirst
+    ? `${L_FIRST_TOT} ${Z_HEADER} ${BG_TOTAL} ${W_FIRST_TOT} ${FREEZE_EDGE} px-2 py-1.5 text-right border-b border-zinc-200 dark:border-zinc-800 font-semibold tabular-nums`
+    : c;
   return (
     <>
-      <th className={c}>{fmtInt(sent)}</th>
+      <th className={sentSticky}>{fmtInt(sent)}</th>
       <th className={c}>{fmtInt(yes)}</th>
       <th className={c}>{fmtInt(maybe)}</th>
       <th className={c}>{fmtInt(ym)}</th>
@@ -392,11 +422,12 @@ function AccountRow({
       <td className={`${L_NOTE} ${Z_ROW} ${BG_LIST} ${W_NOTE} px-3 py-1.5 text-zinc-500 dark:text-zinc-500 border-r border-zinc-200 dark:border-zinc-800`}>
         &nbsp;
       </td>
-      {webinars.map((w) => (
+      {webinars.map((w, idx) => (
         <MetricGroup
           key={w.id}
           cell={row.per_webinar[w.id]}
           max={maxByWebinar[w.id]}
+          isFirst={idx === 0}
         />
       ))}
     </tr>
@@ -406,9 +437,11 @@ function AccountRow({
 function MetricGroup({
   cell,
   max,
+  isFirst,
 }: {
   cell: ApiAccountHealthCell | undefined;
   max: { sent: number; yes: number; maybe: number; ym: number };
+  isFirst: boolean;
 }) {
   const sent = cell?.total_sent ?? 0;
   const yes = cell?.yes ?? 0;
@@ -418,10 +451,13 @@ function MetricGroup({
 
   const base = `${W_METRIC} text-zinc-700 dark:text-zinc-300`;
   const lastBase = `${base} border-r border-zinc-200 dark:border-zinc-800`;
+  const sentClass = isFirst
+    ? `${L_FIRST_TOT} ${Z_ROW} ${BG_LIST} ${W_FIRST_TOT} ${FREEZE_EDGE} px-2 py-1.5 text-right tabular-nums text-zinc-700 dark:text-zinc-300`
+    : base;
 
   return (
     <>
-      <td className={`${base}`}>{sent > 0 ? fmtInt(sent) : <span className="text-zinc-500">0</span>}</td>
+      <td className={sentClass}>{sent > 0 ? fmtInt(sent) : <span className="text-zinc-500">0</span>}</td>
       <td className={`${base} ${shade(yes, max.yes)}`}>
         {yes > 0 ? fmtInt(yes) : <span className="text-zinc-500">0</span>}
       </td>
