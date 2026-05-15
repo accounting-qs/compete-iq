@@ -37,3 +37,7 @@ node_modules/
 # Alembic
 migrations/versions/__pycache__/
 .dummydata/
+
+#Local Assets
+local_assets/
+lloyd-database-transfer/
