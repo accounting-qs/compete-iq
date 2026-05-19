@@ -59,6 +59,22 @@ async def _get_api_key_default(db) -> str | None:
 
 
 async def _resolve_api_key_for_broadcast(db, broadcast_id: str) -> str:
+    # Authoritative: the credential that surfaced this broadcast on the
+    # last refresh (stamped on webinargeek_webinars.credential_id).
+    wb_cred = (await db.execute(
+        select(ConnectorCredential)
+        .join(WebinarGeekWebinar, WebinarGeekWebinar.credential_id == ConnectorCredential.id)
+        .where(
+            WebinarGeekWebinar.broadcast_id == broadcast_id,
+            ConnectorCredential.provider == PROVIDER,
+        )
+        .limit(1)
+    )).scalar_one_or_none()
+    if wb_cred:
+        return wb_cred.api_key
+
+    # Legacy fallback: variant mapping on the Webinar row (for broadcasts
+    # cached before migration 042, before credential_id was stamped).
     cred_row = (await db.execute(
         select(ConnectorCredential)
         .join(Webinar, Webinar.webinargeek_credential_id == ConnectorCredential.id)
