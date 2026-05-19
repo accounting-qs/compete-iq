@@ -408,12 +408,17 @@ class GHLClient:
         # webinar filter is a single OR-group and we used to append a flat
         # `dateUpdated gt` filter next to it. Wrap them together in an AND
         # group so the top level is uniformly group-shaped.
+        #
+        # `dateUpdated` only accepts the Smart-List operator vocabulary
+        # (range/not_range/last/next/eq/...); `gt` was rejected with 422
+        # after a GHL API change. `range` with an open-ended `{gte}` value
+        # is the documented way to express "updated after X".
         date_filter: dict | None = None
         if updated_after:
             date_filter = {
                 "field": "dateUpdated",
-                "operator": "gt",
-                "value": int(updated_after.timestamp() * 1000),
+                "operator": "range",
+                "value": {"gte": int(updated_after.timestamp() * 1000)},
             }
 
         if filters and date_filter:
